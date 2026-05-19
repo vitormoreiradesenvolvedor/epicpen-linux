@@ -401,7 +401,18 @@ class ToolbarWindow(QWidget):
         if self._presentation_mode:
             self._hide_timer.stop()
             self.setWindowOpacity(1.0)
+        # Wayland: tenta puxar foco de teclado quando o mouse entra na toolbar.
+        # Sem isso, Tab nunca chega aqui porque o foco fica na última janela ativa.
+        self.raise_()
+        self.activateWindow()
         super().enterEvent(event)
+
+    def wheelEvent(self, event):
+        # Scroll do mouse sobre a toolbar alterna o modo de desenho.
+        # Funciona sem depender de foco de teclado.
+        self._btn_toggle.toggle()
+        self._toggle_drawing(self._btn_toggle.isChecked())
+        event.accept()
 
     def leaveEvent(self, event):
         if self._presentation_mode:
