@@ -1,9 +1,12 @@
+import os
 from PyQt6.QtWidgets import QWidget, QApplication
 from PyQt6.QtCore import Qt, QPoint, QRect, QTimer
-from PyQt6.QtGui import QPainter, QPen, QColor, QPainterPath, QBrush, QCursor
+from PyQt6.QtGui import QPainter, QPen, QColor, QPainterPath, QBrush, QCursor, QPixmap, QFont
+
+from screenshot import grab_region, _IS_WAYLAND
 
 DIAMETER = 220
-OFFSET_Y = 30    # distância vertical abaixo do cursor
+OFFSET_Y = 30
 
 
 class MagnifierWindow(QWidget):
@@ -11,20 +14,25 @@ class MagnifierWindow(QWidget):
 
     def __init__(self):
         super().__init__()
-        self._zoom = 3
+        self._zoom   = 3
         self._cursor_pos = QPoint(0, 0)
+        self._last_px: QPixmap | None = None
+        self._unavailable = False   # True se nenhum método de captura funcionar
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
+            | Qt.WindowType.WindowDoesNotAcceptFocus
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setFixedSize(DIAMETER, DIAMETER)
 
+        # Wayland: grim tem latência maior, reduz para ~15fps para não travar
+        interval = 66 if _IS_WAYLAND else 16
         self._timer = QTimer(self)
-        self._timer.setInterval(16)   # ~60 fps
+        self._timer.setInterval(interval)
         self._timer.timeout.connect(self._tick)
 
         self.hide()
@@ -44,69 +52,69 @@ class MagnifierWindow(QWidget):
 
     # ── Internal ──────────────────────────────────────────────────────────
 
-    def _tick(self):
-        pos = QCursor.pos()
-        if pos != self._cursor_pos:
-            self._cursor_pos = pos
-            self._reposition(pos)
-            self.update()
-
     def _screen_at(self, pos: QPoint):
-        """Retorna o QScreen que contém o ponto, ou o primário como fallback."""
         for s in QApplication.screens():
             if s.geometry().contains(pos):
                 return s
         return QApplication.primaryScreen()
+
+    def _tick(self):
+        pos = QCursor.pos()
+        if pos == self._cursor_pos:
+            return
+        self._cursor_pos = pos
+        self._reposition(pos)
+
+        cap_size = DIAMETER // self._zoom
+        cx, cy = pos.x(), pos.y()
+        x = cx - cap_size // 2
+        y = cy - cap_size // 2
+
+        px = grab_region(x, y, cap_size, cap_size)
+        if px is None:
+            if not self._unavailable:
+                self._unavailable = True
+                self.update()
+        else:
+            self._unavailable = False
+            self._last_px = px.scaled(
+                DIAMETER, DIAMETER,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.update()
 
     def _reposition(self, cursor: QPoint):
         screen = self._screen_at(cursor).geometry()
         x = cursor.x() - DIAMETER // 2
         y = cursor.y() + OFFSET_Y
 
-        # Evita sair do monitor atual
-        x = max(screen.left(), min(x, screen.right() - DIAMETER))
-        y = max(screen.top(), min(y, screen.bottom() - DIAMETER))
+        x = max(screen.left(),  min(x, screen.right()  - DIAMETER))
+        y = max(screen.top(),   min(y, screen.bottom() - DIAMETER))
 
-        # Se a lupa iria cobrir o cursor, põe acima
         if y + DIAMETER > screen.bottom():
             y = cursor.y() - DIAMETER - OFFSET_Y
 
         self.move(x, y)
 
+    # ── Painting ──────────────────────────────────────────────────────────
+
     def paintEvent(self, _event):
-        screen = self._screen_at(self._cursor_pos)
-        cap_size = DIAMETER // self._zoom
-        cx, cy = self._cursor_pos.x(), self._cursor_pos.y()
-
-        capture_rect = QRect(
-            cx - cap_size // 2,
-            cy - cap_size // 2,
-            cap_size,
-            cap_size,
-        )
-        # grabWindow com WId=0 captura o desktop virtual inteiro, funciona com multi-monitor
-        raw = screen.grabWindow(
-            0,
-            capture_rect.x(), capture_rect.y(),
-            capture_rect.width(), capture_rect.height(),
-        )
-        scaled = raw.scaled(
-            DIAMETER, DIAMETER,
-            Qt.AspectRatioMode.IgnoreAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # Clip circular
         clip = QPainterPath()
         clip.addEllipse(0, 0, DIAMETER, DIAMETER)
         painter.setClipPath(clip)
-        painter.drawPixmap(0, 0, scaled)
+
+        if self._unavailable or self._last_px is None:
+            self._draw_unavailable(painter)
+        else:
+            painter.drawPixmap(0, 0, self._last_px)
+
         painter.setClipping(False)
 
-        # Borda branca com sombra interna sutil
+        # Borda branca
         painter.setPen(QPen(QColor(255, 255, 255, 220), 3))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawEllipse(2, 2, DIAMETER - 4, DIAMETER - 4)
@@ -119,13 +127,24 @@ class MagnifierWindow(QWidget):
         mid = DIAMETER // 2
         painter.setPen(QPen(QColor(255, 50, 50, 200), 1))
         painter.drawLine(mid - 12, mid, mid - 4, mid)
-        painter.drawLine(mid + 4, mid, mid + 12, mid)
+        painter.drawLine(mid + 4,  mid, mid + 12, mid)
         painter.drawLine(mid, mid - 12, mid, mid - 4)
-        painter.drawLine(mid, mid + 4, mid, mid + 12)
+        painter.drawLine(mid, mid + 4,  mid, mid + 12)
 
-        # Ponto central
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(QColor(255, 50, 50, 200)))
         painter.drawEllipse(mid - 2, mid - 2, 4, 4)
 
         painter.end()
+
+    def _draw_unavailable(self, painter: QPainter):
+        """Mostra mensagem quando captura não está disponível no Wayland."""
+        painter.fillRect(0, 0, DIAMETER, DIAMETER, QColor(30, 30, 40, 220))
+        painter.setPen(QColor(255, 255, 255, 200))
+        font = QFont("Sans Serif", 9)
+        painter.setFont(font)
+        painter.drawText(
+            QRect(10, DIAMETER // 2 - 30, DIAMETER - 20, 60),
+            Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
+            "Lupa indisponível\nInstale o 'grim'\npara Wayland",
+        )
