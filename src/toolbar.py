@@ -1,9 +1,11 @@
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+    QWidget, QVBoxLayout, QPushButton,
     QSlider, QColorDialog, QLabel, QFrame
 )
 from PyQt6.QtCore import Qt, QPoint
 from PyQt6.QtGui import QColor, QIcon, QPixmap, QPainter, QBrush
+
+from magnifier import MagnifierWindow
 
 
 class ToolbarWindow(QWidget):
@@ -15,6 +17,7 @@ class ToolbarWindow(QWidget):
         self._drag_pos: QPoint | None = None
         self._current_color = QColor("#FF0000")
         self._drawing_active = True
+        self._magnifier = MagnifierWindow()
 
         self._setup_window()
         self._build_ui()
@@ -27,14 +30,13 @@ class ToolbarWindow(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedWidth(56)
-        self.move(20, 200)
+        self.move(20, 150)
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 8, 4, 8)
         layout.setSpacing(4)
 
-        # Container com fundo semi-transparente
         self._container = QFrame(self)
         self._container.setObjectName("toolbar")
         self._container.setStyleSheet("""
@@ -54,7 +56,10 @@ class ToolbarWindow(QWidget):
                 min-height: 36px;
             }
             QPushButton:hover { background: rgba(255,255,255,30); }
-            QPushButton:checked { background: rgba(255,255,255,60); border: 1px solid rgba(255,255,255,80); }
+            QPushButton:checked {
+                background: rgba(255,255,255,60);
+                border: 1px solid rgba(255,255,255,80);
+            }
             QSlider::groove:vertical {
                 background: rgba(255,255,255,40);
                 width: 4px; border-radius: 2px;
@@ -71,22 +76,24 @@ class ToolbarWindow(QWidget):
         inner.setContentsMargins(6, 8, 6, 8)
         inner.setSpacing(4)
 
-        def btn(icon: str, tooltip: str) -> QPushButton:
+        def btn(icon: str, tooltip: str, checkable: bool = True) -> QPushButton:
             b = QPushButton(icon)
             b.setToolTip(tooltip)
-            b.setCheckable(True)
+            b.setCheckable(checkable)
             return b
 
-        self._btn_pen = btn("✏️", "Caneta (P)")
-        self._btn_hl  = btn("🖊", "Marcador (H)")
-        self._btn_line = btn("╱", "Linha (L)")
-        self._btn_rect = btn("▭", "Retângulo (R)")
-        self._btn_circle = btn("○", "Elipse (E)")
-        self._btn_eraser = btn("🧹", "Borracha (X)")
+        # ── Ferramentas de desenho ────────────────────────────────────────
+        self._btn_pen     = btn("✏️", "Caneta (P)")
+        self._btn_hl      = btn("🖊", "Marcador (H)")
+        self._btn_line    = btn("╱",  "Linha (L)")
+        self._btn_rect    = btn("▭",  "Retângulo (R)")
+        self._btn_circle  = btn("○",  "Elipse (E)")
+        self._btn_eraser  = btn("🧹", "Borracha (X)")
+        self._btn_laser   = btn("🔴", "Ponteiro Laser (S)")
 
         self._tool_buttons = [
             self._btn_pen, self._btn_hl, self._btn_line,
-            self._btn_rect, self._btn_circle, self._btn_eraser,
+            self._btn_rect, self._btn_circle, self._btn_eraser, self._btn_laser,
         ]
         self._btn_pen.setChecked(True)
 
@@ -99,14 +106,11 @@ class ToolbarWindow(QWidget):
         self._btn_rect.clicked.connect(lambda: self._select_tool("rect"))
         self._btn_circle.clicked.connect(lambda: self._select_tool("circle"))
         self._btn_eraser.clicked.connect(lambda: self._select_tool("eraser"))
+        self._btn_laser.clicked.connect(lambda: self._select_tool("laser"))
 
-        # Separador
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("background: rgba(255,255,255,30); max-height: 1px;")
-        inner.addWidget(sep)
+        self._add_separator(inner)
 
-        # Seletor de cor
+        # ── Cor ──────────────────────────────────────────────────────────
         self._color_btn = QPushButton()
         self._color_btn.setToolTip("Cor (C)")
         self._color_btn.setCheckable(False)
@@ -114,11 +118,11 @@ class ToolbarWindow(QWidget):
         self._color_btn.clicked.connect(self._pick_color)
         inner.addWidget(self._color_btn)
 
-        # Slider de tamanho
-        size_label = QLabel("⬤")
-        size_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        size_label.setStyleSheet("color: white; font-size: 8px;")
-        inner.addWidget(size_label)
+        # ── Tamanho ───────────────────────────────────────────────────────
+        size_lbl = QLabel("⬤")
+        size_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        size_lbl.setStyleSheet("color: white; font-size: 8px;")
+        inner.addWidget(size_lbl)
 
         self._size_slider = QSlider(Qt.Orientation.Vertical)
         self._size_slider.setRange(1, 20)
@@ -127,44 +131,56 @@ class ToolbarWindow(QWidget):
         self._size_slider.valueChanged.connect(self._overlay.set_size)
         inner.addWidget(self._size_slider, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.Shape.HLine)
-        sep2.setStyleSheet("background: rgba(255,255,255,30); max-height: 1px;")
-        inner.addWidget(sep2)
+        self._add_separator(inner)
 
-        # Ações
-        btn_undo = QPushButton("↩")
-        btn_undo.setCheckable(False)
-        btn_undo.setToolTip("Desfazer (Ctrl+Z)")
+        # ── Ações ─────────────────────────────────────────────────────────
+        btn_undo = btn("↩", "Desfazer (Ctrl+Z)", False)
         btn_undo.clicked.connect(self._overlay.undo)
         inner.addWidget(btn_undo)
 
-        btn_redo = QPushButton("↪")
-        btn_redo.setCheckable(False)
-        btn_redo.setToolTip("Refazer (Ctrl+Y)")
+        btn_redo = btn("↪", "Refazer (Ctrl+Y)", False)
         btn_redo.clicked.connect(self._overlay.redo)
         inner.addWidget(btn_redo)
 
-        btn_clear = QPushButton("🗑")
-        btn_clear.setCheckable(False)
-        btn_clear.setToolTip("Limpar tela (Del)")
+        btn_clear = btn("🗑", "Limpar tela (Del)", False)
         btn_clear.clicked.connect(self._overlay.clear)
         inner.addWidget(btn_clear)
 
-        sep3 = QFrame()
-        sep3.setFrameShape(QFrame.Shape.HLine)
-        sep3.setStyleSheet("background: rgba(255,255,255,30); max-height: 1px;")
-        inner.addWidget(sep3)
+        self._add_separator(inner)
 
-        self._btn_toggle = QPushButton("🖱")
-        self._btn_toggle.setCheckable(True)
-        self._btn_toggle.setToolTip("Pausar desenho (Tab)")
+        # ── Lupa ─────────────────────────────────────────────────────────
+        self._btn_magnifier = btn("🔍", "Lupa (M)")
+        self._btn_magnifier.clicked.connect(self._toggle_magnifier)
+        inner.addWidget(self._btn_magnifier)
+
+        # Zoom slider para a lupa (aparece somente quando ativa)
+        self._zoom_slider = QSlider(Qt.Orientation.Vertical)
+        self._zoom_slider.setRange(2, 6)
+        self._zoom_slider.setValue(3)
+        self._zoom_slider.setFixedHeight(60)
+        self._zoom_slider.setVisible(False)
+        self._zoom_slider.valueChanged.connect(self._magnifier.set_zoom)
+        inner.addWidget(self._zoom_slider, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        self._add_separator(inner)
+
+        # ── Pausar ───────────────────────────────────────────────────────
+        self._btn_toggle = btn("🖱", "Pausar desenho (Tab)")
         self._btn_toggle.clicked.connect(self._toggle_drawing)
         inner.addWidget(self._btn_toggle)
 
         layout.addWidget(self._container)
 
-    # ── Tool / color helpers ──────────────────────────────────────────────
+    # ── Helpers ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _add_separator(layout):
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("background: rgba(255,255,255,30); max-height: 1px;")
+        layout.addWidget(sep)
+
+    # ── Tool / color ──────────────────────────────────────────────────────
 
     def _select_tool(self, tool: str):
         for b in self._tool_buttons:
@@ -173,6 +189,7 @@ class ToolbarWindow(QWidget):
             "pen": self._btn_pen, "highlighter": self._btn_hl,
             "line": self._btn_line, "rect": self._btn_rect,
             "circle": self._btn_circle, "eraser": self._btn_eraser,
+            "laser": self._btn_laser,
         }
         btn_map[tool].setChecked(True)
         self._overlay.set_tool(tool)
@@ -194,12 +211,17 @@ class ToolbarWindow(QWidget):
         p.end()
         self._color_btn.setIcon(QIcon(px))
 
+    def _toggle_magnifier(self, checked: bool):
+        self._magnifier.set_active(checked)
+        self._zoom_slider.setVisible(checked)
+        self.adjustSize()
+
     def _toggle_drawing(self, checked: bool):
         self._drawing_active = not checked
         self._overlay.set_active(self._drawing_active)
         self._btn_toggle.setText("🖱" if checked else "✏️")
 
-    # ── Drag window ───────────────────────────────────────────────────────
+    # ── Drag ──────────────────────────────────────────────────────────────
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -212,31 +234,37 @@ class ToolbarWindow(QWidget):
     def mouseReleaseEvent(self, _event):
         self._drag_pos = None
 
-    # ── Keyboard shortcuts ────────────────────────────────────────────────
+    # ── Keyboard ──────────────────────────────────────────────────────────
 
     def keyPressEvent(self, event):
         key = event.key()
-        if key == Qt.Key.Key_P:
-            self._select_tool("pen")
-        elif key == Qt.Key.Key_H:
-            self._select_tool("highlighter")
-        elif key == Qt.Key.Key_L:
-            self._select_tool("line")
-        elif key == Qt.Key.Key_R:
-            self._select_tool("rect")
-        elif key == Qt.Key.Key_E:
-            self._select_tool("circle")
-        elif key == Qt.Key.Key_X:
-            self._select_tool("eraser")
-        elif key == Qt.Key.Key_C:
-            self._pick_color()
-        elif key == Qt.Key.Key_Delete:
-            self._overlay.clear()
-        elif key == Qt.Key.Key_Tab:
-            self._btn_toggle.toggle()
-            self._toggle_drawing(self._btn_toggle.isChecked())
-        elif event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+        mod = event.modifiers()
+
+        if mod & Qt.KeyboardModifier.ControlModifier:
             if key == Qt.Key.Key_Z:
                 self._overlay.undo()
             elif key == Qt.Key.Key_Y:
                 self._overlay.redo()
+            return
+
+        mapping = {
+            Qt.Key.Key_P: "pen",
+            Qt.Key.Key_H: "highlighter",
+            Qt.Key.Key_L: "line",
+            Qt.Key.Key_R: "rect",
+            Qt.Key.Key_E: "circle",
+            Qt.Key.Key_X: "eraser",
+            Qt.Key.Key_S: "laser",
+        }
+        if key in mapping:
+            self._select_tool(mapping[key])
+        elif key == Qt.Key.Key_C:
+            self._pick_color()
+        elif key == Qt.Key.Key_Delete:
+            self._overlay.clear()
+        elif key == Qt.Key.Key_M:
+            self._btn_magnifier.toggle()
+            self._toggle_magnifier(self._btn_magnifier.isChecked())
+        elif key == Qt.Key.Key_Tab:
+            self._btn_toggle.toggle()
+            self._toggle_drawing(self._btn_toggle.isChecked())
