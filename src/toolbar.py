@@ -1,37 +1,72 @@
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QPushButton,
-    QSlider, QColorDialog, QLabel, QFrame
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+    QSlider, QColorDialog, QLabel, QFrame,
 )
-from PyQt6.QtCore import Qt, QPoint, QTimer
-from PyQt6.QtGui import QColor, QIcon, QPixmap, QPainter, QBrush, QCursor
+from PyQt6.QtCore import Qt, QPoint, QTimer, QSize
+from PyQt6.QtGui import QColor, QCursor
 
+import icons
 from magnifier import MagnifierWindow
+
+_ICON = QSize(22, 22)
+_BTN  = 36   # button side (px)
+_W    = 56   # toolbar width — expanded
+_WC   = 52   # toolbar width — collapsed
+
+_STYLE = """
+    QFrame#toolbar {
+        background-color: rgba(30, 30, 30, 220);
+        border-radius: 12px;
+        border: 1px solid rgba(255,255,255,30);
+    }
+    QPushButton {
+        background: transparent;
+        border: none;
+        border-radius: 6px;
+        color: white;
+        padding: 4px;
+        min-width: 36px;
+        min-height: 36px;
+    }
+    QPushButton:hover  { background: rgba(255,255,255,30); }
+    QPushButton:checked {
+        background: rgba(255,255,255,60);
+        border: 1px solid rgba(255,255,255,80);
+    }
+    QSlider::groove:vertical {
+        background: rgba(255,255,255,40);
+        width: 4px; border-radius: 2px;
+    }
+    QSlider::handle:vertical {
+        background: white;
+        width: 12px; height: 12px;
+        margin: -4px -4px;
+        border-radius: 6px;
+    }
+"""
 
 
 class ToolbarWindow(QWidget):
-    """Barra de ferramentas flutuante, arrastável, sempre no topo."""
+    """Barra de ferramentas flutuante, colapsável, sempre no topo."""
 
     def __init__(self, overlay, config: dict | None = None):
         super().__init__()
-        self._overlay = overlay
-        self._drag_pos: QPoint | None = None
+        self._overlay   = overlay
+        self._drag_pos  = None
+        self._collapsed = False
         self._drawing_active = True
         self._magnifier = MagnifierWindow()
-        self._cfg = config or {}
-        self._screenshot_fn = None       # injetado por main.py
-        self._tray = None                # injetado por main.py
+        self._cfg       = config or {}
+        self._tray      = None
 
         color_hex = self._cfg.get("color", "#FF0000")
         self._current_color = QColor(color_hex)
 
-        # ── Modo Apresentação ────────────────────────────────────────────
         self._presentation_mode = False
-        # Oculta após 1.5s sem hover
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
         self._hide_timer.setInterval(1500)
         self._hide_timer.timeout.connect(self._presentation_auto_hide)
-        # Detecta cursor perto da borda esquerda para reexibir
         self._edge_timer = QTimer(self)
         self._edge_timer.setInterval(150)
         self._edge_timer.timeout.connect(self._check_edge_reveal)
@@ -40,6 +75,8 @@ class ToolbarWindow(QWidget):
         self._build_ui()
         self._apply_config()
 
+    # ── Window setup ──────────────────────────────────────────────────────────
+
     def _setup_window(self):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -47,68 +84,95 @@ class ToolbarWindow(QWidget):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedWidth(56)
+        self.setFixedWidth(_W)
         pos = self._cfg.get("toolbar_pos", {"x": 20, "y": 150})
         self.move(pos.get("x", 20), pos.get("y", 150))
 
+    # ── UI construction ───────────────────────────────────────────────────────
+
     def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 8, 4, 8)
-        layout.setSpacing(4)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(4, 8, 4, 8)
+        root.setSpacing(0)
 
         self._container = QFrame(self)
         self._container.setObjectName("toolbar")
-        self._container.setStyleSheet("""
-            QFrame#toolbar {
-                background-color: rgba(30, 30, 30, 220);
-                border-radius: 12px;
-                border: 1px solid rgba(255,255,255,30);
-            }
-            QPushButton {
-                background: transparent;
-                border: none;
-                border-radius: 6px;
-                color: white;
-                font-size: 18px;
-                padding: 4px;
-                min-width: 36px;
-                min-height: 36px;
-            }
-            QPushButton:hover  { background: rgba(255,255,255,30); }
-            QPushButton:checked {
-                background: rgba(255,255,255,60);
-                border: 1px solid rgba(255,255,255,80);
-            }
-            QSlider::groove:vertical {
-                background: rgba(255,255,255,40);
-                width: 4px; border-radius: 2px;
-            }
-            QSlider::handle:vertical {
-                background: white;
-                width: 12px; height: 12px;
-                margin: -4px -4px;
-                border-radius: 6px;
-            }
-        """)
+        self._container.setStyleSheet(_STYLE)
 
-        inner = QVBoxLayout(self._container)
-        inner.setContentsMargins(6, 8, 6, 8)
-        inner.setSpacing(4)
+        outer = QVBoxLayout(self._container)
+        outer.setContentsMargins(6, 6, 6, 6)
+        outer.setSpacing(0)
 
-        def btn(icon: str, tooltip: str, checkable: bool = True) -> QPushButton:
-            b = QPushButton(icon)
-            b.setToolTip(tooltip)
-            b.setCheckable(checkable)
-            return b
+        # Logo button — visible only when collapsed
+        self._logo_btn = QPushButton()
+        self._logo_btn.setIcon(icons.logo())
+        self._logo_btn.setIconSize(QSize(36, 36))
+        self._logo_btn.setFixedSize(44, 44)
+        self._logo_btn.setToolTip("Expandir")
+        self._logo_btn.setCheckable(False)
+        self._logo_btn.setVisible(False)
+        self._logo_btn.clicked.connect(self._do_expand)
+        outer.addWidget(self._logo_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        # ── Ferramentas de desenho ────────────────────────────────────────
-        self._btn_pen    = btn("✏️", "Caneta (P)")
-        self._btn_hl     = btn("🖊",  "Marcador (H)")
-        self._btn_line   = btn("╱",   "Linha (L)")
-        self._btn_rect   = btn("▭",   "Retângulo (R)")
-        self._btn_circle = btn("○",   "Elipse (E)")
-        self._btn_eraser = btn("🧹",  "Borracha (X)")
-        self._btn_laser  = btn("🔴",  "Ponteiro Laser (S)")
+        # Full content — visible when expanded
+        self._expanded_widget = self._build_expanded()
+        outer.addWidget(self._expanded_widget)
+
+        root.addWidget(self._container)
+
+    def _mk_btn(self, tooltip: str, checkable: bool = True) -> QPushButton:
+        b = QPushButton()
+        b.setToolTip(tooltip)
+        b.setCheckable(checkable)
+        b.setFixedSize(_BTN, _BTN)
+        b.setIconSize(_ICON)
+        return b
+
+    def _build_expanded(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+
+        # Header: drag handle + collapse button
+        hdr = QHBoxLayout()
+        hdr.setContentsMargins(0, 0, 0, 2)
+        hdr.setSpacing(0)
+
+        drag_lbl = QLabel()
+        drag_lbl.setPixmap(icons.drag_handle().pixmap(_ICON))
+        drag_lbl.setFixedSize(_BTN, 24)
+        drag_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        col_btn = QPushButton()
+        col_btn.setIcon(icons.collapse_left())
+        col_btn.setIconSize(QSize(16, 22))
+        col_btn.setFixedSize(20, 24)
+        col_btn.setToolTip("Recolher")
+        col_btn.setCheckable(False)
+        col_btn.clicked.connect(self._do_collapse)
+
+        hdr.addWidget(drag_lbl, stretch=1)
+        hdr.addWidget(col_btn)
+        lay.addLayout(hdr)
+
+        self._add_sep(lay)
+
+        # Drawing tools
+        self._btn_pen    = self._mk_btn("Caneta (P)")
+        self._btn_pen.setIcon(icons.pen())
+        self._btn_hl     = self._mk_btn("Marcador (H)")
+        self._btn_hl.setIcon(icons.highlighter())
+        self._btn_line   = self._mk_btn("Linha (L)")
+        self._btn_line.setIcon(icons.line())
+        self._btn_rect   = self._mk_btn("Retângulo (R)")
+        self._btn_rect.setIcon(icons.rect())
+        self._btn_circle = self._mk_btn("Elipse (E)")
+        self._btn_circle.setIcon(icons.circle())
+        self._btn_eraser = self._mk_btn("Borracha (X)")
+        self._btn_eraser.setIcon(icons.eraser())
+        self._btn_laser  = self._mk_btn("Ponteiro Laser (S)")
+        self._btn_laser.setIcon(icons.laser())
 
         self._tool_buttons = [
             self._btn_pen, self._btn_hl, self._btn_line,
@@ -116,7 +180,7 @@ class ToolbarWindow(QWidget):
         ]
         self._btn_pen.setChecked(True)
         for b in self._tool_buttons:
-            inner.addWidget(b)
+            lay.addWidget(b)
 
         self._btn_pen.clicked.connect(lambda: self._select_tool("pen"))
         self._btn_hl.clicked.connect(lambda: self._select_tool("highlighter"))
@@ -126,53 +190,53 @@ class ToolbarWindow(QWidget):
         self._btn_eraser.clicked.connect(lambda: self._select_tool("eraser"))
         self._btn_laser.clicked.connect(lambda: self._select_tool("laser"))
 
-        self._add_sep(inner)
+        self._add_sep(lay)
 
-        # ── Cor + tamanho ────────────────────────────────────────────────
-        self._color_btn = btn("", "Cor (C)", False)
+        # Color + size
+        self._color_btn = self._mk_btn("Cor (C)", checkable=False)
         self._update_color_button()
         self._color_btn.clicked.connect(self._pick_color)
-        inner.addWidget(self._color_btn)
-
-        size_lbl = QLabel("⬤")
-        size_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        size_lbl.setStyleSheet("color: white; font-size: 8px;")
-        inner.addWidget(size_lbl)
+        lay.addWidget(self._color_btn)
 
         self._size_slider = QSlider(Qt.Orientation.Vertical)
         self._size_slider.setRange(1, 20)
         self._size_slider.setValue(self._cfg.get("size", 3))
         self._size_slider.setFixedHeight(80)
         self._size_slider.valueChanged.connect(self._overlay.set_size)
-        inner.addWidget(self._size_slider, alignment=Qt.AlignmentFlag.AlignHCenter)
+        lay.addWidget(self._size_slider, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        self._add_sep(inner)
+        self._add_sep(lay)
 
-        # ── Ações ─────────────────────────────────────────────────────────
-        b_undo  = btn("↩", "Desfazer (Ctrl+Z)", False)
-        b_redo  = btn("↪", "Refazer (Ctrl+Y)", False)
-        b_clear = btn("🗑", "Limpar tela (Del)", False)
+        # Actions
+        b_undo  = self._mk_btn("Desfazer (Ctrl+Z)", checkable=False)
+        b_undo.setIcon(icons.undo())
+        b_redo  = self._mk_btn("Refazer (Ctrl+Y)", checkable=False)
+        b_redo.setIcon(icons.redo())
+        b_clear = self._mk_btn("Limpar tela (Del)", checkable=False)
+        b_clear.setIcon(icons.trash())
         b_undo.clicked.connect(self._overlay.undo)
         b_redo.clicked.connect(self._overlay.redo)
         b_clear.clicked.connect(self._overlay.clear)
-        for w in (b_undo, b_redo, b_clear):
-            inner.addWidget(w)
+        for b in (b_undo, b_redo, b_clear):
+            lay.addWidget(b)
 
-        # Screenshot
-        self._btn_screenshot = btn("📷", "Screenshot (Ctrl+S)", False)
+        self._btn_screenshot = self._mk_btn("Screenshot (Ctrl+S)", checkable=False)
+        self._btn_screenshot.setIcon(icons.screenshot())
         self._btn_screenshot.clicked.connect(lambda: self._do_screenshot(clipboard=False))
-        inner.addWidget(self._btn_screenshot)
+        lay.addWidget(self._btn_screenshot)
 
-        self._add_sep(inner)
+        self._add_sep(lay)
 
-        # ── Modos de fundo ────────────────────────────────────────────────
-        self._btn_whiteboard = btn("⬜", "Quadro Branco (W)")
+        # Mode toggles
+        self._btn_whiteboard = self._mk_btn("Quadro Branco (W)")
+        self._btn_whiteboard.setIcon(icons.whiteboard())
         self._btn_whiteboard.clicked.connect(self._toggle_whiteboard)
-        inner.addWidget(self._btn_whiteboard)
+        lay.addWidget(self._btn_whiteboard)
 
-        self._btn_spotlight = btn("🔦", "Spotlight (O)")
+        self._btn_spotlight = self._mk_btn("Spotlight (O)")
+        self._btn_spotlight.setIcon(icons.spotlight())
         self._btn_spotlight.clicked.connect(self._toggle_spotlight)
-        inner.addWidget(self._btn_spotlight)
+        lay.addWidget(self._btn_spotlight)
 
         self._radius_slider = QSlider(Qt.Orientation.Vertical)
         self._radius_slider.setRange(60, 400)
@@ -180,14 +244,15 @@ class ToolbarWindow(QWidget):
         self._radius_slider.setFixedHeight(70)
         self._radius_slider.setVisible(False)
         self._radius_slider.valueChanged.connect(self._overlay.set_spotlight_radius)
-        inner.addWidget(self._radius_slider, alignment=Qt.AlignmentFlag.AlignHCenter)
+        lay.addWidget(self._radius_slider, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        self._add_sep(inner)
+        self._add_sep(lay)
 
-        # ── Lupa ─────────────────────────────────────────────────────────
-        self._btn_magnifier = btn("🔍", "Lupa (M)")
+        # Magnifier
+        self._btn_magnifier = self._mk_btn("Lupa (M)")
+        self._btn_magnifier.setIcon(icons.magnifier())
         self._btn_magnifier.clicked.connect(self._toggle_magnifier)
-        inner.addWidget(self._btn_magnifier)
+        lay.addWidget(self._btn_magnifier)
 
         self._zoom_slider = QSlider(Qt.Orientation.Vertical)
         self._zoom_slider.setRange(2, 6)
@@ -195,22 +260,40 @@ class ToolbarWindow(QWidget):
         self._zoom_slider.setFixedHeight(60)
         self._zoom_slider.setVisible(False)
         self._zoom_slider.valueChanged.connect(self._magnifier.set_zoom)
-        inner.addWidget(self._zoom_slider, alignment=Qt.AlignmentFlag.AlignHCenter)
+        lay.addWidget(self._zoom_slider, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        self._add_sep(inner)
+        self._add_sep(lay)
 
-        # ── Apresentação + Pausar ─────────────────────────────────────────
-        self._btn_present = btn("🎬", "Modo Apresentação (F11)")
+        # Presentation + drawing toggle
+        self._btn_present = self._mk_btn("Modo Apresentação (F11)")
+        self._btn_present.setIcon(icons.presentation())
         self._btn_present.clicked.connect(self._toggle_presentation)
-        inner.addWidget(self._btn_present)
+        lay.addWidget(self._btn_present)
 
-        self._btn_toggle = btn("🖱", "Pausar desenho (Tab)")
+        self._btn_toggle = self._mk_btn("Pausar desenho (Tab)")
+        self._btn_toggle.setIcon(icons.mouse_pause())
         self._btn_toggle.clicked.connect(self._toggle_drawing)
-        inner.addWidget(self._btn_toggle)
+        lay.addWidget(self._btn_toggle)
 
-        layout.addWidget(self._container)
+        return w
 
-    # ── Config ────────────────────────────────────────────────────────────
+    # ── Collapse / expand ─────────────────────────────────────────────────────
+
+    def _do_collapse(self):
+        self._collapsed = True
+        self._expanded_widget.setVisible(False)
+        self._logo_btn.setVisible(True)
+        self.setFixedWidth(_WC)
+        self.adjustSize()
+
+    def _do_expand(self):
+        self._collapsed = False
+        self._logo_btn.setVisible(False)
+        self._expanded_widget.setVisible(True)
+        self.setFixedWidth(_W)
+        self.adjustSize()
+
+    # ── Config ────────────────────────────────────────────────────────────────
 
     def _apply_config(self):
         self._select_tool(self._cfg.get("tool", "pen"))
@@ -232,7 +315,7 @@ class ToolbarWindow(QWidget):
     def set_tray(self, tray):
         self._tray = tray
 
-    # ── Tool ──────────────────────────────────────────────────────────────
+    # ── Tool selection ────────────────────────────────────────────────────────
 
     def _select_tool(self, tool: str):
         for b in self._tool_buttons:
@@ -247,7 +330,7 @@ class ToolbarWindow(QWidget):
             btn_map[tool].setChecked(True)
         self._overlay.set_tool(tool)
 
-    # ── Color ──────────────────────────────────────────────────────────────
+    # ── Color ─────────────────────────────────────────────────────────────────
 
     def _pick_color(self):
         color = QColorDialog.getColor(self._current_color, self, "Escolher cor")
@@ -257,22 +340,15 @@ class ToolbarWindow(QWidget):
             self._update_color_button()
 
     def _update_color_button(self):
-        px = QPixmap(24, 24)
-        px.fill(Qt.GlobalColor.transparent)
-        p = QPainter(px)
-        p.setBrush(QBrush(self._current_color))
-        p.setPen(Qt.GlobalColor.white)
-        p.drawEllipse(2, 2, 20, 20)
-        p.end()
-        self._color_btn.setIcon(QIcon(px))
+        self._color_btn.setIcon(icons.color_dot(self._current_color))
 
-    # ── Screenshot ────────────────────────────────────────────────────────
+    # ── Screenshot ────────────────────────────────────────────────────────────
 
     def _do_screenshot(self, clipboard: bool = False):
         import screenshot as sc
         sc.capture(self, tray_icon=self._tray, copy_to_clipboard=clipboard)
 
-    # ── Toggles ───────────────────────────────────────────────────────────
+    # ── Mode toggles ──────────────────────────────────────────────────────────
 
     def _toggle_whiteboard(self, checked: bool):
         self._overlay.set_whiteboard(checked)
@@ -290,9 +366,9 @@ class ToolbarWindow(QWidget):
     def _toggle_drawing(self, checked: bool):
         self._drawing_active = not checked
         self._overlay.set_active(self._drawing_active)
-        self._btn_toggle.setText("🖱" if checked else "✏️")
+        self._btn_toggle.setIcon(icons.mouse_active() if checked else icons.mouse_pause())
 
-    # ── Modo Apresentação ─────────────────────────────────────────────────
+    # ── Presentation mode ─────────────────────────────────────────────────────
 
     def _toggle_presentation(self, checked: bool):
         self._presentation_mode = checked
@@ -314,12 +390,10 @@ class ToolbarWindow(QWidget):
         if not self._presentation_mode:
             return
         cursor = QCursor.pos()
-        toolbar_x = self.pos().x()
-        # Revela se cursor está a até 60px da posição X da toolbar
-        if abs(cursor.x() - toolbar_x) <= 60:
+        if abs(cursor.x() - self.pos().x()) <= 60:
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
             self.setWindowOpacity(1.0)
-            self._hide_timer.start()  # reinicia o temporizador de ocultação
+            self._hide_timer.start()
 
     def enterEvent(self, event):
         if self._presentation_mode:
@@ -332,7 +406,7 @@ class ToolbarWindow(QWidget):
             self._hide_timer.start()
         super().leaveEvent(event)
 
-    # ── Helpers ───────────────────────────────────────────────────────────
+    # ── Helpers ───────────────────────────────────────────────────────────────
 
     @staticmethod
     def _add_sep(layout):
@@ -341,7 +415,7 @@ class ToolbarWindow(QWidget):
         sep.setStyleSheet("background: rgba(255,255,255,30); max-height: 1px;")
         layout.addWidget(sep)
 
-    # ── Drag ──────────────────────────────────────────────────────────────
+    # ── Drag ──────────────────────────────────────────────────────────────────
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -354,13 +428,12 @@ class ToolbarWindow(QWidget):
     def mouseReleaseEvent(self, _event):
         self._drag_pos = None
 
-    # ── Keyboard ──────────────────────────────────────────────────────────
+    # ── Keyboard shortcuts ────────────────────────────────────────────────────
 
     def keyPressEvent(self, event):
         key = event.key()
         mod = event.modifiers()
-
-        ctrl = mod & Qt.KeyboardModifier.ControlModifier
+        ctrl  = mod & Qt.KeyboardModifier.ControlModifier
         shift = mod & Qt.KeyboardModifier.ShiftModifier
 
         if ctrl:
