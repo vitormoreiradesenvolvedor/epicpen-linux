@@ -20,6 +20,7 @@ def main():
     overlay = OverlayWindow()
     toolbar = ToolbarWindow(overlay, config=settings)
     tray    = TrayIcon(overlay, toolbar, app)
+    toolbar.set_tray(tray)
 
     # Restaura modo quadro branco salvo
     if settings.get("whiteboard"):

@@ -59,6 +59,12 @@ class TrayIcon(QSystemTrayIcon):
         act_clear = menu.addAction("🗑  Limpar tela")
         act_clear.triggered.connect(self._overlay.clear)
 
+        act_screenshot = menu.addAction("📷  Screenshot (Ctrl+S)")
+        act_screenshot.triggered.connect(self._take_screenshot)
+
+        act_screenshot_clip = menu.addAction("📋  Screenshot → Área de transferência")
+        act_screenshot_clip.triggered.connect(self._take_screenshot_clipboard)
+
         menu.addSeparator()
 
         act_quit = menu.addAction("Sair")
@@ -86,3 +92,11 @@ class TrayIcon(QSystemTrayIcon):
     def _toggle_whiteboard(self, checked: bool):
         self._overlay.set_whiteboard(checked)
         self._toolbar._btn_whiteboard.setChecked(checked)
+
+    def _take_screenshot(self):
+        import screenshot as sc
+        sc.capture(self._toolbar, tray_icon=self, copy_to_clipboard=False)
+
+    def _take_screenshot_clipboard(self):
+        import screenshot as sc
+        sc.capture(self._toolbar, tray_icon=self, copy_to_clipboard=True)

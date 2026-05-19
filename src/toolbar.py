@@ -2,8 +2,8 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QPushButton,
     QSlider, QColorDialog, QLabel, QFrame
 )
-from PyQt6.QtCore import Qt, QPoint
-from PyQt6.QtGui import QColor, QIcon, QPixmap, QPainter, QBrush
+from PyQt6.QtCore import Qt, QPoint, QTimer
+from PyQt6.QtGui import QColor, QIcon, QPixmap, QPainter, QBrush, QCursor
 
 from magnifier import MagnifierWindow
 
@@ -18,9 +18,23 @@ class ToolbarWindow(QWidget):
         self._drawing_active = True
         self._magnifier = MagnifierWindow()
         self._cfg = config or {}
+        self._screenshot_fn = None       # injetado por main.py
+        self._tray = None                # injetado por main.py
 
         color_hex = self._cfg.get("color", "#FF0000")
         self._current_color = QColor(color_hex)
+
+        # ── Modo Apresentação ────────────────────────────────────────────
+        self._presentation_mode = False
+        # Oculta após 1.5s sem hover
+        self._hide_timer = QTimer(self)
+        self._hide_timer.setSingleShot(True)
+        self._hide_timer.setInterval(1500)
+        self._hide_timer.timeout.connect(self._presentation_auto_hide)
+        # Detecta cursor perto da borda esquerda para reexibir
+        self._edge_timer = QTimer(self)
+        self._edge_timer.setInterval(150)
+        self._edge_timer.timeout.connect(self._check_edge_reveal)
 
         self._setup_window()
         self._build_ui()
@@ -144,6 +158,11 @@ class ToolbarWindow(QWidget):
         for w in (b_undo, b_redo, b_clear):
             inner.addWidget(w)
 
+        # Screenshot
+        self._btn_screenshot = btn("📷", "Screenshot (Ctrl+S)", False)
+        self._btn_screenshot.clicked.connect(lambda: self._do_screenshot(clipboard=False))
+        inner.addWidget(self._btn_screenshot)
+
         self._add_sep(inner)
 
         # ── Modos de fundo ────────────────────────────────────────────────
@@ -155,7 +174,6 @@ class ToolbarWindow(QWidget):
         self._btn_spotlight.clicked.connect(self._toggle_spotlight)
         inner.addWidget(self._btn_spotlight)
 
-        # Slider de raio do spotlight (oculto por padrão)
         self._radius_slider = QSlider(Qt.Orientation.Vertical)
         self._radius_slider.setRange(60, 400)
         self._radius_slider.setValue(150)
@@ -181,7 +199,11 @@ class ToolbarWindow(QWidget):
 
         self._add_sep(inner)
 
-        # ── Pausar ───────────────────────────────────────────────────────
+        # ── Apresentação + Pausar ─────────────────────────────────────────
+        self._btn_present = btn("🎬", "Modo Apresentação (F11)")
+        self._btn_present.clicked.connect(self._toggle_presentation)
+        inner.addWidget(self._btn_present)
+
         self._btn_toggle = btn("🖱", "Pausar desenho (Tab)")
         self._btn_toggle.clicked.connect(self._toggle_drawing)
         inner.addWidget(self._btn_toggle)
@@ -191,8 +213,7 @@ class ToolbarWindow(QWidget):
     # ── Config ────────────────────────────────────────────────────────────
 
     def _apply_config(self):
-        tool = self._cfg.get("tool", "pen")
-        self._select_tool(tool)
+        self._select_tool(self._cfg.get("tool", "pen"))
         self._overlay.set_color(self._current_color)
         self._overlay.set_size(self._size_slider.value())
         self._magnifier.set_zoom(self._zoom_slider.value())
@@ -207,6 +228,9 @@ class ToolbarWindow(QWidget):
             "magnifier_zoom": self._zoom_slider.value(),
             "whiteboard": self._btn_whiteboard.isChecked(),
         }
+
+    def set_tray(self, tray):
+        self._tray = tray
 
     # ── Tool ──────────────────────────────────────────────────────────────
 
@@ -242,6 +266,12 @@ class ToolbarWindow(QWidget):
         p.end()
         self._color_btn.setIcon(QIcon(px))
 
+    # ── Screenshot ────────────────────────────────────────────────────────
+
+    def _do_screenshot(self, clipboard: bool = False):
+        import screenshot as sc
+        sc.capture(self, tray_icon=self._tray, copy_to_clipboard=clipboard)
+
     # ── Toggles ───────────────────────────────────────────────────────────
 
     def _toggle_whiteboard(self, checked: bool):
@@ -261,6 +291,46 @@ class ToolbarWindow(QWidget):
         self._drawing_active = not checked
         self._overlay.set_active(self._drawing_active)
         self._btn_toggle.setText("🖱" if checked else "✏️")
+
+    # ── Modo Apresentação ─────────────────────────────────────────────────
+
+    def _toggle_presentation(self, checked: bool):
+        self._presentation_mode = checked
+        if checked:
+            self._edge_timer.start()
+            self._hide_timer.start()
+        else:
+            self._edge_timer.stop()
+            self._hide_timer.stop()
+            self.show()
+            self.setWindowOpacity(1.0)
+
+    def _presentation_auto_hide(self):
+        if self._presentation_mode:
+            self.setWindowOpacity(0.0)
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def _check_edge_reveal(self):
+        if not self._presentation_mode:
+            return
+        cursor = QCursor.pos()
+        toolbar_x = self.pos().x()
+        # Revela se cursor está a até 60px da posição X da toolbar
+        if abs(cursor.x() - toolbar_x) <= 60:
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+            self.setWindowOpacity(1.0)
+            self._hide_timer.start()  # reinicia o temporizador de ocultação
+
+    def enterEvent(self, event):
+        if self._presentation_mode:
+            self._hide_timer.stop()
+            self.setWindowOpacity(1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        if self._presentation_mode:
+            self._hide_timer.start()
+        super().leaveEvent(event)
 
     # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -290,11 +360,16 @@ class ToolbarWindow(QWidget):
         key = event.key()
         mod = event.modifiers()
 
-        if mod & Qt.KeyboardModifier.ControlModifier:
+        ctrl = mod & Qt.KeyboardModifier.ControlModifier
+        shift = mod & Qt.KeyboardModifier.ShiftModifier
+
+        if ctrl:
             if key == Qt.Key.Key_Z:
                 self._overlay.undo()
             elif key == Qt.Key.Key_Y:
                 self._overlay.redo()
+            elif key == Qt.Key.Key_S:
+                self._do_screenshot(clipboard=bool(shift))
             return
 
         tool_keys = {
@@ -321,6 +396,9 @@ class ToolbarWindow(QWidget):
         elif key == Qt.Key.Key_M:
             self._btn_magnifier.toggle()
             self._toggle_magnifier(self._btn_magnifier.isChecked())
+        elif key == Qt.Key.Key_F11:
+            self._btn_present.toggle()
+            self._toggle_presentation(self._btn_present.isChecked())
         elif key == Qt.Key.Key_Tab:
             self._btn_toggle.toggle()
             self._toggle_drawing(self._btn_toggle.isChecked())
