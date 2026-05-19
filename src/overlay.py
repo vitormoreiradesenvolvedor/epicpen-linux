@@ -41,6 +41,9 @@ class OverlayWindow(QWidget):
         self._spotlight_pos: QPoint | None = None
         self._spotlight_radius = 150
 
+        # rect global da toolbar — excluída da input region do overlay
+        self._toolbar_global_rect = None
+
         self._setup_window()
         self._refresh_cursor()
 
@@ -106,15 +109,33 @@ class OverlayWindow(QWidget):
         if self._tool == "eraser":
             self.setCursor(make_eraser_cursor(size))
 
+    def set_toolbar_region(self, global_rect):
+        """
+        Exclui a área da toolbar da input region do overlay.
+        No Wayland, setMask() atualiza wl_surface.set_input_region —
+        o compositor entrega cliques nessa área direto para a toolbar.
+        """
+        self._toolbar_global_rect = global_rect
+        self._apply_input_mask()
+
+    def _apply_input_mask(self):
+        from PyQt6.QtGui import QRegion
+        if self._toolbar_global_rect is None:
+            self.clearMask()
+            return
+        # Converte rect global → coordenadas locais do overlay
+        origin = self.geometry().topLeft()
+        local = self._toolbar_global_rect.translated(-origin)
+        full = QRegion(self.rect())
+        self.setMask(full.subtracted(QRegion(local)))
+
     def set_active(self, active: bool):
         self._active = active
         if active:
             self.show()
+            self._apply_input_mask()  # re-aplica após show()
             self._refresh_cursor()
         else:
-            # hide() é a única abordagem garantida no Wayland: flags como
-            # WindowTransparentForInput dependem do compositor implementar
-            # wl_surface.set_input_region, o que nem todos fazem corretamente.
             self.hide()
 
     def set_whiteboard(self, active: bool):

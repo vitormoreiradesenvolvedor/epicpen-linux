@@ -292,6 +292,7 @@ class ToolbarWindow(QWidget):
         self._logo_btn.setVisible(True)
         self.setFixedWidth(_WC)
         self.adjustSize()
+        QTimer.singleShot(0, self._sync_overlay_mask)
 
     def _do_expand(self):
         self._collapsed = False
@@ -299,6 +300,7 @@ class ToolbarWindow(QWidget):
         self._expanded_widget.setVisible(True)
         self.setFixedWidth(_W)
         self.adjustSize()
+        QTimer.singleShot(0, self._sync_overlay_mask)
 
     # ── Config ────────────────────────────────────────────────────────────────
 
@@ -444,6 +446,15 @@ class ToolbarWindow(QWidget):
 
     # ── Drag ──────────────────────────────────────────────────────────────────
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Usa singleShot(0) para garantir que geometry() já foi atualizado
+        QTimer.singleShot(0, self._sync_overlay_mask)
+
+    def _sync_overlay_mask(self):
+        """Notifica o overlay da posição/tamanho atual da toolbar."""
+        self._overlay.set_toolbar_region(self.geometry())
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.RightButton:
             self._btn_toggle.toggle()
@@ -455,9 +466,11 @@ class ToolbarWindow(QWidget):
     def mouseMoveEvent(self, event):
         if self._drag_pos and event.buttons() & Qt.MouseButton.LeftButton:
             self.move(event.globalPosition().toPoint() - self._drag_pos)
+            self._sync_overlay_mask()
 
     def mouseReleaseEvent(self, _event):
         self._drag_pos = None
+        self._sync_overlay_mask()
 
     # ── Event override — Tab interception ────────────────────────────────────
 
