@@ -23,6 +23,7 @@ def _install_qt_stubs():
     qtw.QApplication = MagicMock()
     qtc.QTimer       = MagicMock()
     qtg.QClipboard   = MagicMock()
+    qtg.QPixmap      = MagicMock()
 
 _install_qt_stubs()
 
@@ -62,10 +63,8 @@ def test_do_capture_saves_to_save_dir(tmp_path):
     saved_paths = []
 
     mock_pixmap = MagicMock()
+    mock_pixmap.isNull.return_value = False
     mock_pixmap.save.side_effect = lambda p: saved_paths.append(Path(p))
-
-    mock_screen = MagicMock()
-    mock_screen.grabWindow.return_value = mock_pixmap
 
     toolbar = MagicMock()
 
@@ -77,10 +76,9 @@ def test_do_capture_saves_to_save_dir(tmp_path):
 
         with patch.object(sc, "QTimer") as mock_timer:
             mock_timer.singleShot.side_effect = lambda ms, fn: captured.update({"fn": fn})
-            with patch.object(sc, "QApplication") as mock_app:
-                mock_app.primaryScreen.return_value = mock_screen
+            with patch.object(sc, "grab_screen", return_value=mock_pixmap):
                 sc.capture(toolbar)
-                captured["fn"]()   # executa o closure imediatamente
+                captured["fn"]()
     finally:
         sc._SAVE_DIR = original_dir
 
@@ -91,9 +89,8 @@ def test_do_capture_saves_to_save_dir(tmp_path):
 def test_do_capture_restores_toolbar(tmp_path):
     """Após capturar, toolbar.show() deve ser chamado."""
     mock_pixmap = MagicMock()
+    mock_pixmap.isNull.return_value = False
     mock_pixmap.save = MagicMock()
-    mock_screen = MagicMock()
-    mock_screen.grabWindow.return_value = mock_pixmap
     toolbar = MagicMock()
 
     original_dir = sc._SAVE_DIR
@@ -103,8 +100,7 @@ def test_do_capture_restores_toolbar(tmp_path):
         captured = {}
         with patch.object(sc, "QTimer") as mock_timer:
             mock_timer.singleShot.side_effect = lambda ms, fn: captured.update({"fn": fn})
-            with patch.object(sc, "QApplication") as mock_app:
-                mock_app.primaryScreen.return_value = mock_screen
+            with patch.object(sc, "grab_screen", return_value=mock_pixmap):
                 sc.capture(toolbar)
                 captured["fn"]()
     finally:
@@ -116,9 +112,8 @@ def test_do_capture_restores_toolbar(tmp_path):
 def test_do_capture_notifies_tray(tmp_path):
     """Se tray_icon fornecido, showMessage deve ser chamado após captura."""
     mock_pixmap = MagicMock()
+    mock_pixmap.isNull.return_value = False
     mock_pixmap.save = MagicMock()
-    mock_screen = MagicMock()
-    mock_screen.grabWindow.return_value = mock_pixmap
     toolbar = MagicMock()
     tray = MagicMock()
 
@@ -129,8 +124,7 @@ def test_do_capture_notifies_tray(tmp_path):
         captured = {}
         with patch.object(sc, "QTimer") as mock_timer:
             mock_timer.singleShot.side_effect = lambda ms, fn: captured.update({"fn": fn})
-            with patch.object(sc, "QApplication") as mock_app:
-                mock_app.primaryScreen.return_value = mock_screen
+            with patch.object(sc, "grab_screen", return_value=mock_pixmap):
                 sc.capture(toolbar, tray_icon=tray)
                 captured["fn"]()
     finally:

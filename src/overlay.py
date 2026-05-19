@@ -1,11 +1,19 @@
+import os
 from PyQt6.QtWidgets import QWidget, QApplication
-from PyQt6.QtCore import Qt, QPoint, QRect, QRectF, QPointF
+from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF
 from PyQt6.QtGui import (
     QPainter, QPen, QColor, QScreen, QPainterPath,
     QRadialGradient, QBrush,
 )
+from cursors import make_pen_cursor, make_eraser_cursor, make_crosshair_cursor
 
 LASER_TRAIL_LEN = 18
+
+# True quando rodando no backend Wayland nativo (não XWayland)
+IS_WAYLAND = (
+    os.environ.get("WAYLAND_DISPLAY") is not None
+    and os.environ.get("QT_QPA_PLATFORM", "wayland") != "xcb"
+)
 
 
 class OverlayWindow(QWidget):
@@ -27,15 +35,31 @@ class OverlayWindow(QWidget):
         self._laser_pos: QPoint | None = None
         self._laser_trail: list[QPoint] = []
 
-        # background modes (independentes da ferramenta atual)
+        # modos de fundo
         self._whiteboard = False
         self._spotlight = False
         self._spotlight_pos: QPoint | None = None
         self._spotlight_radius = 150
 
         self._setup_window()
+        self._refresh_cursor()
 
-        # Reconecta quando monitores são adicionados ou removidos
+    def _setup_window(self):
+        virtual_geo = QApplication.primaryScreen().virtualGeometry()
+        for screen in QApplication.screens():
+            virtual_geo = virtual_geo.united(screen.geometry())
+        self.setGeometry(virtual_geo)
+
+        flags = (
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowDoesNotAcceptFocus  # não rouba foco de outras apps
+        )
+        self.setWindowFlags(flags)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+
         app = QApplication.instance()
         app.screenAdded.connect(self._on_screens_changed)
         app.screenRemoved.connect(self._on_screens_changed)
@@ -46,20 +70,21 @@ class OverlayWindow(QWidget):
             virtual_geo = virtual_geo.united(s.geometry())
         self.setGeometry(virtual_geo)
 
-    def _setup_window(self):
-        # Cobre todos os monitores usando a geometria virtual combinada
-        virtual_geo = QApplication.primaryScreen().virtualGeometry()
-        for screen in QApplication.screens():
-            virtual_geo = virtual_geo.united(screen.geometry())
-        self.setGeometry(virtual_geo)
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
-        self.setCursor(Qt.CursorShape.CrossCursor)
+    # ── Cursores ──────────────────────────────────────────────────────────
+
+    def _refresh_cursor(self):
+        """Atualiza o cursor de acordo com a ferramenta e estado atuais."""
+        if not self._active:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            return
+        if self._tool == "laser":
+            self.setCursor(Qt.CursorShape.BlankCursor)
+        elif self._tool == "eraser":
+            self.setCursor(make_eraser_cursor(self._size))
+        elif self._tool in ("line", "rect", "circle"):
+            self.setCursor(make_crosshair_cursor())
+        else:  # pen, highlighter
+            self.setCursor(make_pen_cursor(self._color))
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -68,28 +93,24 @@ class OverlayWindow(QWidget):
         self._laser_pos = None
         self._laser_trail.clear()
         self._update_tracking()
-        cursor = {
-            "eraser": Qt.CursorShape.BlankCursor,
-            "laser": Qt.CursorShape.BlankCursor,
-        }.get(tool, Qt.CursorShape.CrossCursor)
-        self.setCursor(cursor)
+        self._refresh_cursor()
         self.update()
 
     def set_color(self, color: QColor):
         self._color = color
+        if self._tool in ("pen", "highlighter"):
+            self.setCursor(make_pen_cursor(color))
 
     def set_size(self, size: int):
         self._size = size
+        if self._tool == "eraser":
+            self.setCursor(make_eraser_cursor(size))
 
     def set_active(self, active: bool):
         self._active = active
         if active:
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
-            cursor = {
-                "eraser": Qt.CursorShape.BlankCursor,
-                "laser": Qt.CursorShape.BlankCursor,
-            }.get(self._tool, Qt.CursorShape.CrossCursor)
-            self.setCursor(cursor)
+            self._refresh_cursor()
         else:
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             self.setCursor(Qt.CursorShape.ArrowCursor)
@@ -170,73 +191,21 @@ class OverlayWindow(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # 1. Fundo branco (modo quadro branco)
         if self._whiteboard:
             painter.fillRect(self.rect(), QColor(255, 255, 255, 255))
 
-        # 2. Traços salvos e traço atual
         for stroke in self._strokes:
             self._draw_stroke(painter, stroke)
         if self._current_stroke:
             self._draw_stroke(painter, self._current_stroke)
 
-        # 3. Ponteiro laser (acima dos traços)
         if self._tool == "laser" and self._laser_pos:
             self._draw_laser(painter)
 
-        # 4. Spotlight (camada mais alta — escurece tudo exceto o círculo)
         if self._spotlight:
             self._draw_spotlight(painter)
 
         painter.end()
-
-    def _draw_spotlight(self, painter: QPainter):
-        pos = self._spotlight_pos
-        r = float(self._spotlight_radius)
-
-        # Usa OddEvenFill: retângulo inteiro – círculo central = área escurecida
-        path = QPainterPath()
-        path.setFillRule(Qt.FillRule.OddEvenFill)
-        path.addRect(QRectF(self.rect()))
-        if pos:
-            path.addEllipse(QPointF(pos.x(), pos.y()), r, r)
-
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
-        painter.fillPath(path, QColor(0, 0, 0, 170))
-
-        # Borda suave no círculo
-        if pos:
-            gradient = QRadialGradient(QPointF(pos.x(), pos.y()), r + 30)
-            gradient.setColorAt(0.0, QColor(0, 0, 0, 0))
-            gradient.setColorAt(0.7, QColor(0, 0, 0, 0))
-            gradient.setColorAt(1.0, QColor(0, 0, 0, 100))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QBrush(gradient))
-            painter.drawEllipse(QPointF(pos.x(), pos.y()), r + 30, r + 30)
-
-    def _draw_laser(self, painter: QPainter):
-        trail = self._laser_trail
-        count = len(trail)
-        for i, pt in enumerate(trail[:-1]):
-            t = i / max(count - 1, 1)
-            alpha = int(t * 160)
-            radius = max(1, int(t * 6))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QBrush(QColor(255, 50, 50, alpha)))
-            painter.drawEllipse(pt, radius, radius)
-
-        pos = self._laser_pos
-        glow_r = 28
-        gradient = QRadialGradient(pos.x(), pos.y(), glow_r)
-        gradient.setColorAt(0.0,  QColor(255, 255, 255, 220))
-        gradient.setColorAt(0.15, QColor(255, 60, 60, 200))
-        gradient.setColorAt(0.45, QColor(220, 0, 0, 100))
-        gradient.setColorAt(1.0,  QColor(180, 0, 0, 0))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(gradient))
-        painter.drawEllipse(pos, glow_r, glow_r)
-        painter.setBrush(QBrush(QColor(255, 255, 255, 255)))
-        painter.drawEllipse(pos, 4, 4)
 
     def _draw_stroke(self, painter: QPainter, stroke: list):
         if not stroke:
@@ -262,27 +231,71 @@ class OverlayWindow(QWidget):
 
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        points = [p for p, _ in stroke]
+
+        # QPainterPath exige QPointF — converte aqui
+        raw   = [p for p, _ in stroke]
+        pts_f = [QPointF(p) for p in raw]
 
         if tool in ("pen", "highlighter", "eraser"):
-            if len(points) == 1:
-                painter.drawPoint(points[0])
+            if len(pts_f) == 1:
+                painter.drawPoint(pts_f[0])
             else:
                 path = QPainterPath()
-                path.moveTo(points[0])
-                for pt in points[1:]:
+                path.moveTo(pts_f[0])
+                for pt in pts_f[1:]:
                     path.lineTo(pt)
                 painter.drawPath(path)
-        elif tool == "line" and len(points) >= 2:
-            painter.drawLine(points[0], points[-1])
-        elif tool == "rect" and len(points) >= 2:
-            painter.drawRect(QRect(points[0], points[-1]).normalized())
-        elif tool == "circle" and len(points) >= 2:
-            painter.drawEllipse(QRect(points[0], points[-1]).normalized())
+        elif tool == "line" and len(raw) >= 2:
+            painter.drawLine(pts_f[0], pts_f[-1])
+        elif tool == "rect" and len(raw) >= 2:
+            painter.drawRect(QRect(raw[0], raw[-1]).normalized())
+        elif tool == "circle" and len(raw) >= 2:
+            painter.drawEllipse(QRect(raw[0], raw[-1]).normalized())
+
+    def _draw_spotlight(self, painter: QPainter):
+        pos = self._spotlight_pos
+        r = float(self._spotlight_radius)
+        path = QPainterPath()
+        path.setFillRule(Qt.FillRule.OddEvenFill)
+        path.addRect(QRectF(self.rect()))
+        if pos:
+            path.addEllipse(QPointF(pos.x(), pos.y()), r, r)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        painter.fillPath(path, QColor(0, 0, 0, 170))
+
+        if pos:
+            gradient = QRadialGradient(QPointF(pos.x(), pos.y()), r + 30)
+            gradient.setColorAt(0.0, QColor(0, 0, 0, 0))
+            gradient.setColorAt(0.7, QColor(0, 0, 0, 0))
+            gradient.setColorAt(1.0, QColor(0, 0, 0, 100))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(gradient))
+            painter.drawEllipse(QPointF(pos.x(), pos.y()), r + 30, r + 30)
+
+    def _draw_laser(self, painter: QPainter):
+        trail = self._laser_trail
+        count = len(trail)
+        for i, pt in enumerate(trail[:-1]):
+            t = i / max(count - 1, 1)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor(255, 50, 50, int(t * 160))))
+            painter.drawEllipse(QPointF(pt), max(1.0, t * 6), max(1.0, t * 6))
+
+        pos = self._laser_pos
+        glow_r = 28.0
+        gradient = QRadialGradient(pos.x(), pos.y(), glow_r)
+        gradient.setColorAt(0.0,  QColor(255, 255, 255, 220))
+        gradient.setColorAt(0.15, QColor(255, 60, 60, 200))
+        gradient.setColorAt(0.45, QColor(220, 0, 0, 100))
+        gradient.setColorAt(1.0,  QColor(180, 0, 0, 0))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(gradient))
+        painter.drawEllipse(QPointF(pos), glow_r, glow_r)
+        painter.setBrush(QBrush(QColor(255, 255, 255, 255)))
+        painter.drawEllipse(QPointF(pos), 4.0, 4.0)
 
     def _brush_props(self) -> dict:
         return {"tool": self._tool, "color": QColor(self._color), "size": self._size}
 
     def _update_tracking(self):
-        needs = (self._tool == "laser") or self._spotlight
-        self.setMouseTracking(needs)
+        self.setMouseTracking((self._tool == "laser") or self._spotlight)
