@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Bloqueia merges para master de qualquer branch que não seja development.
+
+CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null)
+
+[ "$CURRENT_BRANCH" = "master" ] || exit 0
+
+# Descobre a branch de origem do merge em andamento
+MERGE_HEAD=$(cat .git/MERGE_HEAD 2>/dev/null)
+[ -z "$MERGE_HEAD" ] && exit 0
+
+SOURCE_BRANCH=$(git name-rev --name-only "$MERGE_HEAD" 2>/dev/null | sed 's/~.*//' | sed 's/\^.*//')
+
+if [ "$SOURCE_BRANCH" != "development" ]; then
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║  MERGE BLOQUEADO — origem inválida                       ║"
+    echo "║                                                          ║"
+    echo "║  master aceita merges SOMENTE de development.            ║"
+    echo "║  Branch detectada: $SOURCE_BRANCH"
+    printf "║  %-57s║\n" ""
+    echo "║  Fluxo correto:                                          ║"
+    echo "║    1. Abra PR de sua branch → development                ║"
+    echo "║    2. Após aprovação, faça merge em development          ║"
+    echo "║    3. Então abra PR de development → master              ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo ""
+    exit 1
+fi

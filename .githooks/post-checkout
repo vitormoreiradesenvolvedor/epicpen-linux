@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Impede a criação de branches filhas de master.
+# Detecta quando o usuário faz: git checkout -b <nova> estando em master.
+#
+# Parâmetros do hook:
+#   $1 = HEAD anterior (hash do commit)
+#   $2 = HEAD novo     (hash do commit)
+#   $3 = 1 se foi checkout de branch, 0 se de arquivo
+
+PREV_HEAD="$1"
+NEW_HEAD="$2"
+IS_BRANCH_CHECKOUT="$3"
+
+# Só age em checkouts de branch
+[ "$IS_BRANCH_CHECKOUT" = "1" ] || exit 0
+
+CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null)
+
+# Sem necessidade de verificar master/development — não são branches novas problemáticas
+[ "$CURRENT_BRANCH" = "master" ]      && exit 0
+[ "$CURRENT_BRANCH" = "development" ] && exit 0
+
+# Verifica se a branch acabou de ser criada (não existe remotamente e o HEAD é idêntico ao anterior)
+BRANCH_EXISTS_REMOTELY=$(git ls-remote --heads origin "$CURRENT_BRANCH" 2>/dev/null | wc -l)
+
+if [ "$BRANCH_EXISTS_REMOTELY" = "0" ] && [ "$PREV_HEAD" = "$NEW_HEAD" ]; then
+    # Branch local nova — verifica se o ponto de criação foi master
+    PREV_BRANCH_NAME=$(git name-rev --name-only "$PREV_HEAD" 2>/dev/null | sed 's/~.*//' | sed 's/\^.*//')
+
+    if [ "$PREV_BRANCH_NAME" = "master" ]; then
+        echo ""
+        echo "╔══════════════════════════════════════════════════════════╗"
+        echo "║  BRANCH BLOQUEADA — origem inválida                      ║"
+        echo "║                                                          ║"
+        echo "║  Branches não podem ser criadas a partir de master.      ║"
+        echo "║  Desfazendo e retornando para development...             ║"
+        echo "║                                                          ║"
+        echo "║  Use:                                                    ║"
+        echo "║    git checkout development                              ║"
+        echo "║    git checkout -b $CURRENT_BRANCH"
+        printf "║  %-57s║\n" ""
+        echo "╚══════════════════════════════════════════════════════════╝"
+        echo ""
+
+        # Apaga a branch recém-criada e volta para development
+        git checkout development 2>/dev/null
+        git branch -d "$CURRENT_BRANCH" 2>/dev/null
+        exit 1
+    fi
+fi

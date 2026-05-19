@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Bloqueia commits diretos na branch master.
+# Commits em master só devem entrar via merge de development.
+
+CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null)
+
+if [ "$CURRENT_BRANCH" = "master" ]; then
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║  COMMIT BLOQUEADO — branch protegida: master             ║"
+    echo "║                                                          ║"
+    echo "║  Commits diretos em master não são permitidos.           ║"
+    echo "║  Use o fluxo correto:                                    ║"
+    echo "║                                                          ║"
+    echo "║    git checkout development                              ║"
+    echo "║    git checkout -b feature/sua-feature                   ║"
+    echo "║    # ... faça suas alterações ...                        ║"
+    echo "║    git commit -m 'feat: sua feature'                     ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo ""
+    exit 1
+fi

@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Bloqueia push direto para master de qualquer branch que não seja development.
+# Também impede force-push em ambas master e development.
+
+REMOTE="$1"
+REMOTE_URL="$2"
+
+while read LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
+    DEST_BRANCH=$(echo "$REMOTE_REF" | sed 's|refs/heads/||')
+
+    # Bloqueia force-push nas branches protegidas
+    if [ "$DEST_BRANCH" = "master" ] || [ "$DEST_BRANCH" = "development" ]; then
+        if [ "$LOCAL_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo ""
+            echo "╔══════════════════════════════════════════════════════════╗"
+            echo "║  PUSH BLOQUEADO — deleção de branch protegida            ║"
+            echo "║  Não é possível deletar: $DEST_BRANCH"
+            printf "║  %-57s║\n" ""
+            echo "╚══════════════════════════════════════════════════════════╝"
+            exit 1
+        fi
+
+        if [ "$REMOTE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            # Verifica se é force-push (histórico não é ancestral)
+            if ! git merge-base --is-ancestor "$REMOTE_SHA" "$LOCAL_SHA" 2>/dev/null; then
+                echo ""
+                echo "╔══════════════════════════════════════════════════════════╗"
+                echo "║  PUSH BLOQUEADO — force-push proibido                    ║"
+                echo "║  Branch protegida: $DEST_BRANCH"
+                printf "║  %-57s║\n" ""
+                echo "╚══════════════════════════════════════════════════════════╝"
+                exit 1
+            fi
+        fi
+    fi
+
+    # Bloqueia push direto para master de branches que não sejam development
+    if [ "$DEST_BRANCH" = "master" ]; then
+        CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null)
+        if [ "$CURRENT_BRANCH" != "development" ]; then
+            echo ""
+            echo "╔══════════════════════════════════════════════════════════╗"
+            echo "║  PUSH BLOQUEADO — destino inválido                       ║"
+            echo "║                                                          ║"
+            echo "║  Só development pode fazer push/merge para master.       ║"
+            echo "║  Branch atual: $CURRENT_BRANCH"
+            printf "║  %-57s║\n" ""
+            echo "╚══════════════════════════════════════════════════════════╝"
+            exit 1
+        fi
+    fi
+done
+
+exit 0

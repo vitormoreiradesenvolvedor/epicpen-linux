@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=EpicPen
+GenericName=Screen Annotation Tool
+Comment=Draw and annotate directly on your screen
+Exec=epicpen
+Icon=epicpen
+Terminal=false
+Type=Application
+Categories=Utility;Graphics;
+Keywords=draw;annotation;screen;pen;whiteboard;
+StartupNotify=false
