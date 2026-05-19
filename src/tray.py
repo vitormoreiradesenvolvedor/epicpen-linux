@@ -1,31 +1,31 @@
+from pathlib import Path
 from PyQt6.QtWidgets import QSystemTrayIcon, QMenu, QApplication
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QBrush, QPen, QFont
-from PyQt6.QtCore import Qt, QPoint, QRect
+from PyQt6.QtCore import Qt, QRect
+
+_ICON_FILE = Path(__file__).parent.parent / "resources" / "icons" / "epicpen.png"
 
 
 def _make_icon() -> QIcon:
-    """Gera o ícone da bandeja programaticamente (círculo escuro + 'EP' vermelho)."""
+    """Carrega o ícone do arquivo PNG, ou gera um fallback programático."""
+    if _ICON_FILE.exists():
+        return QIcon(str(_ICON_FILE))
+
+    # Fallback: círculo escuro + "EP" vermelho
     px = QPixmap(64, 64)
     px.fill(Qt.GlobalColor.transparent)
     p = QPainter(px)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-    # Fundo circular
     p.setPen(Qt.PenStyle.NoPen)
     p.setBrush(QBrush(QColor(30, 30, 30, 230)))
     p.drawEllipse(2, 2, 60, 60)
-
-    # Borda
     p.setPen(QPen(QColor(200, 200, 200, 120), 2))
     p.setBrush(Qt.BrushStyle.NoBrush)
     p.drawEllipse(2, 2, 60, 60)
-
-    # Texto "EP"
     font = QFont("Sans Serif", 20, QFont.Weight.Bold)
     p.setFont(font)
     p.setPen(QPen(QColor(220, 60, 60)))
     p.drawText(QRect(0, 0, 64, 64), Qt.AlignmentFlag.AlignCenter, "EP")
-
     p.end()
     return QIcon(px)
 
