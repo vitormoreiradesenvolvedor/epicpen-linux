@@ -108,11 +108,24 @@ class OverlayWindow(QWidget):
 
     def set_active(self, active: bool):
         self._active = active
+        _base = (
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowDoesNotAcceptFocus
+        )
         if active:
+            self.setWindowFlags(_base)
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+            self.show()
             self._refresh_cursor()
         else:
+            # WindowTransparentForInput informa o compositor (Wayland/X11) para não
+            # entregar eventos de ponteiro a esta superfície — mais confiável que
+            # WA_TransparentForMouseEvents, que só funciona no nível do Qt.
+            self.setWindowFlags(_base | Qt.WindowType.WindowTransparentForInput)
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self.show()
             self.setCursor(Qt.CursorShape.ArrowCursor)
 
     def set_whiteboard(self, active: bool):

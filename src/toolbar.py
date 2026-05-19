@@ -428,6 +428,19 @@ class ToolbarWindow(QWidget):
     def mouseReleaseEvent(self, _event):
         self._drag_pos = None
 
+    # ── Event override — Tab interception ────────────────────────────────────
+
+    def event(self, event):
+        # Qt consome Tab para navegar entre botões antes de chegar a keyPressEvent.
+        # Interceptamos aqui para garantir que Tab sempre alterne o modo de desenho.
+        from PyQt6.QtCore import QEvent
+        if (event.type() == QEvent.Type.KeyPress
+                and event.key() == Qt.Key.Key_Tab):
+            self._btn_toggle.toggle()
+            self._toggle_drawing(self._btn_toggle.isChecked())
+            return True
+        return super().event(event)
+
     # ── Keyboard shortcuts ────────────────────────────────────────────────────
 
     def keyPressEvent(self, event):
@@ -472,6 +485,3 @@ class ToolbarWindow(QWidget):
         elif key == Qt.Key.Key_F11:
             self._btn_present.toggle()
             self._toggle_presentation(self._btn_present.isChecked())
-        elif key == Qt.Key.Key_Tab:
-            self._btn_toggle.toggle()
-            self._toggle_drawing(self._btn_toggle.isChecked())
