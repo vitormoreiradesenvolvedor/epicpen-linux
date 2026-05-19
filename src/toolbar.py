@@ -6,6 +6,7 @@ from PyQt6.QtCore import Qt, QPoint, QTimer, QSize
 from PyQt6.QtGui import QColor, QCursor
 
 import icons
+from hotkeys import GlobalHotkeyListener
 from magnifier import MagnifierWindow
 
 _ICON = QSize(22, 22)
@@ -74,6 +75,10 @@ class ToolbarWindow(QWidget):
         self._setup_window()
         self._build_ui()
         self._apply_config()
+
+        self._hotkeys = GlobalHotkeyListener(self)
+        self._hotkeys.toggled.connect(self._on_global_hotkey)
+        self._hotkeys.start()
 
     # ── Window setup ──────────────────────────────────────────────────────────
 
@@ -316,6 +321,15 @@ class ToolbarWindow(QWidget):
 
     def set_tray(self, tray):
         self._tray = tray
+
+    def closeEvent(self, event):
+        self._hotkeys.stop()
+        super().closeEvent(event)
+
+    def _on_global_hotkey(self):
+        """Chamado pelo listener global — seguro para uso entre threads."""
+        self._btn_toggle.toggle()
+        self._toggle_drawing(self._btn_toggle.isChecked())
 
     # ── Tool selection ────────────────────────────────────────────────────────
 
