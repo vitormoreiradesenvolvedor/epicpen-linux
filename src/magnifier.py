@@ -51,12 +51,19 @@ class MagnifierWindow(QWidget):
             self._reposition(pos)
             self.update()
 
+    def _screen_at(self, pos: QPoint):
+        """Retorna o QScreen que contém o ponto, ou o primário como fallback."""
+        for s in QApplication.screens():
+            if s.geometry().contains(pos):
+                return s
+        return QApplication.primaryScreen()
+
     def _reposition(self, cursor: QPoint):
-        screen = QApplication.primaryScreen().geometry()
+        screen = self._screen_at(cursor).geometry()
         x = cursor.x() - DIAMETER // 2
         y = cursor.y() + OFFSET_Y
 
-        # Evita sair da tela
+        # Evita sair do monitor atual
         x = max(screen.left(), min(x, screen.right() - DIAMETER))
         y = max(screen.top(), min(y, screen.bottom() - DIAMETER))
 
@@ -67,7 +74,7 @@ class MagnifierWindow(QWidget):
         self.move(x, y)
 
     def paintEvent(self, _event):
-        screen = QApplication.primaryScreen()
+        screen = self._screen_at(self._cursor_pos)
         cap_size = DIAMETER // self._zoom
         cx, cy = self._cursor_pos.x(), self._cursor_pos.y()
 
@@ -77,6 +84,7 @@ class MagnifierWindow(QWidget):
             cap_size,
             cap_size,
         )
+        # grabWindow com WId=0 captura o desktop virtual inteiro, funciona com multi-monitor
         raw = screen.grabWindow(
             0,
             capture_rect.x(), capture_rect.y(),

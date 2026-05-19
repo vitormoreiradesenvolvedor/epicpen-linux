@@ -35,9 +35,23 @@ class OverlayWindow(QWidget):
 
         self._setup_window()
 
+        # Reconecta quando monitores são adicionados ou removidos
+        app = QApplication.instance()
+        app.screenAdded.connect(self._on_screens_changed)
+        app.screenRemoved.connect(self._on_screens_changed)
+
+    def _on_screens_changed(self, _screen=None):
+        virtual_geo = QApplication.primaryScreen().virtualGeometry()
+        for s in QApplication.screens():
+            virtual_geo = virtual_geo.united(s.geometry())
+        self.setGeometry(virtual_geo)
+
     def _setup_window(self):
-        screen: QScreen = QApplication.primaryScreen()
-        self.setGeometry(screen.geometry())
+        # Cobre todos os monitores usando a geometria virtual combinada
+        virtual_geo = QApplication.primaryScreen().virtualGeometry()
+        for screen in QApplication.screens():
+            virtual_geo = virtual_geo.united(screen.geometry())
+        self.setGeometry(virtual_geo)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
