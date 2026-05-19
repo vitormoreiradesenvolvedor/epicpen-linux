@@ -270,7 +270,9 @@ class ToolbarWindow(QWidget):
         self._btn_present.clicked.connect(self._toggle_presentation)
         lay.addWidget(self._btn_present)
 
-        self._btn_toggle = self._mk_btn("Pausar desenho (Tab)")
+        self._btn_toggle = self._mk_btn(
+            "Pausar/retomar desenho\nClic esquerdo | Tab | Botão direito na toolbar"
+        )
         self._btn_toggle.setIcon(icons.mouse_pause())
         self._btn_toggle.clicked.connect(self._toggle_drawing)
         lay.addWidget(self._btn_toggle)
@@ -418,6 +420,10 @@ class ToolbarWindow(QWidget):
     # ── Drag ──────────────────────────────────────────────────────────────────
 
     def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.RightButton:
+            self._btn_toggle.toggle()
+            self._toggle_drawing(self._btn_toggle.isChecked())
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
