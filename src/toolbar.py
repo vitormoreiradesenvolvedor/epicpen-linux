@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QSlider, QColorDialog, QLabel, QFrame,
+    QSlider, QColorDialog, QFrame,
 )
 from PyQt6.QtCore import Qt, QPoint, QTimer, QSize, QEvent
 from PyQt6.QtGui import QColor, QCursor
@@ -143,27 +143,15 @@ class ToolbarWindow(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(4)
 
-        # Header: drag handle + collapse button
-        hdr = QHBoxLayout()
-        hdr.setContentsMargins(0, 0, 0, 2)
-        hdr.setSpacing(0)
-
-        drag_lbl = QLabel()
-        drag_lbl.setPixmap(icons.drag_handle().pixmap(_ICON))
-        drag_lbl.setFixedSize(_BTN, 24)
-        drag_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
+        # Header: collapse button (full width — drag works from anywhere via eventFilter)
         col_btn = QPushButton()
         col_btn.setIcon(icons.collapse_left())
-        col_btn.setIconSize(QSize(16, 22))
-        col_btn.setFixedSize(20, 24)
+        col_btn.setIconSize(_ICON)
+        col_btn.setFixedSize(_BTN, 28)
         col_btn.setToolTip("Recolher")
         col_btn.setCheckable(False)
         col_btn.clicked.connect(self._do_collapse)
-
-        hdr.addWidget(drag_lbl, stretch=1)
-        hdr.addWidget(col_btn)
-        lay.addLayout(hdr)
+        lay.addWidget(col_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         self._add_sep(lay)
 
@@ -498,7 +486,7 @@ class ToolbarWindow(QWidget):
                 if not self._dragging and (abs(delta.x()) + abs(delta.y()) >= 6):
                     self._dragging = True
                 if self._dragging:
-                    self.move(event.globalPosition().toPoint() - self._drag_origin)
+                    self.move(self._drag_origin + (event.globalPosition().toPoint() - self._drag_start))
                     self._sync_overlay_mask()
                     return True  # consome para não confundir widgets filho
 
