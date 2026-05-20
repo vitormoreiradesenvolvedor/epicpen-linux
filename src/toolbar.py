@@ -2,7 +2,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QSlider, QColorDialog, QLabel, QFrame,
 )
-from PyQt6.QtCore import Qt, QPoint, QTimer, QSize
+from PyQt6.QtCore import Qt, QPoint, QTimer, QSize, QEvent
 from PyQt6.QtGui import QColor, QCursor
 
 import icons
@@ -53,8 +53,11 @@ class ToolbarWindow(QWidget):
     def __init__(self, overlay, config: dict | None = None):
         super().__init__()
         self._overlay   = overlay
-        self._drag_pos  = None
         self._collapsed = False
+        # drag state — controlado pelo eventFilter instalado em todos os filhos
+        self._drag_start  = None   # QPoint global quando o botão foi pressionado
+        self._drag_origin = None   # topLeft da janela quando o drag iniciou
+        self._dragging    = False  # True após exceder o threshold
         self._drawing_active = True
         self._magnifier = MagnifierWindow()
         self._cfg       = config or {}
@@ -74,6 +77,7 @@ class ToolbarWindow(QWidget):
 
         self._setup_window()
         self._build_ui()
+        self._install_event_filters()
         self._apply_config()
 
         self._hotkeys = GlobalHotkeyListener(self)
@@ -417,15 +421,13 @@ class ToolbarWindow(QWidget):
         if self._presentation_mode:
             self._hide_timer.stop()
             self.setWindowOpacity(1.0)
-        # Wayland: tenta puxar foco de teclado quando o mouse entra na toolbar.
-        # Sem isso, Tab nunca chega aqui porque o foco fica na última janela ativa.
+        # Wayland: puxa foco de teclado ao entrar na toolbar
         self.raise_()
         self.activateWindow()
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
         super().enterEvent(event)
 
     def wheelEvent(self, event):
-        # Scroll do mouse sobre a toolbar alterna o modo de desenho.
-        # Funciona sem depender de foco de teclado.
         self._btn_toggle.toggle()
         self._toggle_drawing(self._btn_toggle.isChecked())
         event.accept()
@@ -444,40 +446,76 @@ class ToolbarWindow(QWidget):
         sep.setStyleSheet("background: rgba(255,255,255,30); max-height: 1px;")
         layout.addWidget(sep)
 
-    # ── Drag ──────────────────────────────────────────────────────────────────
+    # ── Overlay mask sync ─────────────────────────────────────────────────────
 
     def showEvent(self, event):
         super().showEvent(event)
-        # Usa singleShot(0) para garantir que geometry() já foi atualizado
-        QTimer.singleShot(0, self._sync_overlay_mask)
+        QTimer.singleShot(100, self._sync_overlay_mask)
 
-    def _sync_overlay_mask(self):
-        """Notifica o overlay da posição/tamanho atual da toolbar."""
-        self._overlay.set_toolbar_region(self.geometry())
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.RightButton:
-            self._btn_toggle.toggle()
-            self._toggle_drawing(self._btn_toggle.isChecked())
-            return
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-
-    def mouseMoveEvent(self, event):
-        if self._drag_pos and event.buttons() & Qt.MouseButton.LeftButton:
-            self.move(event.globalPosition().toPoint() - self._drag_pos)
-            self._sync_overlay_mask()
-
-    def mouseReleaseEvent(self, _event):
-        self._drag_pos = None
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
         self._sync_overlay_mask()
 
-    # ── Event override — Tab interception ────────────────────────────────────
+    def _sync_overlay_mask(self):
+        self._overlay.set_toolbar_region(self.geometry())
+
+    # ── Drag + event filter ───────────────────────────────────────────────────
+
+    def _install_event_filters(self):
+        """Instala event filter em toda a árvore de widgets filhos do container."""
+        self._container.installEventFilter(self)
+        for w in self._container.findChildren(QWidget):
+            w.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        t = event.type()
+
+        # Tab antes do sistema de foco consumir
+        if t == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Tab:
+            self._btn_toggle.toggle()
+            self._toggle_drawing(self._btn_toggle.isChecked())
+            return True
+
+        # Botão direito em qualquer filho → toggle
+        if t == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.RightButton:
+            self._btn_toggle.toggle()
+            self._toggle_drawing(self._btn_toggle.isChecked())
+            return True
+
+        # Sliders gerenciam o próprio drag — não interferir
+        if isinstance(obj, QSlider):
+            return False
+
+        if t == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start  = event.globalPosition().toPoint()
+            self._drag_origin = self.frameGeometry().topLeft()
+            self._dragging    = False
+            return False  # não consome — deixa o botão ativar normalmente
+
+        if t == QEvent.Type.MouseMove and (event.buttons() & Qt.MouseButton.LeftButton):
+            if self._drag_start is not None:
+                delta = event.globalPosition().toPoint() - self._drag_start
+                if not self._dragging and (abs(delta.x()) + abs(delta.y()) >= 6):
+                    self._dragging = True
+                if self._dragging:
+                    self.move(event.globalPosition().toPoint() - self._drag_origin)
+                    self._sync_overlay_mask()
+                    return True  # consome para não confundir widgets filho
+
+        if t == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+            was_dragging  = self._dragging
+            self._drag_start  = None
+            self._drag_origin = None
+            self._dragging    = False
+            self._sync_overlay_mask()
+            if was_dragging:
+                return True  # consome release → botão não dispara click após drag
+
+        return False  # passa todos os demais eventos adiante
+
+    # ── Tab override via event() (segunda camada de segurança) ────────────────
 
     def event(self, event):
-        # Qt consome Tab para navegar entre botões antes de chegar a keyPressEvent.
-        # Interceptamos aqui para garantir que Tab sempre alterne o modo de desenho.
-        from PyQt6.QtCore import QEvent
         if (event.type() == QEvent.Type.KeyPress
                 and event.key() == Qt.Key.Key_Tab):
             self._btn_toggle.toggle()
