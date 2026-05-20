@@ -92,12 +92,13 @@ class ToolbarWindow(QWidget):
         self._hotkeys.toggled.connect(self._on_global_hotkey)
         self._hotkeys.start()
 
-        # raise_() periódico — no-op em Wayland puro mas inofensivo;
-        # funciona no KDE/KWin que implementa extensões de z-order próprias.
-        self._raise_timer = QTimer(self)
-        self._raise_timer.setInterval(500)
-        self._raise_timer.timeout.connect(self.raise_)
-        self._raise_timer.start()
+        # Sempre no topo: activateWindow() é chamado uma vez ao ativar o
+        # desenho e pelo hotkey. Entre chamadas, focusWindowChanged dispara
+        # raise_() passivo (funciona no KDE sem roubar foco).
+        from PyQt6.QtGui import QGuiApplication
+        QGuiApplication.instance().focusWindowChanged.connect(
+            lambda _: QTimer.singleShot(80, self.raise_)
+        )
 
     # ── Window setup ──────────────────────────────────────────────────────────
 
@@ -343,7 +344,6 @@ class ToolbarWindow(QWidget):
         self._tray = tray
 
     def closeEvent(self, event):
-        self._raise_timer.stop()
         self._hotkeys.stop()
         super().closeEvent(event)
 
@@ -355,9 +355,15 @@ class ToolbarWindow(QWidget):
         self._reaffirm_top()
 
     def _reaffirm_top(self):
-        """Traz toolbar ao topo; activateWindow() só é chamado pelo hotkey manual."""
+        """
+        Traz toolbar e overlay ao topo.
+        activateWindow() é necessário no Wayland para que o KWin registre o
+        estado "keep above" — chamado na ativação do desenho e pelo hotkey.
+        """
         self.raise_()
         self.activateWindow()
+        if self._drawing_active:
+            self._overlay.raise_()
 
     # ── Tool selection ────────────────────────────────────────────────────────
 
@@ -411,6 +417,9 @@ class ToolbarWindow(QWidget):
         self._drawing_active = not checked
         self._overlay.set_active(self._drawing_active)
         self._btn_toggle.setIcon(icons.mouse_active() if checked else icons.mouse_pause())
+        if self._drawing_active:
+            # Ativa uma vez para que KWin/Wayland registre o estado "always on top"
+            QTimer.singleShot(100, self._reaffirm_top)
 
     # ── Presentation mode ─────────────────────────────────────────────────────
 
