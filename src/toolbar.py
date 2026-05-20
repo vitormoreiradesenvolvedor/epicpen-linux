@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (
     QSlider, QColorDialog, QFrame, QLayout,
 )
 from PyQt6.QtCore import Qt, QPoint, QTimer, QSize, QEvent
-from PyQt6.QtGui import QColor, QCursor, QGuiApplication
+from PyQt6.QtGui import QColor, QCursor
 
 import icons
 from hotkeys import GlobalHotkeyListener
@@ -45,6 +45,16 @@ _STYLE = """
     }
 """
 
+# Estilo colapsado: frame transparente, sem borda — só o ícone fica visível
+_STYLE_COLLAPSED = """
+    QFrame#toolbar { background: transparent; border: none; }
+    QPushButton {
+        background: transparent; border: none; border-radius: 6px;
+        padding: 4px; min-width: 36px; min-height: 36px;
+    }
+    QPushButton:hover { background: rgba(255,255,255,20); }
+"""
+
 
 class ToolbarWindow(QWidget):
     """Barra de ferramentas flutuante, colapsável, sempre no topo."""
@@ -82,16 +92,12 @@ class ToolbarWindow(QWidget):
         self._hotkeys.toggled.connect(self._on_global_hotkey)
         self._hotkeys.start()
 
-        # Sempre no topo: requestActivate() é o único mecanismo que funciona
-        # no Wayland nativo (raise_() é no-op em xdg-shell).
+        # raise_() periódico — no-op em Wayland puro mas inofensivo;
+        # funciona no KDE/KWin que implementa extensões de z-order próprias.
         self._raise_timer = QTimer(self)
         self._raise_timer.setInterval(500)
-        self._raise_timer.timeout.connect(self._reaffirm_top)
+        self._raise_timer.timeout.connect(self.raise_)
         self._raise_timer.start()
-        QGuiApplication.instance().focusWindowChanged.connect(
-            lambda w: QTimer.singleShot(80, self._reaffirm_top)
-            if w is not None else None
-        )
 
     # ── Window setup ──────────────────────────────────────────────────────────
 
@@ -294,6 +300,7 @@ class ToolbarWindow(QWidget):
         self._collapsed = True
         self._expanded_widget.setVisible(False)
         self._logo_btn.setVisible(True)
+        self._container.setStyleSheet(_STYLE_COLLAPSED)  # sem borda/fundo
         self.setFixedWidth(_W)
         self.adjustSize()
         # Colapso pausa o desenho (como no EpicPen original)
@@ -305,6 +312,7 @@ class ToolbarWindow(QWidget):
         self._collapsed = False
         self._logo_btn.setVisible(False)
         self._expanded_widget.setVisible(True)
+        self._container.setStyleSheet(_STYLE)  # restaura fundo escuro
         self.setFixedWidth(_W)
         self.adjustSize()
         # Expansão retoma o desenho automaticamente
@@ -347,15 +355,9 @@ class ToolbarWindow(QWidget):
         self._reaffirm_top()
 
     def _reaffirm_top(self):
-        """
-        Traz a toolbar ao topo do z-stack.
-        raise_() é no-op no Wayland nativo; requestActivate() via xdg-activation
-        é o mecanismo correto para pedir ao compositor que eleve a janela.
-        """
+        """Traz toolbar ao topo; activateWindow() só é chamado pelo hotkey manual."""
         self.raise_()
-        handle = self.windowHandle()
-        if handle:
-            handle.requestActivate()
+        self.activateWindow()
 
     # ── Tool selection ────────────────────────────────────────────────────────
 

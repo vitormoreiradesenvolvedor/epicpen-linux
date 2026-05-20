@@ -1,6 +1,6 @@
 import os
 from PyQt6.QtWidgets import QWidget, QApplication
-from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, QTimer
+from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF
 from PyQt6.QtGui import (
     QPainter, QPen, QColor, QScreen, QPainterPath,
     QRadialGradient, QBrush,
@@ -44,14 +44,8 @@ class OverlayWindow(QWidget):
         # rect global da toolbar — excluída da input region do overlay
         self._toolbar_global_rect = None
 
-        # Timer que reafirma a superfície Wayland no topo do z-stack
-        self._raise_timer = QTimer(self)
-        self._raise_timer.setInterval(500)
-        self._raise_timer.timeout.connect(self._reaffirm_top)
-
         self._setup_window()
         self._refresh_cursor()
-        self._raise_timer.start()
 
     def _setup_window(self):
         virtual_geo = QApplication.primaryScreen().virtualGeometry()
@@ -138,32 +132,12 @@ class OverlayWindow(QWidget):
     def set_active(self, active: bool):
         self._active = active
         if active:
-            self._reaffirm_top()   # já chama show() + reafirma z-order
-            self._raise_timer.start()
+            self.show()
+            self.raise_()
             self._apply_input_mask()
             self._refresh_cursor()
         else:
-            self._raise_timer.stop()
             self.hide()
-
-    def _reaffirm_top(self):
-        """
-        No Wayland, raise_() é no-op (compositor controla z-order via xdg-shell).
-        Recriar a superfície Wayland com hide()+show() a coloca no topo do z-stack;
-        requestActivate() pede ao compositor xdg-activation para trazê-la ao topo.
-        """
-        if not self._active:
-            return
-        was_visible = self.isVisible()
-        if was_visible:
-            # Recria a superfície Wayland — nova superfície sempre inicia no topo
-            self.hide()
-        self.show()
-        handle = self.windowHandle()
-        if handle:
-            handle.requestActivate()
-        if was_visible:
-            self._apply_input_mask()
 
     def set_whiteboard(self, active: bool):
         self._whiteboard = active
