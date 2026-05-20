@@ -133,7 +133,8 @@ class OverlayWindow(QWidget):
         self._active = active
         if active:
             self.show()
-            self._apply_input_mask()  # re-aplica após show()
+            self.raise_()  # garante z-order acima de outras janelas
+            self._apply_input_mask()
             self._refresh_cursor()
         else:
             self.hide()

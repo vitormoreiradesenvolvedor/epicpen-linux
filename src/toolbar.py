@@ -55,9 +55,8 @@ class ToolbarWindow(QWidget):
         self._overlay   = overlay
         self._collapsed = False
         # drag state — controlado pelo eventFilter instalado em todos os filhos
-        self._drag_start  = None   # QPoint global quando o botão foi pressionado
-        self._drag_origin = None   # topLeft da janela quando o drag iniciou
-        self._dragging    = False  # True após exceder o threshold
+        self._drag_start = None   # QPoint global quando o botão foi pressionado
+        self._dragging   = False  # True após exceder o threshold (startSystemMove)
         self._drawing_active = True
         self._magnifier = MagnifierWindow()
         self._cfg       = config or {}
@@ -284,6 +283,9 @@ class ToolbarWindow(QWidget):
         self._logo_btn.setVisible(True)
         self.setFixedWidth(_WC)
         self.adjustSize()
+        # Colapso pausa o desenho (como no EpicPen original)
+        self._btn_toggle.setChecked(True)
+        self._toggle_drawing(True)
         QTimer.singleShot(0, self._sync_overlay_mask)
 
     def _do_expand(self):
@@ -292,6 +294,9 @@ class ToolbarWindow(QWidget):
         self._expanded_widget.setVisible(True)
         self.setFixedWidth(_W)
         self.adjustSize()
+        # Expansão retoma o desenho automaticamente
+        self._btn_toggle.setChecked(False)
+        self._toggle_drawing(False)
         QTimer.singleShot(0, self._sync_overlay_mask)
 
     # ── Config ────────────────────────────────────────────────────────────────
@@ -444,6 +449,10 @@ class ToolbarWindow(QWidget):
         super().resizeEvent(event)
         self._sync_overlay_mask()
 
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._sync_overlay_mask()
+
     def _sync_overlay_mask(self):
         self._overlay.set_toolbar_region(self.geometry())
 
@@ -475,27 +484,27 @@ class ToolbarWindow(QWidget):
             return False
 
         if t == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-            self._drag_start  = event.globalPosition().toPoint()
-            self._drag_origin = self.frameGeometry().topLeft()
-            self._dragging    = False
+            self._drag_start = event.globalPosition().toPoint()
+            self._dragging   = False
             return False  # não consome — deixa o botão ativar normalmente
 
         if t == QEvent.Type.MouseMove and (event.buttons() & Qt.MouseButton.LeftButton):
-            if self._drag_start is not None:
+            if self._drag_start is not None and not self._dragging:
                 delta = event.globalPosition().toPoint() - self._drag_start
-                if not self._dragging and (abs(delta.x()) + abs(delta.y()) >= 6):
+                if abs(delta.x()) + abs(delta.y()) >= 6:
                     self._dragging = True
-                if self._dragging:
-                    self.move(self._drag_origin + (event.globalPosition().toPoint() - self._drag_start))
-                    self._sync_overlay_mask()
-                    return True  # consome para não confundir widgets filho
+                    handle = self.windowHandle()
+                    if handle:
+                        # Delega o drag ao compositor (funciona em Wayland e X11)
+                        handle.startSystemMove()
+                    return True
+            if self._dragging:
+                return True  # consome moves subsequentes enquanto compositor draga
 
         if t == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
-            was_dragging  = self._dragging
-            self._drag_start  = None
-            self._drag_origin = None
-            self._dragging    = False
-            self._sync_overlay_mask()
+            was_dragging     = self._dragging
+            self._drag_start = None
+            self._dragging   = False
             if was_dragging:
                 return True  # consome release → botão não dispara click após drag
 
