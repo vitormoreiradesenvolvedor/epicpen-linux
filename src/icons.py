@@ -291,24 +291,26 @@ def drag_handle() -> QIcon:
 
 
 def logo() -> QIcon:
-    """Ícone compacto EP para o botão handle quando colapsado."""
-    px = QPixmap(40, 40)
+    """Ícone para o botão colapsado — mesmo PNG usado pela tray."""
+    from pathlib import Path
+    png = Path(__file__).parent.parent / "resources" / "icons" / "epicpen.png"
+    if png.exists():
+        return QIcon(str(png))
+    # Fallback idêntico ao tray: círculo escuro 64×64 + "EP" vermelho
+    from PyQt6.QtGui import QFont
+    px = QPixmap(64, 64)
     px.fill(Qt.GlobalColor.transparent)
     p = QPainter(px)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    from PyQt6.QtGui import QRadialGradient
-    g = QRadialGradient(QPointF(18, 16), 20)
-    g.setColorAt(0, QColor(55, 55, 80))
-    g.setColorAt(1, QColor(20, 20, 35))
-    p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(g))
-    p.drawEllipse(QRectF(2, 2, 36, 36))
-    p.setPen(QPen(QColor(100, 100, 150, 120), 1.5))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(QColor(30, 30, 30, 230)))
+    p.drawEllipse(QRectF(2, 2, 60, 60))
+    p.setPen(QPen(QColor(200, 200, 200, 120), 2))
     p.setBrush(Qt.BrushStyle.NoBrush)
-    p.drawEllipse(QRectF(2, 2, 36, 36))
-    from PyQt6.QtGui import QFont
-    f = QFont("Sans Serif", 13, QFont.Weight.Bold)
+    p.drawEllipse(QRectF(2, 2, 60, 60))
+    f = QFont("Sans Serif", 20, QFont.Weight.Bold)
     p.setFont(f)
-    p.setPen(QPen(_R))
-    p.drawText(QRectF(0, 0, 40, 40), Qt.AlignmentFlag.AlignCenter, "EP")
+    p.setPen(QPen(QColor(220, 60, 60)))
+    p.drawText(QRectF(0, 0, 64, 64), Qt.AlignmentFlag.AlignCenter, "EP")
     p.end()
     return QIcon(px)

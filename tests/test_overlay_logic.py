@@ -38,6 +38,8 @@ class _QWidget:
     def show(self): pass
     def hide(self): pass
     def raise_(self): pass
+    def isVisible(self): return True
+    def windowHandle(self): return MagicMock()
     def rect(self): return MagicMock()
 
 

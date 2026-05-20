@@ -82,13 +82,15 @@ class ToolbarWindow(QWidget):
         self._hotkeys.toggled.connect(self._on_global_hotkey)
         self._hotkeys.start()
 
-        # Garante sempre-no-topo: reage a mudanças de foco e pulsa raise_()
+        # Sempre no topo: requestActivate() é o único mecanismo que funciona
+        # no Wayland nativo (raise_() é no-op em xdg-shell).
         self._raise_timer = QTimer(self)
-        self._raise_timer.setInterval(300)
-        self._raise_timer.timeout.connect(self.raise_)
+        self._raise_timer.setInterval(500)
+        self._raise_timer.timeout.connect(self._reaffirm_top)
         self._raise_timer.start()
         QGuiApplication.instance().focusWindowChanged.connect(
-            lambda _: QTimer.singleShot(50, self.raise_)
+            lambda w: QTimer.singleShot(80, self._reaffirm_top)
+            if w is not None else None
         )
 
     # ── Window setup ──────────────────────────────────────────────────────────
@@ -333,6 +335,7 @@ class ToolbarWindow(QWidget):
         self._tray = tray
 
     def closeEvent(self, event):
+        self._raise_timer.stop()
         self._hotkeys.stop()
         super().closeEvent(event)
 
@@ -340,6 +343,19 @@ class ToolbarWindow(QWidget):
         """Chamado pelo listener global — seguro para uso entre threads."""
         self._btn_toggle.toggle()
         self._toggle_drawing(self._btn_toggle.isChecked())
+        # Hotkey também traz toolbar ao topo (substitui o alt+tab do usuário)
+        self._reaffirm_top()
+
+    def _reaffirm_top(self):
+        """
+        Traz a toolbar ao topo do z-stack.
+        raise_() é no-op no Wayland nativo; requestActivate() via xdg-activation
+        é o mecanismo correto para pedir ao compositor que eleve a janela.
+        """
+        self.raise_()
+        handle = self.windowHandle()
+        if handle:
+            handle.requestActivate()
 
     # ── Tool selection ────────────────────────────────────────────────────────
 
