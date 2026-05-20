@@ -29,19 +29,26 @@ class GlobalHotkeyListener(QObject):
 
     def start(self) -> bool:
         """Tenta iniciar em ordem de preferência. Retorna True se algum backend ativou."""
-        if self._try_kglobalaccel():
-            print("[hotkeys] ativo via KGlobalAccel (KDE Wayland nativo)")
-            return True
+        # evdev lê /dev/input diretamente — ignora o keyboard-shortcuts-inhibitor
+        # do Wayland (ativo em terminais fullscreen). É o único backend confiável
+        # nesse cenário, mas requer o grupo 'input'.
         if self._try_evdev():
-            print("[hotkeys] ativo via evdev (Wayland nativo)")
+            print("[hotkeys] ativo via evdev (nativo, todos os cenários)")
+            return True
+        # KGlobalAccel funciona na maioria dos casos Wayland, mas é bloqueado por
+        # apps que usam zwp_keyboard_shortcuts_inhibitor (terminais fullscreen etc).
+        if self._try_kglobalaccel():
+            print("[hotkeys] ativo via KGlobalAccel "
+                  "(não funciona com terminal fullscreen — veja abaixo)")
+            print("[hotkeys] Para Tab funcionar em qualquer janela:")
+            print("[hotkeys]   sudo usermod -aG input $USER   # depois logout/login")
             return True
         if self._try_pynput():
             print("[hotkeys] ativo via pynput/X11")
             return True
         print(
             "[hotkeys] atalho global indisponível.\n"
-            "  Opções: (1) instalar python3-dbus + python3-gi  "
-            "(2) sudo usermod -aG input $USER && logout/login"
+            "  Fix: sudo usermod -aG input $USER  (depois logout/login)"
         )
         return False
 
