@@ -37,7 +37,21 @@ class _QWidget:
     def update(self, *a): pass
     def show(self): pass
     def hide(self): pass
+    def raise_(self): pass
     def rect(self): return MagicMock()
+
+
+class _QTimer:
+    """Stub mínimo de QTimer."""
+    def __init__(self, *a, **kw): pass
+    def setInterval(self, *a): pass
+    def timeout(self): pass
+    def start(self, *a): pass
+    def stop(self): pass
+    # permite .timeout.connect(fn) sem erro
+    class _Signal:
+        def connect(self, *a): pass
+    timeout = _Signal()
 
 
 def _make_qt_stubs():
@@ -62,6 +76,7 @@ def _make_qt_stubs():
     qtcore.QPointF = _QPoint   # mesmo stub; aceita QPoint como argumento
     qtcore.QRect   = MagicMock
     qtcore.QRectF  = MagicMock
+    qtcore.QTimer  = _QTimer
 
     # QtGui
     qtgui.QPainter        = MagicMock

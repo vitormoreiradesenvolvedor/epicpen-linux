@@ -1,6 +1,6 @@
 import os
 from PyQt6.QtWidgets import QWidget, QApplication
-from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF
+from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, QTimer
 from PyQt6.QtGui import (
     QPainter, QPen, QColor, QScreen, QPainterPath,
     QRadialGradient, QBrush,
@@ -44,8 +44,14 @@ class OverlayWindow(QWidget):
         # rect global da toolbar — excluída da input region do overlay
         self._toolbar_global_rect = None
 
+        # Timer que pulsa raise_() para manter overlay acima de outras janelas
+        self._raise_timer = QTimer(self)
+        self._raise_timer.setInterval(300)
+        self._raise_timer.timeout.connect(self.raise_)
+
         self._setup_window()
         self._refresh_cursor()
+        self._raise_timer.start()
 
     def _setup_window(self):
         virtual_geo = QApplication.primaryScreen().virtualGeometry()
@@ -133,10 +139,12 @@ class OverlayWindow(QWidget):
         self._active = active
         if active:
             self.show()
-            self.raise_()  # garante z-order acima de outras janelas
+            self.raise_()
+            self._raise_timer.start()
             self._apply_input_mask()
             self._refresh_cursor()
         else:
+            self._raise_timer.stop()
             self.hide()
 
     def set_whiteboard(self, active: bool):

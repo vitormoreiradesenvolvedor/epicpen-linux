@@ -1,9 +1,9 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QSlider, QColorDialog, QFrame,
+    QSlider, QColorDialog, QFrame, QLayout,
 )
 from PyQt6.QtCore import Qt, QPoint, QTimer, QSize, QEvent
-from PyQt6.QtGui import QColor, QCursor
+from PyQt6.QtGui import QColor, QCursor, QGuiApplication
 
 import icons
 from hotkeys import GlobalHotkeyListener
@@ -11,8 +11,7 @@ from magnifier import MagnifierWindow
 
 _ICON = QSize(22, 22)
 _BTN  = 36   # button side (px)
-_W    = 56   # toolbar width — expanded
-_WC   = 52   # toolbar width — collapsed
+_W    = 56   # toolbar width (expanded e collapsed usam a mesma largura)
 
 _STYLE = """
     QFrame#toolbar {
@@ -83,6 +82,15 @@ class ToolbarWindow(QWidget):
         self._hotkeys.toggled.connect(self._on_global_hotkey)
         self._hotkeys.start()
 
+        # Garante sempre-no-topo: reage a mudanças de foco e pulsa raise_()
+        self._raise_timer = QTimer(self)
+        self._raise_timer.setInterval(300)
+        self._raise_timer.timeout.connect(self.raise_)
+        self._raise_timer.start()
+        QGuiApplication.instance().focusWindowChanged.connect(
+            lambda _: QTimer.singleShot(50, self.raise_)
+        )
+
     # ── Window setup ──────────────────────────────────────────────────────────
 
     def _setup_window(self):
@@ -102,6 +110,8 @@ class ToolbarWindow(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 8, 4, 8)
         root.setSpacing(0)
+        # Bloqueia resize externo (compositor não pode redimensionar)
+        root.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
 
         self._container = QFrame(self)
         self._container.setObjectName("toolbar")
@@ -112,10 +122,11 @@ class ToolbarWindow(QWidget):
         outer.setSpacing(0)
 
         # Logo button — visible only when collapsed
+        # _W=56, margens totais=20 → inner=36=_BTN → logo centrado perfeitamente
         self._logo_btn = QPushButton()
         self._logo_btn.setIcon(icons.logo())
-        self._logo_btn.setIconSize(QSize(36, 36))
-        self._logo_btn.setFixedSize(44, 44)
+        self._logo_btn.setIconSize(QSize(30, 30))
+        self._logo_btn.setFixedSize(_BTN, _BTN)
         self._logo_btn.setToolTip("Expandir")
         self._logo_btn.setCheckable(False)
         self._logo_btn.setVisible(False)
@@ -281,7 +292,7 @@ class ToolbarWindow(QWidget):
         self._collapsed = True
         self._expanded_widget.setVisible(False)
         self._logo_btn.setVisible(True)
-        self.setFixedWidth(_WC)
+        self.setFixedWidth(_W)
         self.adjustSize()
         # Colapso pausa o desenho (como no EpicPen original)
         self._btn_toggle.setChecked(True)
