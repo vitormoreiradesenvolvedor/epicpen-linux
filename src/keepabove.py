@@ -2,11 +2,11 @@
 Define keepAbove=true para as janelas deste processo via KWin DBus scripting.
 Funciona no KDE Plasma 6 Wayland sem roubar foco de teclado.
 
-Correções vs. tentativa anterior:
-  - objeto em /Scripting/Script{N}, não /{N}
-  - interface org.kde.kwin.Script, não org.kde.kwin.Scripting
-  - binário qdbus-qt6, não qdbus
-  - pluginName fixo evita recarregar o script a cada chamada
+Comportamento confirmado do KWin 6:
+  - Objeto em /Scripting/Script{N}, interface org.kde.kwin.Script
+  - Após run(), KWin remove o objeto E o script de m_scripts automaticamente
+  - Portanto: loadScript+run() a cada chamada (sem cache de _script_id)
+  - Sem cache, o ID é sempre estável (mesma posição em m_scripts)
 """
 import os
 import subprocess
@@ -25,7 +25,6 @@ _JS = (
 )
 
 _lock = threading.Lock()
-_script_id: str | None = None
 _script_path: str | None = None
 
 
@@ -35,34 +34,35 @@ def _qdbus(*args, timeout=5):
             ["qdbus-qt6", "org.kde.KWin"] + list(args),
             capture_output=True, text=True, timeout=timeout,
         )
-        return r.returncode, r.stdout.strip(), r.stderr.strip()
+        out = r.stdout.strip()
+        # qdbus-qt6 imprime erros no stdout (não stderr)
+        return r.returncode, out, r.stderr.strip() or out
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         return -1, "", str(e)
 
 
 def _run(pid: int):
-    global _script_id, _script_path
+    global _script_path
 
     with _lock:
-        # Cria o arquivo JS uma única vez por processo
+        # Cria o arquivo JS uma única vez
         if _script_path is None:
             f = tempfile.NamedTemporaryFile(mode="w", suffix=".js", delete=False)
             f.write(_JS.format(pid=pid))
             f.close()
             _script_path = f.name
 
-        # Carrega o script uma única vez (pluginName deduplica no KWin)
-        if _script_id is None:
-            rc, sid, err = _qdbus("/Scripting", "loadScript", _script_path, _PLUGIN)
-            if rc != 0 or not sid.lstrip("-").isdigit():
-                print(f"[keepabove] loadScript failed: {err or sid!r}", flush=True)
-                return
-            _script_id = sid
+        # Carrega o script (KWin remove-o de m_scripts após run(), então cada
+        # chamada cria uma nova instância com o mesmo ID estável)
+        rc, sid, err = _qdbus("/Scripting", "loadScript", _script_path, _PLUGIN)
+        if rc != 0 or not sid.lstrip("-").isdigit() or int(sid) < 0:
+            print(f"[keepabove] loadScript failed: {err!r}", flush=True)
+            return
 
-        # Executa: /Scripting/Script{N} → org.kde.kwin.Script.run()
-        rc, _, err = _qdbus(f"/Scripting/Script{_script_id}", "run")
+        # Executa: após run(), o objeto /Scripting/Script{sid} é removido pelo KWin
+        rc, out, err = _qdbus(f"/Scripting/Script{sid}", "run")
         if rc != 0:
-            print(f"[keepabove] Script{_script_id}.run() failed: {err!r}", flush=True)
+            print(f"[keepabove] Script{sid}.run() failed: {out!r}", flush=True)
 
 
 def set_keepabove():
