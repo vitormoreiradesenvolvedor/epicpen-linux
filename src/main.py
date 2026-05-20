@@ -7,6 +7,7 @@ import config as cfg
 from overlay import OverlayWindow
 from toolbar import ToolbarWindow
 from tray import TrayIcon
+import keepabove
 
 
 def main():
@@ -29,6 +30,20 @@ def main():
 
     overlay.show()
     toolbar.show()
+
+    # keepAbove via KWin DBus (KDE Plasma 6 Wayland — windowStaysOnTop não basta)
+    # Aguarda 600 ms para as superfícies Wayland serem mapeadas antes de rodar o script
+    QTimer.singleShot(600, keepabove.set_keepabove)
+
+    # Re-aplica sempre que outra janela ganhar foco (debounce 400 ms)
+    _ka_timer = QTimer()
+    _ka_timer.setSingleShot(True)
+    _ka_timer.setInterval(400)
+    _ka_timer.timeout.connect(keepabove.set_keepabove)
+    from PyQt6.QtGui import QGuiApplication
+    QGuiApplication.instance().focusWindowChanged.connect(
+        lambda _: _ka_timer.start()
+    )
 
     # Autosave com debounce de 500 ms para não escrever em disco a cada evento
     _save_timer = QTimer()

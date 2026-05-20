@@ -92,13 +92,6 @@ class ToolbarWindow(QWidget):
         self._hotkeys.toggled.connect(self._on_global_hotkey)
         self._hotkeys.start()
 
-        # Sempre no topo: activateWindow() é chamado uma vez ao ativar o
-        # desenho e pelo hotkey. Entre chamadas, focusWindowChanged dispara
-        # raise_() passivo (funciona no KDE sem roubar foco).
-        from PyQt6.QtGui import QGuiApplication
-        QGuiApplication.instance().focusWindowChanged.connect(
-            lambda _: QTimer.singleShot(80, self.raise_)
-        )
 
     # ── Window setup ──────────────────────────────────────────────────────────
 
