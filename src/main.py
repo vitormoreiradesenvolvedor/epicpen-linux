@@ -14,6 +14,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("EpicPen")
     app.setApplicationVersion("0.1.0")
+    app.setDesktopFileName("epicpen")   # define app_id no Wayland (usado pelo KWin rules)
     app.setQuitOnLastWindowClosed(False)
 
     settings = cfg.load()
