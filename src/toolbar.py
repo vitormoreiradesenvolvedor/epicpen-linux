@@ -341,18 +341,22 @@ class ToolbarWindow(QWidget):
         super().closeEvent(event)
 
     def _on_global_hotkey(self):
-        """Chamado pelo listener global — seguro para uso entre threads."""
-        self._btn_toggle.toggle()
-        self._toggle_drawing(self._btn_toggle.isChecked())
-        # Hotkey também traz toolbar ao topo (substitui o alt+tab do usuário)
+        """
+        Tab global: sempre traz a toolbar para frente.
+        - Se recolhida → expande
+        - Se desenho pausado → retoma
+        - Re-aplica keepAbove via KWin para garantir z-order
+        """
+        if self._collapsed:
+            self._do_expand()
+        elif not self._drawing_active:
+            self._btn_toggle.setChecked(False)
+            self._toggle_drawing(False)
+        import keepabove
+        keepabove.set_keepabove()
         self._reaffirm_top()
 
     def _reaffirm_top(self):
-        """
-        Traz toolbar e overlay ao topo.
-        activateWindow() é necessário no Wayland para que o KWin registre o
-        estado "keep above" — chamado na ativação do desenho e pelo hotkey.
-        """
         self.raise_()
         self.activateWindow()
         if self._drawing_active:
