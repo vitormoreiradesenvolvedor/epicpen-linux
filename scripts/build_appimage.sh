@@ -44,9 +44,12 @@ PYQT6_LIBS=$("$VENV/bin/python" -c \
   "import PyQt6, os; print(os.path.join(os.path.dirname(PyQt6.__file__), 'Qt6', 'lib'))")
 echo "  PyQt6 Qt version: $("$VENV/bin/python" -c 'from PyQt6.QtCore import QT_VERSION_STR; print(QT_VERSION_STR)')"
 
-# ── 4. Copia fontes ────────────────────────────────────────────────────
-echo "→ Copiando fontes..."
+# ── 4. Copia fontes e recursos ────────────────────────────────────────
+echo "→ Copiando fontes e recursos..."
 cp -r "$ROOT/src/"* "$APPDIR/usr/bin/"
+# tray.py e icons.py usam Path(__file__).parent.parent / "resources"
+# → no AppImage isso resolve para usr/resources/
+cp -r "$ROOT/resources" "$APPDIR/usr/resources"
 
 # ── 5. Copia libs nativas do layer-shell ──────────────────────────────
 echo "→ Copiando libs layer-shell..."

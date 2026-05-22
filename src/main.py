@@ -52,16 +52,21 @@ def main():
     _tb_pos = settings.get("toolbar_pos", {"x": 20, "y": 150})
     _tb_x, _tb_y = _tb_pos.get("x", 20), _tb_pos.get("y", 150)
 
-    # Encontra o monitor ao qual a posição salva pertence (coordenadas absolutas).
-    # Se não pertencer a nenhum monitor, reseta para o primário em (20, 150).
+    # Encontra o monitor ao qual a posição salva pertence E onde o toolbar inteiro cabe.
+    # Verifica top-left E bottom-right — evita toolbar parcialmente fora do ecrã.
     from PyQt6.QtCore import QPoint as _QPoint
     _tb_abs = _QPoint(_tb_x, _tb_y)
+    _tb_w = toolbar.width() or 56
+    _tb_h = toolbar.height() or 400
     _tb_screen = next(
-        (s for s in QApplication.screens() if s.geometry().contains(_tb_abs)),
+        (s for s in QApplication.screens()
+         if s.geometry().contains(_tb_abs)
+         and _tb_x + _tb_w <= s.geometry().x() + s.geometry().width()
+         and _tb_y + _tb_h <= s.geometry().y() + s.geometry().height()),
         None,
     )
     if _tb_screen is None:
-        print(f"[toolbar] posição salva ({_tb_x},{_tb_y}) não pertence a nenhum monitor — resetando para (20,150)")
+        print(f"[toolbar] posição salva ({_tb_x},{_tb_y}+{_tb_w}×{_tb_h}) não cabe em nenhum monitor — resetando para (20,150)")
         _tb_x, _tb_y = 20, 150
         _tb_screen = _primary
         _tb_abs = _QPoint(_tb_x, _tb_y)
