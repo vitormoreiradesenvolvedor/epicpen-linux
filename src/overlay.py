@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import QWidget, QApplication
 from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF
 from PyQt6.QtGui import (
     QPainter, QPen, QColor, QScreen, QPainterPath,
-    QRadialGradient, QBrush,
+    QRadialGradient, QBrush, QPixmap,
 )
 from cursors import make_pen_cursor, make_eraser_cursor, make_crosshair_cursor
 
@@ -40,6 +40,11 @@ class OverlayWindow(QWidget):
         self._spotlight = False
         self._spotlight_pos: QPoint | None = None
         self._spotlight_radius = 150
+
+        # Canvas acumulado: strokes concluídos são commitados aqui uma vez.
+        # paintEvent faz blit deste pixmap + desenha apenas o stroke actual.
+        # Invalida (None) quando o widget é redimensionado ou undo/clear ocorre.
+        self._canvas: QPixmap | None = None
 
         # rect global da toolbar — usado no modo dois-janelas (legado)
         self._toolbar_global_rect = None
@@ -280,19 +285,57 @@ class OverlayWindow(QWidget):
         self._spotlight_radius = radius
         self.update()
 
+    # ── Canvas acumulado ──────────────────────────────────────────────────
+
+    def _ensure_canvas(self):
+        if self._canvas is None or self._canvas.size() != self.size():
+            self._canvas = QPixmap(self.size())
+            self._canvas.fill(Qt.GlobalColor.transparent)
+            self._rebuild_canvas()
+
+    def _rebuild_canvas(self):
+        """Redesenha todos os strokes concluídos no canvas (usado por undo/resize)."""
+        if self._canvas is None:
+            return
+        self._canvas.fill(Qt.GlobalColor.transparent)
+        if not self._strokes:
+            return
+        p = QPainter(self._canvas)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for stroke in self._strokes:
+            self._draw_stroke(p, stroke)
+        p.end()
+
+    def _commit_stroke(self, stroke: list) -> None:
+        """Pinta um stroke directamente no canvas sem redesenhar tudo."""
+        if self._canvas is None:
+            return
+        p = QPainter(self._canvas)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._draw_stroke(p, stroke)
+        p.end()
+
+    # ── Undo / redo / clear ───────────────────────────────────────────────
+
     def undo(self):
         if self._strokes:
             self._undo_stack.append(self._strokes.pop())
+            self._canvas = None   # força rebuild no próximo paint
             self.update()
 
     def redo(self):
         if self._undo_stack:
-            self._strokes.append(self._undo_stack.pop())
+            stroke = self._undo_stack.pop()
+            self._strokes.append(stroke)
+            self._ensure_canvas()
+            self._commit_stroke(stroke)
             self.update()
 
     def clear(self):
         self._strokes.clear()
         self._undo_stack.clear()
+        if self._canvas is not None:
+            self._canvas.fill(Qt.GlobalColor.transparent)
         self.update()
 
     # ── Mouse events ──────────────────────────────────────────────────────
@@ -331,21 +374,32 @@ class OverlayWindow(QWidget):
             return
         self._drawing = False
         if self._current_stroke:
-            self._strokes.append(list(self._current_stroke))
+            stroke = list(self._current_stroke)
+            self._strokes.append(stroke)
+            self._ensure_canvas()
+            self._commit_stroke(stroke)   # commit incremental — O(stroke) não O(all)
         self._current_stroke = []
         self.update()
 
     # ── Painting ──────────────────────────────────────────────────────────
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._canvas = None   # tamanho mudou — recria no próximo paint
+
     def paintEvent(self, _event):
+        self._ensure_canvas()
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         if self._whiteboard:
             painter.fillRect(self.rect(), QColor(255, 255, 255, 255))
 
-        for stroke in self._strokes:
-            self._draw_stroke(painter, stroke)
+        # Blit do canvas acumulado (strokes concluídos) — custo O(1)
+        painter.drawPixmap(0, 0, self._canvas)
+
+        # Stroke actual (ainda em progresso) desenhado por cima
         if self._current_stroke:
             self._draw_stroke(painter, self._current_stroke)
 
