@@ -8,6 +8,7 @@ from overlay import OverlayWindow
 from toolbar import ToolbarWindow
 from tray import TrayIcon
 import keepabove
+import layershell
 
 
 def main():
@@ -28,22 +29,89 @@ def main():
         overlay.set_whiteboard(True)
         toolbar._btn_whiteboard.setChecked(True)
 
+    from PyQt6.QtWidgets import QApplication as _App
+    _primary = _App.primaryScreen()
+
+    # overlay → Layer::Top, 4-anchor + ExclusiveZone=0:
+    # compositor dimensiona a janela para a área disponível (exclui painel KDE).
+    _lsw_o = layershell.apply(
+        overlay,
+        layer=layershell.LAYER_TOP,
+        anchors=(layershell.ANCHOR_TOP | layershell.ANCHOR_BOTTOM |
+                 layershell.ANCHOR_LEFT | layershell.ANCHOR_RIGHT),
+        exclusive_zone=0,
+        initial_pos=(0, 0),
+        screen=_primary,
+    )
+
+    # toolbar → Layer::Top (mesmo layer do overlay), posição explícita do config.
+    # Layer::Overlay é bloqueado pelo KWin para apps regulares; Layer::Top funciona.
+    # adjustSize() força o layout a calcular a altura antes da superfície ser criada.
+    toolbar.adjustSize()
+    print(f"[toolbar] size antes de apply(): {toolbar.size().width()}×{toolbar.size().height()}")
+    _tb_pos = settings.get("toolbar_pos", {"x": 20, "y": 150})
+    _tb_x, _tb_y = _tb_pos.get("x", 20), _tb_pos.get("y", 150)
+
+    # Encontra o monitor ao qual a posição salva pertence (coordenadas absolutas).
+    # Se não pertencer a nenhum monitor, reseta para o primário em (20, 150).
+    from PyQt6.QtCore import QPoint as _QPoint
+    _tb_abs = _QPoint(_tb_x, _tb_y)
+    _tb_screen = next(
+        (s for s in QApplication.screens() if s.geometry().contains(_tb_abs)),
+        None,
+    )
+    if _tb_screen is None:
+        print(f"[toolbar] posição salva ({_tb_x},{_tb_y}) não pertence a nenhum monitor — resetando para (20,150)")
+        _tb_x, _tb_y = 20, 150
+        _tb_screen = _primary
+        _tb_abs = _QPoint(_tb_x, _tb_y)
+
+    # Margens layer-shell são relativas ao output (monitor), não absolutas.
+    _tb_origin = _tb_screen.geometry().topLeft()
+    _tb_rel_x  = _tb_x - _tb_origin.x()
+    _tb_rel_y  = _tb_y - _tb_origin.y()
+    print(f"[toolbar] screen={_tb_screen.name()} origin={_tb_origin.x()},{_tb_origin.y()} abs=({_tb_x},{_tb_y}) rel=({_tb_rel_x},{_tb_rel_y})")
+
+    _lsw_t = layershell.apply(
+        toolbar,
+        layer=layershell.LAYER_TOP,
+        exclusive_zone=-1,
+        initial_pos=(_tb_rel_x, _tb_rel_y),
+        screen=_tb_screen,
+    )
+    toolbar._lsw_ptr = _lsw_t
+    toolbar._lsw_pos = _tb_abs  # coordenadas absolutas — referência interna
+
+    overlay._layer_shell_active = bool(_lsw_o)
+
+    if _lsw_o and _lsw_t:
+        # Quando o overlay é remapeado (set_active True após estar escondido), ele fica
+        # acima do toolbar na z-order de Layer::Top. Remapear o toolbar logo depois
+        # devolve-o ao topo. O hide+show sincronos são processados no mesmo frame pelo KWin.
+        def _reraise_toolbar():
+            toolbar.hide()
+            toolbar.show()
+        overlay._on_remapped = _reraise_toolbar
+        print("[layershell] overlay Layer::Top 4-anchor ExclusiveZone=0 + toolbar Layer::Overlay")
+    elif _lsw_o:
+        print("[layershell] overlay Layer::Top (toolbar sem layer-shell)")
+    else:
+        print("[layershell] FALHOU — usando fallback keepAbove")
+
     overlay.show()
     toolbar.show()
 
-    # keepAbove via KWin DBus (KDE Plasma 6 Wayland — windowStaysOnTop não basta)
-    # Aguarda 600 ms para as superfícies Wayland serem mapeadas antes de rodar o script
-    QTimer.singleShot(600, keepabove.set_keepabove)
-
-    # Re-aplica sempre que outra janela ganhar foco (debounce 400 ms)
-    _ka_timer = QTimer()
-    _ka_timer.setSingleShot(True)
-    _ka_timer.setInterval(400)
-    _ka_timer.timeout.connect(keepabove.set_keepabove)
-    from PyQt6.QtGui import QGuiApplication
-    QGuiApplication.instance().focusWindowChanged.connect(
-        lambda _: _ka_timer.start()
-    )
+    if not _lsw_o:
+        # Fallback keepAbove para sessões X11 ou quando layer-shell não está disponível
+        QTimer.singleShot(600, keepabove.set_keepabove)
+        _ka_timer = QTimer()
+        _ka_timer.setSingleShot(True)
+        _ka_timer.setInterval(400)
+        _ka_timer.timeout.connect(keepabove.set_keepabove)
+        from PyQt6.QtGui import QGuiApplication
+        QGuiApplication.instance().focusWindowChanged.connect(
+            lambda _: _ka_timer.start()
+        )
 
     # Autosave com debounce de 500 ms para não escrever em disco a cada evento
     _save_timer = QTimer()

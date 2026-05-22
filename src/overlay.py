@@ -41,8 +41,16 @@ class OverlayWindow(QWidget):
         self._spotlight_pos: QPoint | None = None
         self._spotlight_radius = 150
 
-        # rect global da toolbar — excluída da input region do overlay
+        # rect global da toolbar — usado no modo dois-janelas (legado)
         self._toolbar_global_rect = None
+        # widget da toolbar embutida — usado no modo janela-única
+        self._toolbar_widget = None
+        # True quando layer-shell está ativo: show/hide usam máscara em vez de
+        # mapear/desmapar a superfície (evita perder a configuração layer-shell)
+        self._layer_shell_active = False
+        # Chamado após remapar a superfície (layer-shell); usado em main.py
+        # para forçar o toolbar de volta ao topo da z-order.
+        self._on_remapped = None
 
         self._setup_window()
         self._refresh_cursor()
@@ -72,6 +80,7 @@ class OverlayWindow(QWidget):
         for s in QApplication.screens():
             virtual_geo = virtual_geo.united(s.geometry())
         self.setGeometry(virtual_geo)
+        self._apply_input_mask()
 
     # ── Cursores ──────────────────────────────────────────────────────────
 
@@ -109,35 +118,152 @@ class OverlayWindow(QWidget):
         if self._tool == "eraser":
             self.setCursor(make_eraser_cursor(size))
 
-    def set_toolbar_region(self, global_rect):
+    def embed_toolbar(self, toolbar):
         """
-        Exclui a área da toolbar da input region do overlay.
-        No Wayland, setMask() atualiza wl_surface.set_input_region —
-        o compositor entrega cliques nessa área direto para a toolbar.
+        Embeds toolbar as a child widget of this overlay (single-window mode).
+        Call BEFORE show(). The toolbar's saved position is preserved via its _cfg.
         """
-        self._toolbar_global_rect = global_rect
+        pos = toolbar._cfg.get("toolbar_pos", {"x": 20, "y": 150})
+        toolbar.setParent(self)
+        # WA_TranslucentBackground num filho de janela transparente torna o filho invisível;
+        # sem ele, as áreas não pintadas caem no fundo transparente do pai (correto).
+        toolbar.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        # setParent() resets widget position to (0,0) — restore from config
+        toolbar.move(pos.get("x", 20), pos.get("y", 150))
+        toolbar.show()
+        self._toolbar_widget = toolbar
+        self._apply_input_mask()
+
+    def set_toolbar_region(self, local_rect):
+        """Legado: chamado pelo toolbar para sincronizar máscara (modo dois-janelas)."""
+        self._toolbar_global_rect = local_rect
         self._apply_input_mask()
 
     def _apply_input_mask(self):
         from PyQt6.QtGui import QRegion
-        if self._toolbar_global_rect is None:
-            self.clearMask()
+
+        if self._toolbar_widget is not None:
+            # Embed: só a área da toolbar recebe input quando desenho inativo
+            if self._active:
+                self.clearMask()
+            else:
+                tb_rect = self._toolbar_widget.geometry()
+                self.setMask(QRegion(tb_rect) if not tb_rect.isEmpty()
+                             else self._offscreen_region())
             return
-        # Converte rect global → coordenadas locais do overlay
-        origin = self.geometry().topLeft()
-        local = self._toolbar_global_rect.translated(-origin)
+
+        if self._layer_shell_active:
+            # Layer-shell duas janelas: o toolbar é superfície separada acima na z-order.
+            # O compositor entrega cliques ao toolbar sem precisar de máscara no overlay.
+            # widget.geometry() é lixo no Wayland — qualquer subtração seria errada.
+            if self._active:
+                self.clearMask()
+            # inactive: set_active() já chamou super().hide() — nada a fazer aqui
+            return
+
+        # Modo legado dois-janelas (X11 / sem layer-shell)
+        if not self._active:
+            self.setMask(self._offscreen_region())
+            return
+
+        # Área base: tela toda
         full = QRegion(self.rect())
-        self.setMask(full.subtracted(QRegion(local)))
+        origin = self.geometry().topLeft()
+
+        # Subtrai área da toolbar (modo legado dois-janelas)
+        if self._toolbar_global_rect is not None:
+            local = self._toolbar_global_rect.translated(-origin)
+            full = full.subtracted(QRegion(local))
+
+        # Subtrai área de painel de cada tela (availableGeometry ≠ geometry)
+        # para que o painel KDE sempre receba eventos de input.
+        for screen in QApplication.screens():
+            panel = QRegion(screen.geometry().translated(-origin)).subtracted(
+                        QRegion(screen.availableGeometry().translated(-origin)))
+            if not panel.isEmpty():
+                full = full.subtracted(panel)
+
+        self.setMask(full)
 
     def set_active(self, active: bool):
         self._active = active
-        if active:
-            self.show()
-            self.raise_()
+        if self._toolbar_widget is not None:
+            # Modo embed: nunca esconde — usa máscara para pass-through
             self._apply_input_mask()
             self._refresh_cursor()
+            self.update()
+        elif self._layer_shell_active:
+            # Layer-shell: unmap real libera o input para outras janelas
+            if active:
+                was_hidden = not self.isVisible()
+                if was_hidden:
+                    super().show()
+                self.clearMask()
+                self._refresh_cursor()
+                self.update()
+                # Superfície remapeada vai para o topo da z-order dentro de Layer::Top,
+                # ficando acima do toolbar. Notifica main.py para recolocar o toolbar.
+                if was_hidden and self._on_remapped:
+                    self._on_remapped()
+            else:
+                super().hide()
         else:
-            self.hide()
+            # Fallback legacy (X11, sem layer-shell): show/hide real
+            if active:
+                super().show()
+                self.raise_()
+                self._apply_input_mask()
+                self._refresh_cursor()
+            else:
+                super().hide()
+
+    def show(self):
+        if self._layer_shell_active:
+            self._active = True
+            self.clearMask()
+            self._refresh_cursor()
+            self.update()
+            if not self.isVisible():
+                super().show()  # primeira vez: cria superfície layer-shell
+        else:
+            super().show()
+
+    def hide(self):
+        self._active = False
+        super().hide()
+
+    def _offscreen_region(self):
+        """1×1 px fora do ecrã: wl_surface recebe set_input_region(empty_region)
+        em vez de set_input_region(null) que o Qt usa para QRegion() vazio."""
+        from PyQt6.QtGui import QRegion
+        return QRegion(max(self.width(), 9999) + 1, 0, 1, 1)
+
+    def change_screen(self, screen):
+        """Move o overlay para outro monitor (layer-shell).
+
+        hide+show força a recriação da wl_layer_surface no novo output.
+        Não dispara _on_remapped (que é reservado para toggle de modo de desenho).
+        """
+        if not self._layer_shell_active:
+            return
+        qwindow = self.windowHandle()
+        if qwindow is None:
+            return
+        was_visible = self.isVisible()
+        if was_visible:
+            super().hide()
+        qwindow.setScreen(screen)
+        if was_visible:
+            super().show()
+            if self._active:
+                self.clearMask()
+                self._refresh_cursor()
+                self.update()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._layer_shell_active:
+            self._apply_input_mask()
 
     def set_whiteboard(self, active: bool):
         self._whiteboard = active
