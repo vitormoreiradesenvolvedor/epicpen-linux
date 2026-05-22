@@ -46,6 +46,11 @@ class OverlayWindow(QWidget):
         # Invalida (None) quando o widget é redimensionado ou undo/clear ocorre.
         self._canvas: QPixmap | None = None
 
+        # Scratch canvas para a borracha activa: cópia do canvas principal onde
+        # cada novo segmento apagado é aplicado incrementalmente durante o drag.
+        # paintEvent faz blit deste em vez de canvas+stroke enquanto está activo.
+        self._erase_scratch: QPixmap | None = None
+
         # rect global da toolbar — usado no modo dois-janelas (legado)
         self._toolbar_global_rect = None
         # widget da toolbar embutida — usado no modo janela-única
@@ -320,6 +325,7 @@ class OverlayWindow(QWidget):
     def undo(self):
         if self._strokes:
             self._undo_stack.append(self._strokes.pop())
+            self._erase_scratch = None
             self._canvas = None   # força rebuild no próximo paint
             self.update()
 
@@ -334,6 +340,7 @@ class OverlayWindow(QWidget):
     def clear(self):
         self._strokes.clear()
         self._undo_stack.clear()
+        self._erase_scratch = None
         if self._canvas is not None:
             self._canvas.fill(Qt.GlobalColor.transparent)
         self.update()
@@ -348,6 +355,14 @@ class OverlayWindow(QWidget):
         self._drawing = True
         self._current_stroke = [(event.pos(), self._brush_props())]
         self._undo_stack.clear()
+        # Borracha: inicia scratch canvas como cópia do estado actual
+        if self._tool == "eraser":
+            self._ensure_canvas()
+            self._erase_scratch = QPixmap(self._canvas)
+            p = QPainter(self._erase_scratch)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            self._draw_stroke(p, self._current_stroke)
+            p.end()
 
     def mouseMoveEvent(self, event):
         pos = event.pos()
@@ -367,6 +382,16 @@ class OverlayWindow(QWidget):
         if not self._drawing:
             return
         self._current_stroke.append((pos, self._brush_props()))
+
+        # Borracha: aplica apenas o novo segmento no scratch — O(1) por frame
+        if self._tool == "eraser" and self._erase_scratch is not None:
+            pts = self._current_stroke
+            if len(pts) >= 2:
+                p = QPainter(self._erase_scratch)
+                p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                self._draw_stroke(p, pts[-2:])
+                p.end()
+
         self.update()
 
     def mouseReleaseEvent(self, event):
@@ -376,8 +401,13 @@ class OverlayWindow(QWidget):
         if self._current_stroke:
             stroke = list(self._current_stroke)
             self._strokes.append(stroke)
-            self._ensure_canvas()
-            self._commit_stroke(stroke)   # commit incremental — O(stroke) não O(all)
+            if self._erase_scratch is not None:
+                # Borracha: scratch já tem o resultado final — promove a canvas
+                self._canvas = self._erase_scratch
+                self._erase_scratch = None
+            else:
+                self._ensure_canvas()
+                self._commit_stroke(stroke)
         self._current_stroke = []
         self.update()
 
@@ -385,6 +415,7 @@ class OverlayWindow(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._erase_scratch = None
         self._canvas = None   # tamanho mudou — recria no próximo paint
 
     def paintEvent(self, _event):
@@ -396,12 +427,14 @@ class OverlayWindow(QWidget):
         if self._whiteboard:
             painter.fillRect(self.rect(), QColor(255, 255, 255, 255))
 
-        # Blit do canvas acumulado (strokes concluídos) — custo O(1)
-        painter.drawPixmap(0, 0, self._canvas)
-
-        # Stroke actual (ainda em progresso) desenhado por cima
-        if self._current_stroke:
-            self._draw_stroke(painter, self._current_stroke)
+        # Borracha activa: blit do scratch (já tem o apagado acumulado) — O(1)
+        # Outros casos: blit do canvas + stroke em progresso
+        if self._erase_scratch is not None:
+            painter.drawPixmap(0, 0, self._erase_scratch)
+        else:
+            painter.drawPixmap(0, 0, self._canvas)
+            if self._current_stroke:
+                self._draw_stroke(painter, self._current_stroke)
 
         if self._tool == "laser" and self._laser_pos:
             self._draw_laser(painter)
