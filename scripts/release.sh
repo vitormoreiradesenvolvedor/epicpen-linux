@@ -1,38 +1,146 @@
 #!/usr/bin/env bash
-# Build script para gerar o AppImage do EpicPen Linux.
-# Uso: bash scripts/build_appimage.sh
-# Requer: curl, tar; appimagetool no PATH ou em ./tools/
+# Gerador interactivo de AppImage para o EpicPen Linux.
+# Pergunta o tipo de versão, sugere a próxima versão natural e constrói.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$SCRIPT_DIR")"
-APPDIR="$ROOT/AppDir"
-VERSION=$(git -C "$ROOT" describe --tags --abbrev=0 2>/dev/null || echo "0.1.0-dev")
 ARCH=$(uname -m)
-OUTPUT="$ROOT/EpicPen-${VERSION}-${ARCH}.AppImage"
 
-echo "══════════════════════════════════════════"
-echo "  EpicPen Linux — Build AppImage v${VERSION}"
-echo "══════════════════════════════════════════"
+# ── Cores ─────────────────────────────────────────────────────────────────────
+BOLD='\033[1m'
+CYAN='\033[0;36m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+RESET='\033[0m'
 
-# ── 0. Python standalone (portátil, sem deps de sistema) ──────────────────
+echo ""
+echo -e "${BOLD}╔══════════════════════════════════════════╗${RESET}"
+echo -e "${BOLD}║     EpicPen Linux — Gerador de Release   ║${RESET}"
+echo -e "${BOLD}╚══════════════════════════════════════════╝${RESET}"
+echo ""
+
+# ── 1. Tipo: dev ou oficial ────────────────────────────────────────────────────
+echo -e "${CYAN}Tipo de build:${RESET}"
+echo "  1) Versão oficial  (cria tag git, AppImage sem sufixo)"
+echo "  2) Versão de dev   (sem tag, AppImage com sufixo -dev)"
+echo ""
+while true; do
+    read -rp "Escolha [1/2]: " BUILD_TYPE
+    case "$BUILD_TYPE" in
+        1) IS_DEV=false; break ;;
+        2) IS_DEV=true;  break ;;
+        *) echo -e "${RED}  Digite 1 ou 2.${RESET}" ;;
+    esac
+done
+
+# ── 2. Calcula próxima versão natural ─────────────────────────────────────────
+LAST_TAG=$(git -C "$ROOT" tag --sort=-v:refname 2>/dev/null | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+
+if [ -z "$LAST_TAG" ]; then
+    SUGGESTED="1.0.0"
+else
+    # Remove prefixo "v" se existir
+    CLEAN="${LAST_TAG#v}"
+    MAJOR=$(echo "$CLEAN" | cut -d. -f1)
+    MINOR=$(echo "$CLEAN" | cut -d. -f2)
+    PATCH=$(echo "$CLEAN" | cut -d. -f3)
+    SUGGESTED="${MAJOR}.${MINOR}.$((PATCH + 1))"
+fi
+
+echo ""
+if [ -z "$LAST_TAG" ]; then
+    echo -e "${YELLOW}Nenhuma tag encontrada.${RESET}"
+else
+    echo -e "Última versão tag: ${BOLD}${LAST_TAG}${RESET}"
+fi
+echo -e "Próxima versão sugerida: ${BOLD}${SUGGESTED}${RESET}"
+echo ""
+echo "  1) Confirmar ${SUGGESTED}"
+echo "  2) Inserir versão personalizada"
+echo ""
+while true; do
+    read -rp "Escolha [1/2]: " VER_CHOICE
+    case "$VER_CHOICE" in
+        1)
+            VERSION="$SUGGESTED"
+            break
+            ;;
+        2)
+            while true; do
+                read -rp "Versão (ex: 1.2.0): " CUSTOM_VER
+                if echo "$CUSTOM_VER" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+                    VERSION="$CUSTOM_VER"
+                    break
+                else
+                    echo -e "${RED}  Formato inválido. Use X.Y.Z (ex: 1.2.0)${RESET}"
+                fi
+            done
+            break
+            ;;
+        *) echo -e "${RED}  Digite 1 ou 2.${RESET}" ;;
+    esac
+done
+
+# ── 3. Sufixo e nome final ─────────────────────────────────────────────────────
+if $IS_DEV; then
+    FULL_VERSION="${VERSION}-dev"
+    TAG_LABEL=""
+else
+    FULL_VERSION="${VERSION}"
+    TAG_LABEL="v${VERSION}"
+fi
+
+OUTPUT_NAME="EpicPen-${FULL_VERSION}-${ARCH}.AppImage"
+OUTPUT="$ROOT/$OUTPUT_NAME"
+
+# ── 4. Confirmação final ───────────────────────────────────────────────────────
+echo ""
+echo -e "${BOLD}Resumo:${RESET}"
+echo -e "  Versão   : ${BOLD}${FULL_VERSION}${RESET}"
+echo -e "  Ficheiro : ${BOLD}${OUTPUT_NAME}${RESET}"
+if $IS_DEV; then
+    echo -e "  Tag git  : ${YELLOW}não criada (build de dev)${RESET}"
+else
+    echo -e "  Tag git  : ${GREEN}v${VERSION} será criada${RESET}"
+fi
+echo ""
+read -rp "Confirmar e gerar AppImage? [s/N]: " CONFIRM
+case "$CONFIRM" in
+    s|S|y|Y) ;;
+    *) echo "Cancelado."; exit 0 ;;
+esac
+
+# ── 5. Tag git (apenas versão oficial) ────────────────────────────────────────
+if ! $IS_DEV; then
+    if git -C "$ROOT" tag | grep -qx "v${VERSION}"; then
+        echo -e "${YELLOW}Tag v${VERSION} já existe — reutilizando.${RESET}"
+    else
+        git -C "$ROOT" tag -a "v${VERSION}" -m "Release v${VERSION}"
+        echo -e "${GREEN}Tag v${VERSION} criada.${RESET}"
+    fi
+fi
+
+# ── 6. Build AppImage ─────────────────────────────────────────────────────────
+echo ""
+echo -e "${BOLD}A construir AppImage...${RESET}"
+echo ""
+
+APPDIR="$ROOT/AppDir"
+
+# Python standalone (portátil, sem deps de sistema)
 # venvs criados com o Python do sistema usam symlinks para o intérprete da
 # máquina de build — não funcionam em outras distros. python-build-standalone
 # inclui o intérprete + stdlib num único dir relocável.
 PYTHON_CACHE="$ROOT/tools/python-standalone"
 PYTHON_BIN="$PYTHON_CACHE/bin/python3"
 
-ensure_standalone_python() {
-  if [ -x "$PYTHON_BIN" ]; then
-    echo "→ Python standalone em cache ($("$PYTHON_BIN" --version 2>&1))."
-    return
-  fi
-
+if [ ! -x "$PYTHON_BIN" ]; then
   echo "→ Python standalone não encontrado — a descarregar python-build-standalone..."
   mkdir -p "$ROOT/tools"
 
-  local ARCHIVE_URL
   ARCHIVE_URL=$(curl -fsSL "https://api.github.com/repos/indygreg/python-build-standalone/releases/latest" | \
     python3 -c "
 import json, sys
@@ -48,32 +156,24 @@ for a in data.get('assets', []):
 " 2>/dev/null || true)
 
   if [ -z "$ARCHIVE_URL" ]; then
-    echo "ERRO: não foi possível determinar URL do Python standalone."
+    echo -e "${RED}ERRO: não foi possível determinar URL do Python standalone.${RESET}"
     echo "  Aceda a https://github.com/indygreg/python-build-standalone/releases"
-    echo "  e descarregue manualmente:"
-    echo "    cpython-3.12.*-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
-    echo "  Extraia com --strip-components=1 para: $PYTHON_CACHE"
+    echo "  e coloque o tarball extraído em: $PYTHON_CACHE"
     exit 1
   fi
 
+  ARCHIVE="/tmp/epicpen-python-standalone.tar.gz"
   echo "  URL: $ARCHIVE_URL"
-  local ARCHIVE="/tmp/epicpen-python-standalone.tar.gz"
   curl -fL --progress-bar "$ARCHIVE_URL" -o "$ARCHIVE"
   mkdir -p "$PYTHON_CACHE"
-  # O tarball extrai para python/ — strip-components=1 coloca diretamente em PYTHON_CACHE
+  # O tarball extrai para python/ — strip-components=1 coloca direto em PYTHON_CACHE
   tar -xzf "$ARCHIVE" --strip-components=1 -C "$PYTHON_CACHE"
   rm -f "$ARCHIVE"
-  echo "→ Python standalone instalado: $("$PYTHON_BIN" --version 2>&1)"
-}
+  echo -e "${GREEN}→ Python standalone instalado: $("$PYTHON_BIN" --version 2>&1)${RESET}"
+else
+  echo "→ Python standalone em cache ($("$PYTHON_BIN" --version 2>&1))."
+fi
 
-ensure_standalone_python
-
-# ── 1. Gera ícone PNG ──────────────────────────────────────────────────
-echo "→ Gerando ícone..."
-python3 "$SCRIPT_DIR/generate_icon.py"
-
-# ── 2. Prepara AppDir ─────────────────────────────────────────────────
-echo "→ Preparando AppDir..."
 rm -rf "$APPDIR/usr/bin" "$APPDIR/usr/lib/python-standalone" "$APPDIR/usr/lib/epicpen-venv"
 # Remove libs que possam ter ficado de builds anteriores
 rm -f "$APPDIR/usr/lib/libstdc++.so.6" "$APPDIR/usr/lib/libgcc_s.so.1"
@@ -84,65 +184,45 @@ mkdir -p \
   "$APPDIR/usr/share/applications" \
   "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 
-# ── 3. Copia Python standalone para AppDir e instala PyQt6 ────────────
-# PyQt6==6.10.1 → Qt 6.10.0 bundled: mesma série minor da lib sistema (6.10.x)
-# garantindo compatibilidade ABI com libLayerShellQtInterface compilada para Qt 6.10.
+echo "→ Gerando ícone..."
+python3 "$SCRIPT_DIR/generate_icon.py"
+
 echo "→ Copiando Python standalone para AppDir..."
 cp -r "$PYTHON_CACHE" "$APPDIR/usr/lib/python-standalone"
 APPDIR_PYTHON="$APPDIR/usr/lib/python-standalone/bin/python3"
 
-echo "→ Instalando PyQt6==6.10.1..."
+echo "→ Instalando dependências (PyQt6==6.10.1)..."
 "$APPDIR_PYTHON" -m pip install --quiet "PyQt6==6.10.1"
-echo "  Qt version: $("$APPDIR_PYTHON" -c 'from PyQt6.QtCore import QT_VERSION_STR; print(QT_VERSION_STR)')"
 
-# Descobre caminho dos plugins do PyQt6 bundled
 PYQT6_PLUGINS=$("$APPDIR_PYTHON" -c \
   "import PyQt6, os; print(os.path.join(os.path.dirname(PyQt6.__file__), 'Qt6', 'plugins'))")
 
-# ── 4. Copia fontes e recursos ────────────────────────────────────────
 echo "→ Copiando fontes e recursos..."
 cp -r "$ROOT/src/"* "$APPDIR/usr/bin/"
-# tray.py e icons.py usam Path(__file__).parent.parent / "resources"
-# → no AppImage isso resolve para usr/resources/
 cp -r "$ROOT/resources" "$APPDIR/usr/resources"
 
-# ── 5. Copia libs nativas do layer-shell ──────────────────────────────
-# libstdc++ e libgcc_s são bundladas a partir do Ubuntu 22.04 (GCC 12, sem DT_RELR).
-# Ubuntu 20.04 tem GCC 9 → max GLIBCXX_3.4.28; Qt 6.10 requer 3.4.29+.
-# Ubuntu 22.04 GCC 12 fornece GLIBCXX_3.4.30 e apenas precisa glibc ≥ 2.17.
 echo "→ Copiando libs layer-shell..."
-
-# libLayerShellQtInterface: carregada por ctypes em layershell.py.
-# A path local (usr/lib/) tem prioridade sobre _LIB_SYSTEM em layershell.py.
 if [ -f "$ROOT/lib/libLayerShellQtInterface.so.6" ]; then
   cp "$ROOT/lib/libLayerShellQtInterface.so.6" "$APPDIR/usr/lib/"
-  echo "  libLayerShellQtInterface.so.6 copiada de lib/"
 elif [ -f "/usr/lib64/libLayerShellQtInterface.so.6" ]; then
   cp "/usr/lib64/libLayerShellQtInterface.so.6" "$APPDIR/usr/lib/"
-  echo "  libLayerShellQtInterface.so.6 copiada de /usr/lib64/"
 else
-  echo "  AVISO: libLayerShellQtInterface.so.6 não encontrada — layer-shell pode falhar"
+  echo -e "${YELLOW}  AVISO: libLayerShellQtInterface.so.6 não encontrada${RESET}"
 fi
 
-# liblayer-shell.so: plugin Qt Wayland que ativa o protocolo wlr-layer-shell.
-# O pip PyQt6 não o inclui; copiamos do sistema para o dir de plugins do Python bundled.
 WSI_SYSTEM="/usr/lib64/qt6/plugins/wayland-shell-integration/liblayer-shell.so"
 WSI_DIR="$PYQT6_PLUGINS/wayland-shell-integration"
 if [ -f "$WSI_SYSTEM" ] && [ -d "$WSI_DIR" ]; then
   cp "$WSI_SYSTEM" "$WSI_DIR/"
-  echo "  liblayer-shell.so copiada para plugins do Python bundled"
-else
-  echo "  AVISO: liblayer-shell.so não copiada (sistema: $([ -f "$WSI_SYSTEM" ] && echo ok || echo ausente), dir: $([ -d "$WSI_DIR" ] && echo ok || echo ausente))"
 fi
 
-# ── 5b. Bundla libs xcb/X11 (Ubuntu 22.04 Jammy) ────────────────────────────
-# Fedora 43 compila libs xcb com binutils 2.41+ → DT_RELR → requer glibc 2.36.
-# Ubuntu 22.04 tem glibc 2.35 → incompatível. Descarregamos do Ubuntu 22.04 (sem DT_RELR).
+# Bundla libs xcb/X11 + C++ runtime (Ubuntu 22.04) — sem DT_RELR
+# Fedora 43 usa binutils 2.41+ → DT_RELR → requer glibc 2.36 → quebra Ubuntu 22.04 (glibc 2.35).
+# libstdc++/libgcc_s do Ubuntu 22.04 GCC 12: GLIBCXX_3.4.30, necessário para Ubuntu 20.04.
 echo "→ Bundling libs xcb/X11 (Ubuntu 22.04 Jammy)..."
 
 XCB_CACHE="$ROOT/tools/xcb-ubuntu"
 mkdir -p "$XCB_CACHE"
-# Migrar cache antigo de libxcb-cursor
 [ -f "$ROOT/tools/libxcb-cursor.so.0" ] && \
   mv "$ROOT/tools/libxcb-cursor.so.0" "$XCB_CACHE/libxcb-cursor.so.0" 2>/dev/null || true
 
@@ -171,10 +251,10 @@ _fetch_ubuntu_lib() {
       if _extract_so_from_deb "$deb_tmp" "$prefix" "$cache_file"; then
         echo "  $so_name ← $deb_name"
       else
-        echo "  AVISO: $so_name não extraída de $deb_name"
+        echo -e "${YELLOW}  AVISO: $so_name não extraída de $deb_name${RESET}"
       fi
     else
-      echo "  AVISO: falha ao descarregar $deb_name"
+      echo -e "${YELLOW}  AVISO: falha ao descarregar $deb_name${RESET}"
     fi
     rm -f "$deb_tmp"
   fi
@@ -213,15 +293,15 @@ POOL_GCC12="http://archive.ubuntu.com/ubuntu/pool/main/g/gcc-12/"
 _fetch_ubuntu_lib "$POOL_GCC12" "libstdc++6_12.3.0-1ubuntu1~22.04.3_amd64.deb" "libstdc++.so.6"
 _fetch_ubuntu_lib "$POOL_GCC12" "libgcc-s1_12.3.0-1ubuntu1~22.04.3_amd64.deb"  "libgcc_s.so.1"
 
-# libxcb-cursor também em PyQt6/Qt6/lib/ (RUNPATH de libqxcb.so = $ORIGIN/../../lib)
 if [ -f "$XCB_CACHE/libxcb-cursor.so.0" ]; then
   PYQT6_QT6LIB=$("$APPDIR_PYTHON" -c \
     "import PyQt6, os; print(os.path.join(os.path.dirname(PyQt6.__file__), 'Qt6', 'lib'))")
   cp "$XCB_CACHE/libxcb-cursor.so.0" "$PYQT6_QT6LIB/libxcb-cursor.so.0"
   echo "  libxcb-cursor.so.0 → $(basename $PYQT6_QT6LIB)/ também (RUNPATH)"
+else
+  echo -e "${RED}  ERRO: libxcb-cursor.so.0 não disponível — X11 não vai funcionar${RESET}"
 fi
 
-# ── 6. Wrapper executável ─────────────────────────────────────────────
 cat > "$APPDIR/usr/bin/epicpen" << 'WRAPPER'
 #!/usr/bin/env bash
 SELF_DIR="$(dirname "$(readlink -f "$0")")"
@@ -229,9 +309,6 @@ exec "$SELF_DIR/../lib/python-standalone/bin/python3" "$SELF_DIR/main.py" "$@"
 WRAPPER
 chmod +x "$APPDIR/usr/bin/epicpen"
 
-# ── 7. AppRun ─────────────────────────────────────────────────────────
-# Wayland: forçar QT_QPA_PLATFORM=wayland → xcb nunca tentado.
-# X11: todas as libs xcb bundladas em usr/lib/ — sem dependências de sistema.
 cat > "$APPDIR/AppRun" << 'APPRUN'
 #!/usr/bin/env bash
 HERE="$(dirname "$(readlink -f "$0")")"
@@ -241,8 +318,6 @@ if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -z "${QT_QPA_PLATFORM:-}" ]; then
   export QT_QPA_PLATFORM=wayland
 fi
 export LD_LIBRARY_PATH="${HERE}/usr/lib:${HERE}/usr/lib/python-standalone/lib/python3.12/site-packages/PyQt6/Qt6/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-# LD_PRELOAD garante que libxcb-cursor.so.0 está em memória antes de qualquer dlopen do Qt.
-# LD_LIBRARY_PATH por si só pode ser ignorado quando o Qt faz dlopen() de plugins internamente.
 if [ -f "${HERE}/usr/lib/libxcb-cursor.so.0" ]; then
   export LD_PRELOAD="${HERE}/usr/lib/libxcb-cursor.so.0${LD_PRELOAD:+:${LD_PRELOAD}}"
 fi
@@ -250,18 +325,14 @@ exec "${HERE}/usr/bin/epicpen" "$@"
 APPRUN
 chmod +x "$APPDIR/AppRun"
 
-# ── 8. Desktop entry + ícone ──────────────────────────────────────────
 echo "→ Copiando .desktop e ícone..."
 cp "$ROOT/epicpen.desktop" "$APPDIR/"
 ICON_SRC="$ROOT/resources/icons/epicpen.png"
 if [ -f "$ICON_SRC" ]; then
   cp "$ICON_SRC" "$APPDIR/epicpen.png"
   cp "$ICON_SRC" "$APPDIR/usr/share/icons/hicolor/256x256/apps/epicpen.png"
-else
-  echo "  AVISO: ícone não encontrado em $ICON_SRC"
 fi
 
-# ── 9. Empacota com appimagetool + runtime FUSE3 ──────────────────────
 # Arch/Manjaro têm apenas FUSE3 (fusermount3); o runtime padrão (continuous)
 # usa FUSE2 e segfaulta. Passamos --runtime-file com o runtime fuse3 do release
 # "old" (651680 bytes), que suporta FUSE2 e FUSE3.
@@ -286,7 +357,7 @@ ensure_fuse3_runtime() {
     echo "  runtime-fuse3-x86_64 descarregado ($(wc -c < "$FUSE3_RUNTIME") bytes)"
   else
     rm -f "$FUSE3_RUNTIME"
-    echo "  AVISO: falha ao descarregar runtime-fuse3 — AppImage pode não funcionar no Arch/Manjaro"
+    echo -e "${YELLOW}  AVISO: falha ao descarregar runtime-fuse3 — AppImage pode não funcionar no Arch/Manjaro${RESET}"
   fi
 }
 
@@ -300,20 +371,32 @@ for candidate in appimagetool "$ROOT/tools/appimagetool" "$ROOT/tools/appimageto
   fi
 done
 
-if [ -n "$APPIMAGETOOL" ]; then
-  echo "→ Gerando AppImage com $APPIMAGETOOL..."
-  RUNTIME_OPT=()
-  [ -f "$FUSE3_RUNTIME" ] && RUNTIME_OPT=(--runtime-file "$FUSE3_RUNTIME")
-  ARCH="$ARCH" "$APPIMAGETOOL" "${RUNTIME_OPT[@]}" "$APPDIR" "$OUTPUT"
-  echo ""
-  echo "✓ AppImage gerado: $(basename "$OUTPUT")"
-  echo "  Tamanho: $(du -sh "$OUTPUT" | cut -f1)"
-else
-  echo ""
-  echo "⚠  appimagetool não encontrado."
-  echo "   Baixe em: https://github.com/AppImage/appimagetool/releases"
-  echo "   Coloque em: $ROOT/tools/appimagetool"
-  echo "   AppDir pronto em: $APPDIR"
-  echo "   Execute manualmente:"
-  echo "     appimagetool $APPDIR $OUTPUT"
+if [ -z "$APPIMAGETOOL" ]; then
+    echo ""
+    echo -e "${RED}⚠  appimagetool não encontrado.${RESET}"
+    echo "   Baixe em: https://github.com/AppImage/appimagetool/releases"
+    echo "   Coloque em: $ROOT/tools/appimagetool"
+    exit 1
 fi
+
+echo "→ Empacotando com appimagetool..."
+RUNTIME_OPT=()
+[ -f "$FUSE3_RUNTIME" ] && RUNTIME_OPT=(--runtime-file "$FUSE3_RUNTIME")
+ARCH="$ARCH" "$APPIMAGETOOL" "${RUNTIME_OPT[@]}" "$APPDIR" "$OUTPUT"
+
+# ── 7. Resultado ──────────────────────────────────────────────────────────────
+echo ""
+if [ -f "$OUTPUT" ]; then
+    SIZE=$(du -sh "$OUTPUT" | cut -f1)
+    echo -e "${GREEN}${BOLD}✓ AppImage gerado com sucesso!${RESET}"
+    echo -e "  Ficheiro : ${BOLD}${OUTPUT_NAME}${RESET}"
+    echo -e "  Tamanho  : ${BOLD}${SIZE}${RESET}"
+    echo -e "  Versão   : ${BOLD}${FULL_VERSION}${RESET}"
+    if ! $IS_DEV; then
+        echo -e "  Tag git  : ${BOLD}v${VERSION}${RESET}"
+    fi
+else
+    echo -e "${RED}✗ Falha ao gerar AppImage.${RESET}"
+    exit 1
+fi
+echo ""

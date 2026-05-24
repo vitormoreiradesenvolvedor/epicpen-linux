@@ -1,0 +1,20 @@
+name: Verificar origem do PR
+
+on:
+  pull_request:
+    branches: [master]
+
+jobs:
+  check-source-branch:
+    name: Verificar branch de origem
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rejeitar PRs que não venham de development
+        if: github.head_ref != 'development'
+        run: |
+          echo "PRs para master só são aceites vindos da branch 'development'."
+          echo "Branch de origem detectada: ${{ github.head_ref }}"
+          exit 1
+
+      - name: Branch validada
+        run: echo "OK — PR vem de development."
