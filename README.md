@@ -1,42 +1,155 @@
 # EpicPen Linux
 
-Reimplementação open-source da ferramenta [EpicPen](https://epic-pen.com/) para Linux, distribuída como AppImage.
+Reimplementação open-source da ferramenta [EpicPen](https://epic-pen.com/) para Linux, distribuída como AppImage autocontido — sem instalação, sem dependências de sistema.
 
-## Funcionalidades planejadas
+O EpicPen é uma ferramenta amplamente usada no Windows para desenhar, anotar e destacar conteúdo diretamente sobre o ecrã durante apresentações, aulas e reuniões. Esta implementação traz as mesmas capacidades para Linux com suporte nativo a Wayland e X11.
 
-- Desenho sobre a tela com caneta, marcador e formas
+## Funcionalidades
+
+- Desenho sobre o ecrã com caneta, marcador e formas geométricas
 - Múltiplas cores e tamanhos de pincel
 - Desfazer / Refazer (Ctrl+Z / Ctrl+Y)
-- Limpar tela
+- Limpar ecrã
 - Modo quadro branco
 - Ponteiro laser
 - Lupa / Zoom
-- Painel flutuante sempre no topo
+- Toolbar flutuante colapsável, sempre no topo
 - Suporte a múltiplos monitores
+- Suporte nativo a Wayland (wlr-layer-shell) e X11
+
+## Download
+
+Vá à página de [Releases](../../releases) e descarregue o AppImage mais recente.
+
+```bash
+chmod +x EpicPen-v*.AppImage
+./EpicPen-v*.AppImage
+```
+
+Não é necessário instalar nada. O AppImage inclui Python 3.12, PyQt6 e todas as bibliotecas nativas.
+
+## Requisitos do sistema
+
+| Componente | Mínimo |
+|---|---|
+| Distribuição | Ubuntu **22.04** LTS / Debian 12 / Fedora 38+ / Arch Linux / Manjaro ou equivalente |
+| glibc | **2.34**+ (Ubuntu 22.04 ✓) |
+| Sessão gráfica | Wayland (GNOME 42+, KDE Plasma 5.27+, Sway, Hyprland) ou X11 |
+| FUSE | FUSE2 **ou** FUSE3 (a maioria das distros já inclui um dos dois) |
+| Arquitectura | x86\_64 |
+
+> `libstdc++`, `libgcc_s`, `libxkbcommon` e todas as libs xcb/X11 estão bundladas no AppImage — sem dependências de sistema além de glibc e FUSE.
 
 ## Stack tecnológica
 
-- **Python 3.11+**
-- **PyQt6** — interface gráfica e overlay transparente
-- **AppImageTool** — empacotamento como AppImage
+| Componente | Versão | Papel |
+|---|---|---|
+| Python | 3.12 (bundlado via python-build-standalone) | Runtime — sem dependência do Python do sistema |
+| PyQt6 | 6.10.1 | Interface gráfica, overlay transparente, eventos de input |
+| AppImageTool | build 295 | Empacotamento como AppImage portátil |
+| type2-runtime | fuse3 (old release) | Runtime AppImage com suporte a FUSE2 e FUSE3 |
 
-## Requisitos de desenvolvimento
+## Estrutura do projeto
 
-```bash
-pip install PyQt6
+```
+epicpen-linux/
+├── src/                        # Código-fonte Python
+│   ├── main.py                 # Ponto de entrada — inicializa app, toolbar, overlay, tray
+│   ├── overlay.py              # Janela transparente de desenho (canvas principal)
+│   ├── toolbar.py              # Toolbar flutuante colapsável (window Wayland layer-shell)
+│   ├── icons.py                # Todos os ícones desenhados com QPainter (sem imagens externas)
+│   ├── tray.py                 # Ícone na system tray e menu de contexto
+│   ├── config.py               # Persistência de configurações em ~/.config/epicpen/config.json
+│   ├── layershell.py           # Interface ctypes para libLayerShellQtInterface (Wayland)
+│   ├── keepabove.py            # keepAbove via KWin DBus scripting (KDE Plasma)
+│   ├── magnifier.py            # Lupa circular (15fps Wayland, 60fps X11)
+│   ├── screenshot.py           # Captura de ecrã (grim → gnome-screenshot → spectacle → scrot)
+│   ├── cursors.py              # Cursores personalizados (caneta, borracha, crosshair)
+│   └── hotkeys.py              # Atalhos de teclado globais
+├── scripts/
+│   ├── build_appimage.sh       # Build do AppImage para desenvolvimento/testes
+│   ├── release.sh              # Gerador interactivo de releases (cria tag + AppImage)
+│   └── generate_icon.py        # Gera resources/icons/epicpen.png 256×256 via QPainter
+├── resources/
+│   └── icons/                  # Ícones gerados (epicpen.png)
+├── tests/                      # Testes unitários (pytest)
+├── docs/
+│   └── CONTRIBUTING.md         # Guia de contribuição
+├── tools/                      # Cache local (appimagetool, Python standalone, libs Ubuntu)
+├── lib/                        # libLayerShellQtInterface.so.6 (para Wayland layer-shell)
+├── AppDir/                     # Diretório de build do AppImage (gerado automaticamente)
+├── run.sh                      # Script de execução rápida para desenvolvimento
+└── epicpen.desktop             # Ficheiro .desktop para integração no sistema
 ```
 
-## Executar em desenvolvimento
+### Arquitetura da janela
+
+O EpicPen Linux usa uma arquitectura de **janela única expansível**:
+
+- `ToolbarWindow` é a única superfície Wayland (layer-shell `Layer::Top`)
+- `OverlayWindow` é um widget filho da `ToolbarWindow` — não tem superfície Wayland própria
+- **Modo idle**: toolbar ocupa apenas 56×altura px (coluna lateral)
+- **Modo desenho**: toolbar expande para cobrir o ecrã inteiro; o overlay filho aparece sobre ela
+
+Isto evita o problema de múltiplas superfícies Wayland em conflito e garante que o overlay está sempre acima de outras janelas.
+
+## Desenvolvimento
+
+### Requisitos
 
 ```bash
-python src/main.py
+pip install PyQt6==6.10.1
 ```
 
-## Build AppImage
+É necessário ter `libLayerShellQtInterface.so.6` instalada para suporte a Wayland. Em Fedora/KDE:
+
+```bash
+sudo dnf install kf6-layer-shell-qt
+```
+
+### Executar sem build
+
+```bash
+bash run.sh
+```
+
+O `run.sh` executa `python3 src/main.py` sem sobrescrever variáveis de ambiente como `QT_QPA_PLATFORM`, permitindo testar tanto em Wayland como em X11 conforme a sessão ativa.
+
+### Executar diretamente
+
+```bash
+python3 src/main.py
+```
+
+### Testes
+
+```bash
+pytest tests/
+```
+
+Os testes usam stubs Qt sem display real — podem correr em ambientes CI sem servidor gráfico.
+
+### Build do AppImage
 
 ```bash
 bash scripts/build_appimage.sh
 ```
+
+O script descarrega automaticamente o Python standalone, instala o PyQt6, bundla todas as libs nativas (xcb, xkbcommon, libstdc++, etc.) e gera o AppImage pronto a distribuir. O resultado fica em `EpicPen-<versão>-x86_64.AppImage` na raiz do projeto.
+
+Na primeira execução faz o download de ~300MB (Python standalone + PyQt6). Nas seguintes usa o cache em `tools/`.
+
+### Gerar um release
+
+```bash
+bash scripts/release.sh
+```
+
+O `release.sh` é um gerador interactivo que:
+1. Pergunta se é versão oficial ou de desenvolvimento
+2. Sugere a próxima versão com base na última tag git
+3. Cria a tag git (apenas em versão oficial)
+4. Faz o build do AppImage com o número de versão correto
 
 ## Fluxo de branches
 
@@ -52,7 +165,7 @@ master (protegida)
 - `master` aceita merge **somente** de `development`
 - Commits diretos em `master` são **bloqueados**
 - Novas branches devem ser criadas **a partir de `development`**
-- Pull Requests para `master` de qualquer branch que não seja `development` são **bloqueados**
+- Mensagens de commit seguem o formato [Conventional Commits](https://www.conventionalcommits.org/)
 
 ## Contribuindo
 
