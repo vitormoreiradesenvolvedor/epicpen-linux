@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  push:
+    branches: [master]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Gerar versão e publicar AppImage
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Calcular próxima versão
+        id: version
+        run: |
+          LAST=$(git tag --sort=-v:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          if [ -z "$LAST" ]; then
+            NEXT="v1.0.0"
+          else
+            CLEAN="${LAST#v}"
+            MAJ=$(echo "$CLEAN" | cut -d. -f1)
+            MIN=$(echo "$CLEAN" | cut -d. -f2)
+            PAT=$(echo "$CLEAN" | cut -d. -f3)
+            PAT=$((PAT + 1))
+            if [ "$PAT" -gt 20 ]; then PAT=0; MIN=$((MIN + 1)); fi
+            if [ "$MIN" -gt 10 ]; then MIN=0; MAJ=$((MAJ + 1)); fi
+            NEXT="v${MAJ}.${MIN}.${PAT}"
+          fi
+          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "Próxima versão: $NEXT"
+
+      - name: Criar e publicar tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.version.outputs.version }}" \
+            -m "Release ${{ steps.version.outputs.version }}"
+          git push origin "${{ steps.version.outputs.version }}"
+
+      - name: Cache — Python standalone
+        uses: actions/cache@v4
+        with:
+          path: tools/python-standalone
+          key: python-standalone-3.12-ubuntu22
+
+      - name: Cache — libs Ubuntu 22.04 (xcb + runtime)
+        uses: actions/cache@v4
+        with:
+          path: |
+            tools/xcb-ubuntu
+            tools/runtime-fuse3-x86_64
+          key: libs-ubuntu22-jammy-v1
+
+      - name: Cache — appimagetool
+        uses: actions/cache@v4
+        id: cache-appimagetool
+        with:
+          path: tools/appimagetool
+          key: appimagetool-continuous-x86_64
+
+      - name: Instalar dependências de sistema
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            curl binutils tar libfuse2
+
+      - name: Descarregar appimagetool
+        if: steps.cache-appimagetool.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p tools
+          curl -fsSL \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" \
+            -o tools/appimagetool
+          chmod +x tools/appimagetool
+
+      - name: Build AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          QT_QPA_PLATFORM: offscreen
+        run: bash scripts/build_appimage.sh
+
+      - name: Publicar release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: "EpicPen Linux ${{ steps.version.outputs.version }}"
+          files: "EpicPen-${{ steps.version.outputs.version }}-x86_64.AppImage"
+          body: |
+            ## EpicPen Linux ${{ steps.version.outputs.version }}
+
+            ### Como instalar
+
+            ```bash
+            chmod +x EpicPen-${{ steps.version.outputs.version }}-x86_64.AppImage
+            ./EpicPen-${{ steps.version.outputs.version }}-x86_64.AppImage
+            ```
+
+            ### Compatibilidade
+
+            | Componente | Mínimo |
+            |---|---|
+            | Distribuição | Ubuntu 22.04 LTS / Debian 12 / Fedora 38+ / Arch Linux / Manjaro |
+            | Sessão gráfica | Wayland (GNOME 42+, KDE Plasma, Sway) ou X11 |
+            | FUSE | FUSE2 ou FUSE3 |
+            | Arquitectura | x86_64 |
+
+            > Todas as dependências estão bundladas no AppImage — sem instalação de pacotes de sistema.
