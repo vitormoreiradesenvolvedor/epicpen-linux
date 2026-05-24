@@ -1,0 +1,1206 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EpicPen Linux — Annote o ecrã no Linux</title>
+  <meta name="description" content="Reimplementação open-source do EpicPen para Linux. Desenhe, anote e destaque diretamente sobre o ecrã. Suporte nativo a Wayland e X11. Distribuído como AppImage sem instalação." />
+  <meta property="og:title" content="EpicPen Linux" />
+  <meta property="og:description" content="Annote o ecrã no Linux — Wayland + X11, sem instalação." />
+  <meta property="og:type" content="website" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #08090c;
+      --bg2:       #0d0f14;
+      --bg3:       #12151d;
+      --surface:   #1a1e2a;
+      --border:    rgba(255,255,255,.07);
+      --accent:    #4f8eff;
+      --accent2:   #7c5fff;
+      --glow:      rgba(79,142,255,.18);
+      --text:      #e8eaf0;
+      --muted:     #7a8099;
+      --green:     #3ddc84;
+      --red:       #ff5f72;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    /* ── CANVAS BACKGROUND ── */
+    #canvas-bg {
+      position: fixed; inset: 0; z-index: 0;
+      pointer-events: none;
+      opacity: .45;
+    }
+
+    /* ── NAV ── */
+    nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 2rem;
+      height: 60px;
+      background: rgba(8,9,12,.75);
+      backdrop-filter: blur(20px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-logo {
+      display: flex; align-items: center; gap: .6rem;
+      font-weight: 700; font-size: 1.05rem; letter-spacing: -.01em;
+      color: var(--text); text-decoration: none;
+    }
+    .nav-logo svg { flex-shrink: 0; }
+    .nav-links { display: flex; gap: 1.75rem; }
+    .nav-links a {
+      color: var(--muted); text-decoration: none; font-size: .9rem;
+      transition: color .2s;
+    }
+    .nav-links a:hover { color: var(--text); }
+    .nav-cta {
+      background: var(--accent); color: #fff;
+      padding: .45rem 1.1rem; border-radius: 8px;
+      font-size: .875rem; font-weight: 600;
+      text-decoration: none; transition: opacity .2s;
+    }
+    .nav-cta:hover { opacity: .85; }
+
+    /* ── SECTIONS ── */
+    section { position: relative; z-index: 1; }
+
+    /* ── HERO ── */
+    #hero {
+      min-height: 100vh;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      text-align: center;
+      padding: 120px 2rem 80px;
+    }
+    .badge {
+      display: inline-flex; align-items: center; gap: .45rem;
+      background: rgba(79,142,255,.12);
+      border: 1px solid rgba(79,142,255,.3);
+      color: var(--accent);
+      padding: .3rem .9rem; border-radius: 100px;
+      font-size: .8rem; font-weight: 600;
+      letter-spacing: .03em; text-transform: uppercase;
+      margin-bottom: 1.75rem;
+    }
+    .badge::before {
+      content: ""; display: block;
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--accent);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%       { opacity: .4; transform: scale(1.4); }
+    }
+
+    h1 {
+      font-size: clamp(2.6rem, 6vw, 5rem);
+      font-weight: 800;
+      letter-spacing: -.03em;
+      line-height: 1.1;
+      margin-bottom: 1.4rem;
+      background: linear-gradient(135deg, #fff 30%, #7b9cff 70%, #b47fff 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .hero-sub {
+      font-size: clamp(1rem, 2vw, 1.25rem);
+      color: var(--muted);
+      max-width: 560px;
+      margin: 0 auto 2.5rem;
+    }
+
+    .hero-actions {
+      display: flex; flex-wrap: wrap; gap: 1rem;
+      justify-content: center; margin-bottom: 3.5rem;
+    }
+    .btn {
+      display: inline-flex; align-items: center; gap: .55rem;
+      padding: .75rem 1.6rem; border-radius: 10px;
+      font-size: .95rem; font-weight: 600;
+      text-decoration: none; cursor: pointer;
+      border: none; transition: all .2s;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      color: #fff;
+      box-shadow: 0 4px 20px var(--glow);
+    }
+    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 32px var(--glow); }
+    .btn-outline {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-outline:hover { background: var(--surface); }
+
+    /* screenshot mockup */
+    .hero-img {
+      width: 100%; max-width: 820px;
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      overflow: hidden;
+      box-shadow: 0 32px 80px rgba(0,0,0,.6), 0 0 0 1px var(--border);
+    }
+    .mockup-bar {
+      background: var(--bg3);
+      padding: .7rem 1rem;
+      display: flex; align-items: center; gap: .5rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .dot { width: 12px; height: 12px; border-radius: 50%; }
+    .dot-r { background: #ff5f57; }
+    .dot-y { background: #febc2e; }
+    .dot-g { background: #28c840; }
+    .mockup-body { padding: 1.5rem; text-align: left; position: relative; min-height: 220px; }
+    .mockup-canvas {
+      width: 100%; height: 200px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #0d1117 0%, #0f1a2e 50%, #110d1e 100%);
+      position: relative; overflow: hidden;
+    }
+    .mockup-canvas svg { width: 100%; height: 100%; }
+
+    /* ── STATS ── */
+    #stats {
+      padding: 60px 2rem;
+      display: flex; justify-content: center;
+    }
+    .stats-grid {
+      display: flex; flex-wrap: wrap; gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: 16px; overflow: hidden;
+      max-width: 900px; width: 100%;
+    }
+    .stat-item {
+      flex: 1 1 200px;
+      background: var(--bg2);
+      padding: 2rem 2.5rem;
+      text-align: center;
+    }
+    .stat-num {
+      font-size: 2.4rem; font-weight: 800;
+      letter-spacing: -.02em;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .stat-label { color: var(--muted); font-size: .85rem; margin-top: .3rem; }
+
+    /* ── FEATURES ── */
+    #features { padding: 80px 2rem; }
+    .section-label {
+      text-align: center; margin-bottom: .75rem;
+      font-size: .75rem; font-weight: 700;
+      letter-spacing: .1em; text-transform: uppercase;
+      color: var(--accent);
+    }
+    h2 {
+      text-align: center;
+      font-size: clamp(1.8rem, 3.5vw, 2.8rem);
+      font-weight: 800; letter-spacing: -.025em;
+      margin-bottom: 1rem;
+    }
+    .section-desc {
+      text-align: center; color: var(--muted);
+      max-width: 560px; margin: 0 auto 3.5rem;
+      font-size: .975rem;
+    }
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 1.25rem;
+      max-width: 1100px; margin: 0 auto;
+    }
+    .feature-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 1.75rem;
+      transition: border-color .2s, transform .2s;
+    }
+    .feature-card:hover {
+      border-color: rgba(79,142,255,.3);
+      transform: translateY(-3px);
+    }
+    .feature-icon {
+      width: 44px; height: 44px;
+      border-radius: 10px;
+      background: rgba(79,142,255,.12);
+      display: flex; align-items: center; justify-content: center;
+      margin-bottom: 1.1rem;
+      font-size: 1.3rem;
+    }
+    .feature-card h3 {
+      font-size: 1rem; font-weight: 700;
+      margin-bottom: .45rem; letter-spacing: -.01em;
+    }
+    .feature-card p { color: var(--muted); font-size: .875rem; }
+
+    /* ── WHY ── */
+    #why { padding: 80px 2rem; background: var(--bg2); }
+    .why-inner {
+      max-width: 900px; margin: 0 auto;
+      display: grid; grid-template-columns: 1fr 1fr;
+      gap: 3rem; align-items: center;
+    }
+    @media (max-width: 700px) { .why-inner { grid-template-columns: 1fr; } }
+    .why-text h2 { text-align: left; }
+    .why-text .section-label { text-align: left; }
+    .why-text .section-desc { text-align: left; margin-left: 0; }
+    .why-list { list-style: none; margin-top: 1.5rem; display: flex; flex-direction: column; gap: .85rem; }
+    .why-list li {
+      display: flex; align-items: flex-start; gap: .75rem;
+      font-size: .925rem; color: var(--muted);
+    }
+    .why-list li::before {
+      content: "✓"; color: var(--green);
+      font-weight: 800; flex-shrink: 0; margin-top: .05rem;
+    }
+    .why-list li strong { color: var(--text); }
+
+    .why-vs {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 14px; overflow: hidden;
+    }
+    .vs-header {
+      display: grid; grid-template-columns: 1fr 1fr 1fr;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+    }
+    .vs-header div {
+      padding: .8rem 1rem; font-size: .78rem;
+      font-weight: 700; text-transform: uppercase;
+      letter-spacing: .06em; color: var(--muted);
+    }
+    .vs-header div:nth-child(2) { color: var(--accent); }
+    .vs-row {
+      display: grid; grid-template-columns: 1fr 1fr 1fr;
+      border-bottom: 1px solid var(--border);
+      font-size: .85rem;
+    }
+    .vs-row:last-child { border-bottom: none; }
+    .vs-row div { padding: .75rem 1rem; color: var(--muted); }
+    .vs-row div:nth-child(2) { color: var(--text); }
+    .chk { color: var(--green) !important; }
+    .cross { color: var(--red) !important; }
+
+    /* ── DOWNLOAD ── */
+    #download { padding: 80px 2rem; }
+    .download-inner {
+      max-width: 700px; margin: 0 auto; text-align: center;
+    }
+    .download-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px; padding: 2.5rem;
+      margin-top: 2.5rem;
+    }
+    .appimage-icon {
+      width: 64px; height: 64px;
+      border-radius: 16px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      display: flex; align-items: center; justify-content: center;
+      margin: 0 auto 1.25rem;
+      font-size: 1.8rem;
+    }
+    .download-box h3 { font-size: 1.25rem; margin-bottom: .5rem; }
+    .download-box p { color: var(--muted); font-size: .9rem; margin-bottom: 1.75rem; }
+    .code-block {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.1rem 1.25rem;
+      text-align: left; margin-bottom: 1.5rem;
+      position: relative;
+    }
+    .code-block pre {
+      font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+      font-size: .82rem; color: #a9c5ff;
+      white-space: pre-wrap; word-break: break-all;
+    }
+    .code-block .comment { color: var(--muted); }
+    .req-table {
+      width: 100%; border-collapse: collapse; font-size: .85rem;
+      margin-top: 1.25rem; text-align: left;
+    }
+    .req-table th {
+      color: var(--muted); font-weight: 600;
+      border-bottom: 1px solid var(--border);
+      padding: .5rem .75rem;
+    }
+    .req-table td {
+      color: var(--text);
+      padding: .6rem .75rem;
+      border-bottom: 1px solid rgba(255,255,255,.04);
+    }
+
+    /* ── OPEN SOURCE ── */
+    #opensource { padding: 80px 2rem; background: var(--bg2); }
+    .oss-inner { max-width: 900px; margin: 0 auto; }
+    .oss-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 1.25rem; margin-top: 3rem;
+    }
+    .oss-card {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 14px; padding: 1.6rem;
+    }
+    .oss-card h3 { font-size: .975rem; font-weight: 700; margin-bottom: .4rem; }
+    .oss-card p { color: var(--muted); font-size: .85rem; }
+    .oss-card a {
+      display: inline-flex; align-items: center; gap: .4rem;
+      margin-top: .9rem; font-size: .82rem;
+      color: var(--accent); text-decoration: none; font-weight: 600;
+    }
+    .oss-card a:hover { text-decoration: underline; }
+
+    /* ── PIX ── */
+    #pix { padding: 80px 2rem; }
+    .pix-inner {
+      max-width: 700px; margin: 0 auto;
+      display: flex; flex-wrap: wrap; gap: 3rem;
+      align-items: center; justify-content: center;
+    }
+    .pix-text { flex: 1 1 260px; }
+    .pix-text h2 { text-align: left; }
+    .pix-text .section-label { text-align: left; }
+    .pix-text p { color: var(--muted); font-size: .925rem; margin-top: 1rem; }
+    .pix-amounts {
+      display: flex; flex-wrap: wrap; gap: .5rem;
+      margin-top: 1.25rem;
+    }
+    .pix-amt {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 8px; padding: .4rem .85rem;
+      font-size: .82rem; color: var(--muted);
+      cursor: pointer; transition: all .15s;
+    }
+    .pix-amt:hover, .pix-amt.active {
+      background: rgba(79,142,255,.15);
+      border-color: var(--accent); color: var(--accent);
+    }
+    .pix-box {
+      background: #fff; border-radius: 14px;
+      padding: 1.25rem; text-align: center;
+      box-shadow: 0 8px 32px rgba(0,0,0,.4);
+    }
+    #pix-canvas { display: block; width: 200px; height: 200px; }
+    .pix-key-label {
+      margin-top: .75rem; font-size: .72rem;
+      color: #555; font-family: monospace;
+    }
+
+    /* ── FOOTER ── */
+    footer {
+      padding: 2.5rem 2rem;
+      border-top: 1px solid var(--border);
+      display: flex; flex-wrap: wrap; gap: 1rem;
+      align-items: center; justify-content: space-between;
+      color: var(--muted); font-size: .8rem;
+    }
+    footer a { color: var(--muted); text-decoration: none; }
+    footer a:hover { color: var(--text); }
+
+    @media (max-width: 640px) {
+      nav { padding: 0 1rem; }
+      .nav-links { display: none; }
+      h1 { font-size: 2.2rem; }
+      .pix-text h2 { font-size: 1.6rem; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── ANIMATED CANVAS BACKGROUND ── -->
+<canvas id="canvas-bg"></canvas>
+
+<!-- ── NAV ── -->
+<nav>
+  <a href="#" class="nav-logo">
+    <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+      <rect width="28" height="28" rx="7" fill="url(#lg)"/>
+      <path d="M8 20 L14 8 L20 20" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+      <circle cx="19" cy="10" r="2.5" fill="#fff" opacity=".9"/>
+      <defs>
+        <linearGradient id="lg" x1="0" y1="0" x2="28" y2="28">
+          <stop offset="0%" stop-color="#4f8eff"/>
+          <stop offset="100%" stop-color="#7c5fff"/>
+        </linearGradient>
+      </defs>
+    </svg>
+    EpicPen Linux
+  </a>
+  <div class="nav-links">
+    <a href="#features">Funcionalidades</a>
+    <a href="#download">Download</a>
+    <a href="#opensource">Contribuir</a>
+    <a href="#pix">Apoiar</a>
+  </div>
+  <a href="https://github.com/vitormoreiradesenvolvedor/epicpen-linux/releases/latest" class="nav-cta" target="_blank" rel="noopener">
+    Download AppImage
+  </a>
+</nav>
+
+<!-- ── HERO ── -->
+<section id="hero">
+  <div class="badge">open-source · wayland · x11</div>
+  <h1>Anote o ecrã<br>no Linux</h1>
+  <p class="hero-sub">
+    Reimplementação open-source do EpicPen para Linux. Desenhe, anote e destaque
+    conteúdo diretamente sobre o ecrã durante apresentações, aulas e reuniões —
+    sem instalação, sem dependências de sistema.
+  </p>
+  <div class="hero-actions">
+    <a href="https://github.com/vitormoreiradesenvolvedor/epicpen-linux/releases/latest"
+       class="btn btn-primary" target="_blank" rel="noopener">
+      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+           viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+        <polyline points="7 10 12 15 17 10"/>
+        <line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Descarregar AppImage
+    </a>
+    <a href="https://github.com/vitormoreiradesenvolvedor/epicpen-linux"
+       class="btn btn-outline" target="_blank" rel="noopener">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0 1 12 6.844a9.59 9.59 0 0 1 2.504.337c1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.02 10.02 0 0 0 22 12.017C22 6.484 17.522 2 12 2z"/>
+      </svg>
+      Ver no GitHub
+    </a>
+  </div>
+
+  <!-- mockup -->
+  <div class="hero-img">
+    <div class="mockup-bar">
+      <div class="dot dot-r"></div>
+      <div class="dot dot-y"></div>
+      <div class="dot dot-g"></div>
+    </div>
+    <div class="mockup-body">
+      <div class="mockup-canvas">
+        <svg viewBox="0 0 820 200" preserveAspectRatio="none">
+          <!-- drawing strokes -->
+          <path d="M80 160 Q120 80 180 100 Q240 120 260 60" stroke="#4f8eff" stroke-width="3"
+                fill="none" stroke-linecap="round" opacity=".9"/>
+          <path d="M300 140 Q350 90 420 110 Q490 130 520 70 Q550 30 600 80"
+                stroke="#7c5fff" stroke-width="4" fill="none" stroke-linecap="round" opacity=".85"/>
+          <circle cx="650" cy="100" r="40" stroke="#ff5f72" stroke-width="2.5"
+                  fill="none" opacity=".8"/>
+          <path d="M720 150 L740 80 L760 150" stroke="#3ddc84" stroke-width="2.5"
+                fill="none" stroke-linecap="round" stroke-linejoin="round" opacity=".9"/>
+          <!-- laser dot -->
+          <circle cx="350" cy="110" r="5" fill="#ff5f72" opacity=".9"/>
+          <circle cx="350" cy="110" r="12" fill="#ff5f72" opacity=".15"/>
+          <!-- toolbar hint -->
+          <rect x="0" y="0" width="56" height="200" fill="rgba(255,255,255,.03)" rx="0"/>
+          <circle cx="28" cy="40" r="14" fill="rgba(79,142,255,.2)" stroke="rgba(79,142,255,.5)" stroke-width="1"/>
+          <circle cx="28" cy="80" r="10" fill="rgba(124,95,255,.2)" stroke="rgba(124,95,255,.4)" stroke-width="1"/>
+          <circle cx="28" cy="115" r="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.15)" stroke-width="1"/>
+          <circle cx="28" cy="148" r="10" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.15)" stroke-width="1"/>
+        </svg>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── STATS ── -->
+<section id="stats">
+  <div class="stats-grid">
+    <div class="stat-item">
+      <div class="stat-num">0</div>
+      <div class="stat-label">dependências de sistema</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-num">100%</div>
+      <div class="stat-label">bundlado no AppImage</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-num">2</div>
+      <div class="stat-label">protocolos gráficos (Wayland + X11)</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-num">MIT</div>
+      <div class="stat-label">licença open-source</div>
+    </div>
+  </div>
+</section>
+
+<!-- ── FEATURES ── -->
+<section id="features">
+  <p class="section-label">Funcionalidades</p>
+  <h2>Tudo o que precisa, no Linux</h2>
+  <p class="section-desc">
+    As mesmas ferramentas que tornaram o EpicPen popular no Windows, agora com suporte
+    nativo a Wayland e integração total com ambientes Linux modernos.
+  </p>
+  <div class="features-grid">
+    <div class="feature-card">
+      <div class="feature-icon">✏️</div>
+      <h3>Caneta e Marcador</h3>
+      <p>Desenhe sobre o ecrã com traço suave. Múltiplas cores e espessuras ajustáveis em tempo real.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🔷</div>
+      <h3>Formas Geométricas</h3>
+      <p>Retângulos, elipses e setas para estruturar anotações de forma rápida durante apresentações.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">↩️</div>
+      <h3>Desfazer / Refazer</h3>
+      <p>Histórico completo de ações com Ctrl+Z e Ctrl+Y. Sem medo de erros durante a sessão.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🔴</div>
+      <h3>Ponteiro Laser</h3>
+      <p>Realce visualmente qualquer área do ecrã com um ponto vermelho luminoso para audiências.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🔍</div>
+      <h3>Lupa / Zoom</h3>
+      <p>Lupa circular com ampliação configurável. 15 fps em Wayland, 60 fps em X11.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">⬜</div>
+      <h3>Quadro Branco</h3>
+      <p>Sobreponha um fundo branco para usar como quadro virtual sem sair do ambiente gráfico.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🖥️</div>
+      <h3>Múltiplos Monitores</h3>
+      <p>Suporte nativo a configurações multi-monitor com overlay independente por ecrã.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">⌨️</div>
+      <h3>Atalhos Globais</h3>
+      <p>Ative e desative ferramentas com atalhos de teclado globais sem interromper o fluxo.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">📌</div>
+      <h3>Toolbar Flutuante</h3>
+      <p>Toolbar colapsável e sempre visível no topo, que não interfere com outras janelas.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ── WHY ── -->
+<section id="why">
+  <div class="why-inner">
+    <div class="why-text">
+      <p class="section-label">Por que EpicPen Linux?</p>
+      <h2 style="text-align:left">O EpicPen original é Windows only</h2>
+      <ul class="why-list">
+        <li><strong>Nativo em Wayland</strong> — usa wlr-layer-shell para overlay sem gambiarras</li>
+        <li><strong>Sem instalação</strong> — AppImage único, executa em qualquer distro Linux x86_64</li>
+        <li><strong>Python bundlado</strong> — Python 3.12 + PyQt6 incluídos, sem conflito com o sistema</li>
+        <li><strong>Open-source MIT</strong> — código aberto, auditável, melhorável pela comunidade</li>
+        <li><strong>Compatível com distros antigas</strong> — funciona a partir de Ubuntu 22.04 / glibc 2.34</li>
+        <li><strong>Tray icon</strong> — integra com a system tray para acesso rápido sem janela permanente</li>
+      </ul>
+    </div>
+    <div class="why-vs">
+      <div class="vs-header">
+        <div>Recurso</div>
+        <div>EpicPen Linux</div>
+        <div>Alternativas</div>
+      </div>
+      <div class="vs-row">
+        <div>Linux nativo</div>
+        <div class="chk">✓ Wayland + X11</div>
+        <div class="cross">✗ Wine / VM</div>
+      </div>
+      <div class="vs-row">
+        <div>Sem instalação</div>
+        <div class="chk">✓ AppImage</div>
+        <div class="cross">✗ pacotes dep.</div>
+      </div>
+      <div class="vs-row">
+        <div>Layer-shell</div>
+        <div class="chk">✓ wlr-layer-shell</div>
+        <div class="cross">✗ janela comum</div>
+      </div>
+      <div class="vs-row">
+        <div>Open-source</div>
+        <div class="chk">✓ MIT</div>
+        <div class="cross">✗ proprietário</div>
+      </div>
+      <div class="vs-row">
+        <div>Multi-monitor</div>
+        <div class="chk">✓ nativo</div>
+        <div class="cross">parcial</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── DOWNLOAD ── -->
+<section id="download">
+  <div class="download-inner">
+    <p class="section-label">Instalação</p>
+    <h2>Pronto em 30 segundos</h2>
+    <p class="section-desc">
+      Não é necessário instalar nada. Descarregue, dê permissão de execução e corra.
+    </p>
+    <div class="download-box">
+      <div class="appimage-icon">🐧</div>
+      <h3>EpicPen Linux AppImage</h3>
+      <p>Todas as dependências bundladas. Funciona em Ubuntu, Fedora, Arch, Debian, Manjaro e mais.</p>
+      <div class="code-block">
+        <pre><span class="comment"># Descarregar o AppImage mais recente</span>
+wget https://github.com/vitormoreiradesenvolvedor/epicpen-linux/releases/latest/download/EpicPen-latest-x86_64.AppImage
+
+<span class="comment"># Dar permissão de execução</span>
+chmod +x EpicPen-*-x86_64.AppImage
+
+<span class="comment"># Executar</span>
+./EpicPen-*-x86_64.AppImage</pre>
+      </div>
+      <a href="https://github.com/vitormoreiradesenvolvedor/epicpen-linux/releases/latest"
+         class="btn btn-primary" target="_blank" rel="noopener" style="width:100%;justify-content:center">
+        Descarregar última versão
+      </a>
+      <table class="req-table" style="margin-top:1.75rem">
+        <thead>
+          <tr>
+            <th>Componente</th>
+            <th>Mínimo</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Distribuição</td><td>Ubuntu 22.04 / Debian 12 / Fedora 38+ / Arch / Manjaro</td></tr>
+          <tr><td>glibc</td><td>2.34+ (Ubuntu 22.04 ✓)</td></tr>
+          <tr><td>Sessão gráfica</td><td>Wayland (GNOME, KDE, Sway, Hyprland) ou X11</td></tr>
+          <tr><td>FUSE</td><td>FUSE2 ou FUSE3</td></tr>
+          <tr><td>Arquitetura</td><td>x86_64</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ── OPEN SOURCE ── -->
+<section id="opensource">
+  <div class="oss-inner">
+    <p class="section-label">Contribuição</p>
+    <h2>Open-source, feito para crescer</h2>
+    <p class="section-desc">
+      O EpicPen Linux é MIT. Qualquer pessoa pode usar, modificar e distribuir.
+      Contribuições são bem-vindas — desde correções até novas funcionalidades.
+    </p>
+    <div class="oss-grid">
+      <div class="oss-card">
+        <h3>🐛 Reportar bug</h3>
+        <p>Encontrou um problema? Abra uma issue com detalhes do sistema, sessão gráfica e passos para reproduzir.</p>
+        <a href="https://github.com/vitormoreiradesenvolvedor/epicpen-linux/issues/new" target="_blank" rel="noopener">
+          Abrir issue →
+        </a>
+      </div>
+      <div class="oss-card">
+        <h3>💡 Sugerir funcionalidade</h3>
+        <p>Tem uma ideia? Abra uma issue com a etiqueta <code style="color:var(--accent)">enhancement</code> e descreva o caso de uso.</p>
+        <a href="https://github.com/vitormoreiradesenvolvedor/epicpen-linux/issues/new" target="_blank" rel="noopener">
+          Propor feature →
+        </a>
+      </div>
+      <div class="oss-card">
+        <h3>🔀 Pull Request</h3>
+        <p>Leia o guia de contribuição, crie uma branch a partir de <code style="color:var(--accent)">development</code> e abra um PR.</p>
+        <a href="https://github.com/vitormoreiradesenvolvedor/epicpen-linux/blob/development/docs/CONTRIBUTING.md" target="_blank" rel="noopener">
+          Ver guia →
+        </a>
+      </div>
+      <div class="oss-card">
+        <h3>⭐ Dar uma estrela</h3>
+        <p>Ajude o projeto a ganhar visibilidade dando uma estrela no GitHub — são 2 segundos e fazem diferença.</p>
+        <a href="https://github.com/vitormoreiradesenvolvedor/epicpen-linux" target="_blank" rel="noopener">
+          Star no GitHub →
+        </a>
+      </div>
+      <div class="oss-card">
+        <h3>📦 Empacotar para distros</h3>
+        <p>Ajude a disponibilizar o EpicPen Linux em AUR, Flathub, COPR ou outros repositórios da comunidade.</p>
+        <a href="https://github.com/vitormoreiradesenvolvedor/epicpen-linux/discussions" target="_blank" rel="noopener">
+          Discussões →
+        </a>
+      </div>
+      <div class="oss-card">
+        <h3>🌍 Traduzir</h3>
+        <p>A interface está em português. Ajude a traduzir para outras línguas e alcançar mais utilizadores.</p>
+        <a href="https://github.com/vitormoreiradesenvolvedor/epicpen-linux/issues" target="_blank" rel="noopener">
+          Ver issues →
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── PIX ── -->
+<section id="pix">
+  <p class="section-label" style="text-align:center">Apoio financeiro</p>
+  <h2>Gostou do projeto?</h2>
+  <p class="section-desc">
+    O EpicPen Linux é gratuito e sempre será. Se quiser apoiar o desenvolvimento,
+    qualquer contribuição é muito bem-vinda.
+  </p>
+  <div class="pix-inner" style="margin-top:2.5rem">
+    <div class="pix-text">
+      <p>O projeto é desenvolvido no tempo livre, com foco em qualidade e compatibilidade real com todas as distros Linux. Cada contribuição financia tempo para novas funcionalidades e correções.</p>
+      <p style="margin-top:.75rem">Selecione um valor simbólico ou digitalize o QR code com qualquer app de banco:</p>
+      <div class="pix-amounts">
+        <div class="pix-amt active" data-value="5.00">R$ 5</div>
+        <div class="pix-amt" data-value="10.00">R$ 10</div>
+        <div class="pix-amt" data-value="20.00">R$ 20</div>
+        <div class="pix-amt" data-value="50.00">R$ 50</div>
+      </div>
+      <p style="margin-top:1rem;font-size:.8rem;color:var(--muted)">
+        Chave PIX: <code style="color:var(--accent);font-size:.78rem">vitormoreiradesenvolvedor@gmail.com</code>
+      </p>
+    </div>
+    <div class="pix-box">
+      <canvas id="pix-canvas" width="200" height="200"></canvas>
+      <div class="pix-key-label">Escaneie para pagar via PIX</div>
+    </div>
+  </div>
+</section>
+
+<!-- ── FOOTER ── -->
+<footer>
+  <div>
+    <strong>EpicPen Linux</strong> — MIT License
+  </div>
+  <div style="display:flex;gap:1.5rem">
+    <a href="https://github.com/vitormoreiradesenvolvedor/epicpen-linux" target="_blank" rel="noopener">GitHub</a>
+    <a href="https://github.com/vitormoreiradesenvolvedor/epicpen-linux/releases" target="_blank" rel="noopener">Releases</a>
+    <a href="https://github.com/vitormoreiradesenvolvedor/epicpen-linux/issues" target="_blank" rel="noopener">Issues</a>
+    <a href="https://github.com/vitormoreiradesenvolvedor/epicpen-linux/blob/development/docs/CONTRIBUTING.md" target="_blank" rel="noopener">Contribuir</a>
+  </div>
+</footer>
+
+<!-- ── SCRIPTS ── -->
+<script>
+// ── Animated canvas background ──────────────────────────────────────────────
+(function() {
+  const c = document.getElementById('canvas-bg');
+  const ctx = c.getContext('2d');
+  let W, H, particles = [], lines = [], t = 0;
+
+  function resize() {
+    W = c.width  = window.innerWidth;
+    H = c.height = window.innerHeight;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // grid dots
+  function initParticles() {
+    particles = [];
+    const cols = Math.ceil(W / 80) + 2;
+    const rows = Math.ceil(H / 80) + 2;
+    for (let r = 0; r < rows; r++) {
+      for (let c2 = 0; c2 < cols; c2++) {
+        particles.push({
+          x: c2 * 80 - 40,
+          y: r * 80 - 40,
+          ox: c2 * 80 - 40,
+          oy: r * 80 - 40,
+          vx: (Math.random() - .5) * .3,
+          vy: (Math.random() - .5) * .3,
+        });
+      }
+    }
+  }
+  initParticles();
+  window.addEventListener('resize', initParticles);
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    t += .003;
+
+    // move particles
+    particles.forEach(p => {
+      p.x += p.vx + Math.sin(t + p.oy * .01) * .15;
+      p.y += p.vy + Math.cos(t + p.ox * .01) * .15;
+      // gentle boundary nudge
+      if (Math.abs(p.x - p.ox) > 30) p.vx *= -1;
+      if (Math.abs(p.y - p.oy) > 30) p.vy *= -1;
+    });
+
+    // draw connections
+    for (let i = 0; i < particles.length; i++) {
+      for (let j = i + 1; j < particles.length; j++) {
+        const dx = particles[i].x - particles[j].x;
+        const dy = particles[i].y - particles[j].y;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d < 100) {
+          ctx.strokeStyle = `rgba(79,142,255,${(1 - d / 100) * .18})`;
+          ctx.lineWidth = .8;
+          ctx.beginPath();
+          ctx.moveTo(particles[i].x, particles[i].y);
+          ctx.lineTo(particles[j].x, particles[j].y);
+          ctx.stroke();
+        }
+      }
+    }
+
+    // draw dots
+    particles.forEach(p => {
+      ctx.fillStyle = 'rgba(79,142,255,.25)';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    requestAnimationFrame(draw);
+  }
+  draw();
+})();
+
+// ── PIX QR code ─────────────────────────────────────────────────────────────
+(function() {
+  const KEY = 'vitormoreiradesenvolvedor@gmail.com';
+  const NAME = 'Vitor Moreira';
+  const CITY = 'SAO PAULO';
+
+  function crc16(str) {
+    let crc = 0xFFFF;
+    for (let i = 0; i < str.length; i++) {
+      crc ^= str.charCodeAt(i) << 8;
+      for (let j = 0; j < 8; j++) {
+        crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) : (crc << 1);
+      }
+    }
+    return (crc & 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
+  }
+
+  function tlv(id, value) {
+    return id + String(value.length).padStart(2, '0') + value;
+  }
+
+  function buildPix(amount) {
+    const merchant =
+      tlv('00', 'BR.GOV.BCB.PIX') +
+      tlv('01', KEY);
+    const addl = tlv('05', 'EpicPenLinux');
+
+    let payload =
+      tlv('00', '01') +
+      tlv('26', merchant) +
+      tlv('52', '0000') +
+      tlv('53', '986') +
+      (amount ? tlv('54', parseFloat(amount).toFixed(2)) : '') +
+      tlv('58', 'BR') +
+      tlv('59', NAME.substring(0, 25)) +
+      tlv('60', CITY.substring(0, 15)) +
+      tlv('62', addl) +
+      '6304';
+
+    return payload + crc16(payload);
+  }
+
+  // Minimal QR code generator (version 3, ECC M, alphanumeric / byte)
+  // We use a lightweight embedded approach with a pre-generated bitmap
+  // via canvas drawing. For real production, use a proper QR lib.
+  // Here we render via the qrcode-generator approach (self-contained).
+
+  // ── Tiny QR encoder (Data Matrix style fallback → inline QR via JS) ──────
+  // We embed a minimal QR v5 encoder sufficient for ~90 char PIX strings.
+
+  function drawQR(canvas, text) {
+    // Use the approach of computing QR data via a minimal embedded library.
+    // Since we want zero CDN deps, we use a compact implementation.
+    const qr = createQR(text, 'M');
+    if (!qr) return;
+    const modules = qr.modules;
+    const size = modules.length;
+    const ctx = canvas.getContext('2d');
+    const scale = Math.floor(canvas.width / (size + 8));
+    const offset = Math.floor((canvas.width - scale * size) / 2);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#000';
+    for (let r = 0; r < size; r++) {
+      for (let c = 0; c < size; c++) {
+        if (modules[r][c]) {
+          ctx.fillRect(offset + c * scale, offset + r * scale, scale, scale);
+        }
+      }
+    }
+  }
+
+  // ─── Minimal QR Code encoder (Version 1-10, ECC L/M/Q/H, byte mode) ─────
+  // Adapted from a public-domain minimal implementation.
+  function createQR(data, ecLevel) {
+    // We'll use the standard QRCode library approach inline.
+    // For brevity, we use a well-known minimal implementation.
+    // This covers version 1-10 sufficient for our PIX strings (~100 chars → v5).
+    return QRCodeMinimal.encode(data, ecLevel || 'M');
+  }
+
+  // ─── QRCodeMinimal ────────────────────────────────────────────────────────
+  // A self-contained minimal QR encoder for byte mode, versions 1-10.
+  const QRCodeMinimal = (function() {
+    const GF = [];
+    const LOG = [];
+    (function() {
+      let x = 1;
+      for (let i = 0; i < 256; i++) {
+        GF[i] = x; LOG[x] = i;
+        x = x << 1;
+        if (x & 0x100) x ^= 0x11d;
+      }
+    })();
+
+    function gfMul(a, b) { return a && b ? GF[(LOG[a] + LOG[b]) % 255] : 0; }
+    function gfPow(a, n) { return GF[(LOG[a] * n) % 255]; }
+
+    function rsEncode(data, nsym) {
+      const gen = rsGenerator(nsym);
+      const res = new Array(nsym).fill(0);
+      for (const b of data) {
+        const f = b ^ res.shift();
+        res.push(0);
+        if (f) for (let i = 0; i < nsym; i++) res[i] ^= gfMul(gen[i], f);
+      }
+      return res;
+    }
+
+    function rsGenerator(n) {
+      let g = [1];
+      for (let i = 0; i < n; i++) {
+        const ng = new Array(g.length + 1).fill(0);
+        for (let j = 0; j < g.length; j++) ng[j] ^= g[j];
+        for (let j = 0; j < g.length; j++) ng[j+1] ^= gfMul(g[j], GF[i]);
+        g = ng;
+      }
+      return g.slice(1);
+    }
+
+    // Version/ECC capacity table [version][ecLevel] = [ecPerBlock, [g1blocks, g1dcs], [g2blocks, g2dcs]]
+    const CAP = {
+      1:  {L:[7, [1,19]], M:[10,[1,16]], Q:[13,[1,13]], H:[17,[1,9]]},
+      2:  {L:[10,[1,34]], M:[16,[1,28]], Q:[22,[1,22]], H:[28,[1,16]]},
+      3:  {L:[15,[1,55]], M:[26,[1,44]], Q:[18,[2,17]], H:[22,[2,13]]},
+      4:  {L:[20,[1,80]], M:[18,[2,32]], Q:[26,[2,24]], H:[16,[4,9]]},
+      5:  {L:[26,[1,108]],M:[24,[2,43]], Q:[18,[2,15],[2,16]], H:[22,[2,11],[2,12]]},
+      6:  {L:[18,[2,68]], M:[16,[4,27]], Q:[24,[4,19]], H:[28,[4,15]]},
+      7:  {L:[20,[2,78]], M:[18,[4,31]], Q:[18,[2,14],[4,15]], H:[26,[4,13],[1,14]]},
+      8:  {L:[24,[2,97]], M:[22,[2,38],[2,39]], Q:[22,[4,18],[2,19]], H:[26,[4,14],[2,15]]},
+      9:  {L:[30,[2,116]],M:[22,[3,36],[2,37]], Q:[20,[4,16],[4,17]], H:[24,[4,12],[4,13]]},
+      10: {L:[18,[2,68],[2,69]],M:[26,[4,43],[1,44]],Q:[24,[6,19],[2,20]],H:[28,[6,15],[2,16]]},
+    };
+
+    const ALIGN = {1:[],2:[6,18],3:[6,22],4:[6,26],5:[6,30],6:[6,34],7:[6,22,38],
+                   8:[6,24,42],9:[6,26,46],10:[6,28,50]};
+
+    function encode(text, ecLevel) {
+      ecLevel = ecLevel || 'M';
+      const bytes = [];
+      for (let i = 0; i < text.length; i++) bytes.push(text.charCodeAt(i) & 0xFF);
+      const dataLen = bytes.length;
+
+      // Find version
+      let version = 1;
+      for (; version <= 10; version++) {
+        const info = CAP[version][ecLevel];
+        const cap = totalDataCodewords(version, ecLevel, info);
+        if (dataLen + 4 <= cap * 8 / 8) break; // rough estimate
+      }
+      if (version > 10) return null;
+
+      const info = CAP[version][ecLevel];
+      const totalDC = totalDataCodewords(version, ecLevel, info);
+
+      // Build data bits
+      let bits = [];
+      function addBits(val, n) { for (let i = n-1; i >= 0; i--) bits.push((val >> i) & 1); }
+      addBits(0b0100, 4); // byte mode
+      addBits(dataLen, 8);
+      bytes.forEach(b => addBits(b, 8));
+      // terminator
+      for (let i = 0; i < 4 && bits.length < totalDC * 8; i++) bits.push(0);
+      while (bits.length % 8) bits.push(0);
+      // pad
+      const PAD = [0xEC, 0x11];
+      let pi = 0;
+      while (bits.length < totalDC * 8) { addBits(PAD[pi++ & 1], 8); }
+
+      // Split into codewords
+      const data = [];
+      for (let i = 0; i < bits.length; i += 8) {
+        let b = 0;
+        for (let j = 0; j < 8; j++) b = (b << 1) | (bits[i+j] || 0);
+        data.push(b);
+      }
+
+      // RS encode
+      const blocks = buildBlocks(data, version, ecLevel, info);
+      const finalData = interleave(blocks);
+
+      // Build matrix
+      const size = version * 4 + 17;
+      const matrix = Array.from({length: size}, () => new Array(size).fill(null));
+      const isFunc = Array.from({length: size}, () => new Array(size).fill(false));
+
+      function setFunc(r, c, v) { if (r>=0&&r<size&&c>=0&&c<size) { matrix[r][c]=v; isFunc[r][c]=true; } }
+
+      // Finder patterns
+      function finder(tr, tc) {
+        for (let r = -1; r <= 7; r++) for (let c = -1; c <= 7; c++) {
+          const v = r>=0&&r<=6&&c>=0&&c<=6 && (r===0||r===6||c===0||c===6||( r>=2&&r<=4&&c>=2&&c<=4));
+          setFunc(tr+r, tc+c, v?1:0);
+        }
+      }
+      finder(0,0); finder(0,size-7); finder(size-7,0);
+
+      // Timing
+      for (let i = 8; i < size-8; i++) {
+        setFunc(6, i, i%2===0?1:0);
+        setFunc(i, 6, i%2===0?1:0);
+      }
+
+      // Alignment
+      const ap = ALIGN[version];
+      for (const r of ap) for (const c of ap) {
+        if (isFunc[r][c]) continue;
+        for (let dr = -2; dr <= 2; dr++) for (let dc = -2; dc <= 2; dc++)
+          setFunc(r+dr, c+dc, (Math.abs(dr)===2||Math.abs(dc)===2||( dr===0&&dc===0))?1:0);
+      }
+
+      // Dark module
+      setFunc(size-8, 8, 1);
+      // Format info placeholder
+      for (let i = 0; i <= 8; i++) { setFunc(8,i,0); setFunc(i,8,0); }
+      setFunc(8, size-8, 0); setFunc(8, size-7, 0); setFunc(8, size-6, 0);
+      setFunc(8, size-5, 0); setFunc(8, size-4, 0); setFunc(8, size-3, 0);
+      setFunc(8, size-2, 0); setFunc(8, size-1, 0);
+      for (let i = size-7; i < size; i++) setFunc(i,8,0);
+      for (let i = 0; i < 8; i++) { isFunc[8][i]=true; isFunc[i][8]=true; }
+      for (let i = size-8; i < size; i++) { isFunc[8][i]=true; isFunc[i][8]=true; }
+
+      // Data placement
+      let dIdx = 0;
+      let col = size - 1;
+      let upward = true;
+      while (col > 0) {
+        if (col === 6) col--;
+        for (let row = 0; row < size; row++) {
+          const r = upward ? size-1-row : row;
+          for (let cc = 0; cc < 2; cc++) {
+            const c = col - cc;
+            if (!isFunc[r][c]) {
+              const bit = dIdx < finalData.length * 8
+                ? (finalData[Math.floor(dIdx/8)] >> (7 - dIdx%8)) & 1
+                : 0;
+              matrix[r][c] = bit;
+              dIdx++;
+            }
+          }
+        }
+        col -= 2;
+        upward = !upward;
+      }
+
+      // Apply mask 0: (r+c) % 2 == 0
+      const mask = 0;
+      for (let r = 0; r < size; r++) for (let c = 0; c < size; c++) {
+        if (!isFunc[r][c] && (r+c)%2===0) matrix[r][c] ^= 1;
+      }
+
+      // Format string for mask 0, ECC level
+      const ecBits = {L:0b01,M:0b00,Q:0b11,H:0b10}[ecLevel];
+      let fmt = (ecBits << 3) | mask;
+      // BCH encode
+      let fmtCopy = fmt;
+      for (let i = 0; i < 10; i++) fmtCopy <<= 1;
+      let div = fmtCopy;
+      for (let i = 14; i >= 10; i--) {
+        if ((div >> i) & 1) div ^= 0b10100110111 << (i-10);
+      }
+      fmt = ((fmt << 10) | div) ^ 0b101010000010010;
+      for (let i = 0; i < 6; i++) { matrix[8][i]=(fmt>>(14-i))&1; matrix[i][8]=(fmt>>(14-i))&1; }
+      matrix[8][7]=(fmt>>8)&1; matrix[7][8]=(fmt>>8)&1;
+      matrix[8][8]=(fmt>>7)&1;
+      for (let i = 0; i < 7; i++) { matrix[size-1-i][8]=(fmt>>i)&1; matrix[8][size-7+i]=(fmt>>i)&1; }
+
+      return { modules: matrix.map(r => r.map(v => v === 1)) };
+    }
+
+    function totalDataCodewords(v, ec, info) {
+      let total = 0;
+      const blocks = [info[1]];
+      if (info[2]) blocks.push(info[2]);
+      for (const [n, dc] of blocks) total += n * dc;
+      return total;
+    }
+
+    function buildBlocks(data, v, ec, info) {
+      const ecPerBlock = info[0];
+      const groups = [info[1]];
+      if (info[2]) groups.push(info[2]);
+      let idx = 0;
+      const result = [];
+      for (const [n, dc] of groups) {
+        for (let i = 0; i < n; i++) {
+          const slice = data.slice(idx, idx + dc);
+          result.push({ data: slice, ec: rsEncode(slice, ecPerBlock) });
+          idx += dc;
+        }
+      }
+      return result;
+    }
+
+    function interleave(blocks) {
+      const out = [];
+      const maxD = Math.max(...blocks.map(b => b.data.length));
+      for (let i = 0; i < maxD; i++)
+        for (const b of blocks) if (i < b.data.length) out.push(b.data[i]);
+      const maxE = Math.max(...blocks.map(b => b.ec.length));
+      for (let i = 0; i < maxE; i++)
+        for (const b of blocks) if (i < b.ec.length) out.push(b.ec[i]);
+      return out;
+    }
+
+    return { encode };
+  })();
+
+  // Generate QR on load
+  let currentAmount = '5.00';
+
+  function update() {
+    const payload = buildPix(currentAmount);
+    const canvas = document.getElementById('pix-canvas');
+    drawQR(canvas, payload);
+  }
+
+  document.querySelectorAll('.pix-amt').forEach(el => {
+    el.addEventListener('click', () => {
+      document.querySelectorAll('.pix-amt').forEach(e => e.classList.remove('active'));
+      el.classList.add('active');
+      currentAmount = el.dataset.value;
+      update();
+    });
+  });
+
+  update();
+})();
+</script>
+</body>
+</html>
