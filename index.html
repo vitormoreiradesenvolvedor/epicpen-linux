@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>EpicPen Linux — Annote o ecrã no Linux</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'%3E%3Crect width='28' height='28' rx='7' fill='%234f8eff'/%3E%3Cpath d='M8 20 L14 8 L20 20' stroke='%23fff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3Ccircle cx='19' cy='10' r='2.5' fill='%23fff'/%3E%3C/svg%3E">
   <meta name="description" content="Reimplementação open-source do EpicPen para Linux. Desenhe, anote e destaque diretamente sobre o ecrã. Suporte nativo a Wayland e X11. Distribuído como AppImage sem instalação." />
   <meta property="og:title" content="EpicPen Linux" />
   <meta property="og:description" content="Annote o ecrã no Linux — Wayland + X11, sem instalação." />
@@ -795,6 +796,7 @@ chmod +x EpicPen-*-x86_64.AppImage
 </footer>
 
 <!-- ── SCRIPTS ── -->
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
 <script>
 // ── Animated canvas background ──────────────────────────────────────────────
 (function() {
@@ -915,279 +917,20 @@ chmod +x EpicPen-*-x86_64.AppImage
     return payload + crc16(payload);
   }
 
-  // Minimal QR code generator (version 3, ECC M, alphanumeric / byte)
-  // We use a lightweight embedded approach with a pre-generated bitmap
-  // via canvas drawing. For real production, use a proper QR lib.
-  // Here we render via the qrcode-generator approach (self-contained).
-
-  // ── Tiny QR encoder (Data Matrix style fallback → inline QR via JS) ──────
-  // We embed a minimal QR v5 encoder sufficient for ~90 char PIX strings.
-
-  function drawQR(canvas, text) {
-    // Use the approach of computing QR data via a minimal embedded library.
-    // Since we want zero CDN deps, we use a compact implementation.
-    const qr = createQR(text, 'M');
-    if (!qr) return;
-    const modules = qr.modules;
-    const size = modules.length;
-    const ctx = canvas.getContext('2d');
-    const scale = Math.floor(canvas.width / (size + 8));
-    const offset = Math.floor((canvas.width - scale * size) / 2);
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = '#000';
-    for (let r = 0; r < size; r++) {
-      for (let c = 0; c < size; c++) {
-        if (modules[r][c]) {
-          ctx.fillRect(offset + c * scale, offset + r * scale, scale, scale);
-        }
-      }
-    }
-  }
-
-  // ─── Minimal QR Code encoder (Version 1-10, ECC L/M/Q/H, byte mode) ─────
-  // Adapted from a public-domain minimal implementation.
-  function createQR(data, ecLevel) {
-    // We'll use the standard QRCode library approach inline.
-    // For brevity, we use a well-known minimal implementation.
-    // This covers version 1-10 sufficient for our PIX strings (~100 chars → v5).
-    return QRCodeMinimal.encode(data, ecLevel || 'M');
-  }
-
-  // ─── QRCodeMinimal ────────────────────────────────────────────────────────
-  // A self-contained minimal QR encoder for byte mode, versions 1-10.
-  const QRCodeMinimal = (function() {
-    const GF = [];
-    const LOG = [];
-    (function() {
-      let x = 1;
-      for (let i = 0; i < 256; i++) {
-        GF[i] = x; LOG[x] = i;
-        x = x << 1;
-        if (x & 0x100) x ^= 0x11d;
-      }
-    })();
-
-    function gfMul(a, b) { return a && b ? GF[(LOG[a] + LOG[b]) % 255] : 0; }
-    function gfPow(a, n) { return GF[(LOG[a] * n) % 255]; }
-
-    function rsEncode(data, nsym) {
-      const gen = rsGenerator(nsym);
-      const res = new Array(nsym).fill(0);
-      for (const b of data) {
-        const f = b ^ res.shift();
-        res.push(0);
-        if (f) for (let i = 0; i < nsym; i++) res[i] ^= gfMul(gen[i], f);
-      }
-      return res;
-    }
-
-    function rsGenerator(n) {
-      let g = [1];
-      for (let i = 0; i < n; i++) {
-        const ng = new Array(g.length + 1).fill(0);
-        for (let j = 0; j < g.length; j++) ng[j] ^= g[j];
-        for (let j = 0; j < g.length; j++) ng[j+1] ^= gfMul(g[j], GF[i]);
-        g = ng;
-      }
-      return g.slice(1);
-    }
-
-    // Version/ECC capacity table [version][ecLevel] = [ecPerBlock, [g1blocks, g1dcs], [g2blocks, g2dcs]]
-    const CAP = {
-      1:  {L:[7, [1,19]], M:[10,[1,16]], Q:[13,[1,13]], H:[17,[1,9]]},
-      2:  {L:[10,[1,34]], M:[16,[1,28]], Q:[22,[1,22]], H:[28,[1,16]]},
-      3:  {L:[15,[1,55]], M:[26,[1,44]], Q:[18,[2,17]], H:[22,[2,13]]},
-      4:  {L:[20,[1,80]], M:[18,[2,32]], Q:[26,[2,24]], H:[16,[4,9]]},
-      5:  {L:[26,[1,108]],M:[24,[2,43]], Q:[18,[2,15],[2,16]], H:[22,[2,11],[2,12]]},
-      6:  {L:[18,[2,68]], M:[16,[4,27]], Q:[24,[4,19]], H:[28,[4,15]]},
-      7:  {L:[20,[2,78]], M:[18,[4,31]], Q:[18,[2,14],[4,15]], H:[26,[4,13],[1,14]]},
-      8:  {L:[24,[2,97]], M:[22,[2,38],[2,39]], Q:[22,[4,18],[2,19]], H:[26,[4,14],[2,15]]},
-      9:  {L:[30,[2,116]],M:[22,[3,36],[2,37]], Q:[20,[4,16],[4,17]], H:[24,[4,12],[4,13]]},
-      10: {L:[18,[2,68],[2,69]],M:[26,[4,43],[1,44]],Q:[24,[6,19],[2,20]],H:[28,[6,15],[2,16]]},
-    };
-
-    const ALIGN = {1:[],2:[6,18],3:[6,22],4:[6,26],5:[6,30],6:[6,34],7:[6,22,38],
-                   8:[6,24,42],9:[6,26,46],10:[6,28,50]};
-
-    function encode(text, ecLevel) {
-      ecLevel = ecLevel || 'M';
-      const bytes = [];
-      for (let i = 0; i < text.length; i++) bytes.push(text.charCodeAt(i) & 0xFF);
-      const dataLen = bytes.length;
-
-      // Find version
-      let version = 1;
-      for (; version <= 10; version++) {
-        const info = CAP[version][ecLevel];
-        const cap = totalDataCodewords(version, ecLevel, info);
-        if (dataLen + 4 <= cap * 8 / 8) break; // rough estimate
-      }
-      if (version > 10) return null;
-
-      const info = CAP[version][ecLevel];
-      const totalDC = totalDataCodewords(version, ecLevel, info);
-
-      // Build data bits
-      let bits = [];
-      function addBits(val, n) { for (let i = n-1; i >= 0; i--) bits.push((val >> i) & 1); }
-      addBits(0b0100, 4); // byte mode
-      addBits(dataLen, 8);
-      bytes.forEach(b => addBits(b, 8));
-      // terminator
-      for (let i = 0; i < 4 && bits.length < totalDC * 8; i++) bits.push(0);
-      while (bits.length % 8) bits.push(0);
-      // pad
-      const PAD = [0xEC, 0x11];
-      let pi = 0;
-      while (bits.length < totalDC * 8) { addBits(PAD[pi++ & 1], 8); }
-
-      // Split into codewords
-      const data = [];
-      for (let i = 0; i < bits.length; i += 8) {
-        let b = 0;
-        for (let j = 0; j < 8; j++) b = (b << 1) | (bits[i+j] || 0);
-        data.push(b);
-      }
-
-      // RS encode
-      const blocks = buildBlocks(data, version, ecLevel, info);
-      const finalData = interleave(blocks);
-
-      // Build matrix
-      const size = version * 4 + 17;
-      const matrix = Array.from({length: size}, () => new Array(size).fill(null));
-      const isFunc = Array.from({length: size}, () => new Array(size).fill(false));
-
-      function setFunc(r, c, v) { if (r>=0&&r<size&&c>=0&&c<size) { matrix[r][c]=v; isFunc[r][c]=true; } }
-
-      // Finder patterns
-      function finder(tr, tc) {
-        for (let r = -1; r <= 7; r++) for (let c = -1; c <= 7; c++) {
-          const v = r>=0&&r<=6&&c>=0&&c<=6 && (r===0||r===6||c===0||c===6||( r>=2&&r<=4&&c>=2&&c<=4));
-          setFunc(tr+r, tc+c, v?1:0);
-        }
-      }
-      finder(0,0); finder(0,size-7); finder(size-7,0);
-
-      // Timing
-      for (let i = 8; i < size-8; i++) {
-        setFunc(6, i, i%2===0?1:0);
-        setFunc(i, 6, i%2===0?1:0);
-      }
-
-      // Alignment
-      const ap = ALIGN[version];
-      for (const r of ap) for (const c of ap) {
-        if (isFunc[r][c]) continue;
-        for (let dr = -2; dr <= 2; dr++) for (let dc = -2; dc <= 2; dc++)
-          setFunc(r+dr, c+dc, (Math.abs(dr)===2||Math.abs(dc)===2||( dr===0&&dc===0))?1:0);
-      }
-
-      // Dark module
-      setFunc(size-8, 8, 1);
-      // Format info placeholder
-      for (let i = 0; i <= 8; i++) { setFunc(8,i,0); setFunc(i,8,0); }
-      setFunc(8, size-8, 0); setFunc(8, size-7, 0); setFunc(8, size-6, 0);
-      setFunc(8, size-5, 0); setFunc(8, size-4, 0); setFunc(8, size-3, 0);
-      setFunc(8, size-2, 0); setFunc(8, size-1, 0);
-      for (let i = size-7; i < size; i++) setFunc(i,8,0);
-      for (let i = 0; i < 8; i++) { isFunc[8][i]=true; isFunc[i][8]=true; }
-      for (let i = size-8; i < size; i++) { isFunc[8][i]=true; isFunc[i][8]=true; }
-
-      // Data placement
-      let dIdx = 0;
-      let col = size - 1;
-      let upward = true;
-      while (col > 0) {
-        if (col === 6) col--;
-        for (let row = 0; row < size; row++) {
-          const r = upward ? size-1-row : row;
-          for (let cc = 0; cc < 2; cc++) {
-            const c = col - cc;
-            if (!isFunc[r][c]) {
-              const bit = dIdx < finalData.length * 8
-                ? (finalData[Math.floor(dIdx/8)] >> (7 - dIdx%8)) & 1
-                : 0;
-              matrix[r][c] = bit;
-              dIdx++;
-            }
-          }
-        }
-        col -= 2;
-        upward = !upward;
-      }
-
-      // Apply mask 0: (r+c) % 2 == 0
-      const mask = 0;
-      for (let r = 0; r < size; r++) for (let c = 0; c < size; c++) {
-        if (!isFunc[r][c] && (r+c)%2===0) matrix[r][c] ^= 1;
-      }
-
-      // Format string for mask 0, ECC level
-      const ecBits = {L:0b01,M:0b00,Q:0b11,H:0b10}[ecLevel];
-      let fmt = (ecBits << 3) | mask;
-      // BCH encode
-      let fmtCopy = fmt;
-      for (let i = 0; i < 10; i++) fmtCopy <<= 1;
-      let div = fmtCopy;
-      for (let i = 14; i >= 10; i--) {
-        if ((div >> i) & 1) div ^= 0b10100110111 << (i-10);
-      }
-      fmt = ((fmt << 10) | div) ^ 0b101010000010010;
-      for (let i = 0; i < 6; i++) { matrix[8][i]=(fmt>>(14-i))&1; matrix[i][8]=(fmt>>(14-i))&1; }
-      matrix[8][7]=(fmt>>8)&1; matrix[7][8]=(fmt>>8)&1;
-      matrix[8][8]=(fmt>>7)&1;
-      for (let i = 0; i < 7; i++) { matrix[size-1-i][8]=(fmt>>i)&1; matrix[8][size-7+i]=(fmt>>i)&1; }
-
-      return { modules: matrix.map(r => r.map(v => v === 1)) };
-    }
-
-    function totalDataCodewords(v, ec, info) {
-      let total = 0;
-      const blocks = [info[1]];
-      if (info[2]) blocks.push(info[2]);
-      for (const [n, dc] of blocks) total += n * dc;
-      return total;
-    }
-
-    function buildBlocks(data, v, ec, info) {
-      const ecPerBlock = info[0];
-      const groups = [info[1]];
-      if (info[2]) groups.push(info[2]);
-      let idx = 0;
-      const result = [];
-      for (const [n, dc] of groups) {
-        for (let i = 0; i < n; i++) {
-          const slice = data.slice(idx, idx + dc);
-          result.push({ data: slice, ec: rsEncode(slice, ecPerBlock) });
-          idx += dc;
-        }
-      }
-      return result;
-    }
-
-    function interleave(blocks) {
-      const out = [];
-      const maxD = Math.max(...blocks.map(b => b.data.length));
-      for (let i = 0; i < maxD; i++)
-        for (const b of blocks) if (i < b.data.length) out.push(b.data[i]);
-      const maxE = Math.max(...blocks.map(b => b.ec.length));
-      for (let i = 0; i < maxE; i++)
-        for (const b of blocks) if (i < b.ec.length) out.push(b.ec[i]);
-      return out;
-    }
-
-    return { encode };
-  })();
-
   // Generate QR on load
   let currentAmount = '5.00';
 
   function update() {
     const payload = buildPix(currentAmount);
     const canvas = document.getElementById('pix-canvas');
-    drawQR(canvas, payload);
+    QRCode.toCanvas(canvas, payload, {
+      width: 200,
+      margin: 2,
+      color: { dark: '#000000', light: '#ffffff' },
+      errorCorrectionLevel: 'M'
+    }, function(err) {
+      if (err) console.error('QR error:', err, '\nPayload:', payload);
+    });
   }
 
   document.querySelectorAll('.pix-amt').forEach(el => {
@@ -1199,7 +942,12 @@ chmod +x EpicPen-*-x86_64.AppImage
     });
   });
 
-  update();
+  if (typeof QRCode !== 'undefined') {
+    update();
+  } else {
+    document.getElementById('pix-canvas').insertAdjacentHTML('afterend',
+      '<p style="color:#ff5f72;font-size:.75rem;margin-top:.5rem">QR indisponível offline</p>');
+  }
 })();
 </script>
 </body>
