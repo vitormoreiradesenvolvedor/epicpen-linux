@@ -89,6 +89,10 @@ def main():
 
     overlay._layer_shell_active = bool(_lsw_o)
 
+    # Wayland sem wlr-layer-shell (GNOME): embute a toolbar no overlay para evitar
+    # z-ordering entre janelas separadas (apps aparecem entre toolbar e overlay).
+    _use_embed = not _lsw_o and layershell.IS_WAYLAND
+
     if _lsw_o and _lsw_t:
         # Quando o overlay é remapeado (set_active True após estar escondido), ele fica
         # acima do toolbar na z-order de Layer::Top. Remapear o toolbar logo depois
@@ -100,14 +104,20 @@ def main():
         print("[layershell] overlay Layer::Top 4-anchor ExclusiveZone=0 + toolbar Layer::Overlay")
     elif _lsw_o:
         print("[layershell] overlay Layer::Top (toolbar sem layer-shell)")
+    elif _use_embed:
+        # embed_toolbar() deve ser chamado ANTES de overlay.show()
+        overlay.embed_toolbar(toolbar)
+        print("[layershell] GNOME Wayland — toolbar embutida no overlay (modo embed)")
     else:
-        print("[layershell] FALHOU — usando fallback keepAbove")
+        print("[layershell] FALHOU — usando fallback keepAbove (X11)")
 
     overlay.show()
-    toolbar.show()
+    if not _use_embed:
+        # No modo embed, embed_toolbar() já chama toolbar.show() internamente
+        toolbar.show()
 
-    if not _lsw_o:
-        # Fallback keepAbove para sessões X11 ou quando layer-shell não está disponível
+    if not _lsw_o and not _use_embed:
+        # Fallback keepAbove para sessões X11
         QTimer.singleShot(600, keepabove.set_keepabove)
         _ka_timer = QTimer()
         _ka_timer.setSingleShot(True)
