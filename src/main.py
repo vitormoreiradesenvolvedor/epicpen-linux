@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
+import os as _os
 import sys
+
+# GNOME Wayland não suporta wlr-layer-shell nem honra WindowStaysOnTopHint
+# para janelas xdg_toplevel nativas. Forçar QT_QPA_PLATFORM=xcb faz o Qt
+# usar XWayland; o Mutter honra _NET_WM_STATE_ABOVE para clientes XWayland,
+# que é o que Qt envia a partir de WindowStaysOnTopHint.
+_xdg_desktop = _os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+if ("gnome" in _xdg_desktop
+        and _os.environ.get("WAYLAND_DISPLAY")
+        and _os.environ.get("QT_QPA_PLATFORM", "wayland") != "xcb"):
+    _os.environ["QT_QPA_PLATFORM"] = "xcb"
+    print("[gnome] GNOME Wayland detectado — usando XWayland (QT_QPA_PLATFORM=xcb)")
+
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QTimer
 
@@ -104,6 +117,10 @@ def main():
         print("[layershell] FALHOU — usando fallback keepAbove")
 
     overlay.show()
+    if not _lsw_t:
+        # X11/XWayland: a posição foi validada acima (pode ter sido resetada para 20,150);
+        # move() aqui aplica o valor corrigido após o setFixedWidth do construtor.
+        toolbar.move(_tb_abs)
     toolbar.show()
 
     if not _lsw_o:

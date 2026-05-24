@@ -34,7 +34,7 @@ Não é necessário instalar nada. O AppImage inclui Python 3.12, PyQt6 e todas 
 |---|---|
 | Distribuição | Ubuntu **22.04** LTS / Debian 12 / Fedora 38+ / Arch Linux / Manjaro ou equivalente |
 | glibc | **2.34**+ (Ubuntu 22.04 ✓) |
-| Sessão gráfica | Wayland (GNOME 42+, KDE Plasma 5.27+, Sway, Hyprland) ou X11 |
+| Sessão gráfica | Wayland (GNOME 42+, KDE Plasma 5.27+) ou X11 |
 | FUSE | FUSE2 **ou** FUSE3 (a maioria das distros já inclui um dos dois) |
 | Arquitectura | x86\_64 |
 
@@ -82,16 +82,24 @@ epicpen-linux/
 └── epicpen.desktop             # Ficheiro .desktop para integração no sistema
 ```
 
+### Suporte a compositors
+
+| Compositor | Estado | Notas |
+|---|---|---|
+| KDE Plasma (KWin) | ✅ Suportado | layer-shell nativo; toolbar e overlay como superfícies separadas |
+| GNOME (Mutter) | ✅ Suportado | corre via XWayland; `_NET_WM_STATE_ABOVE` garante always-on-top |
+| X11 genérico | ✅ Suportado | `WindowStaysOnTopHint` + keepAbove via KWin DBus |
+| Hyprland | ⚠️ Não suportado oficialmente | o Hyprland não entrega `wl_pointer.motion` durante implicit grab em superfícies layer-shell, o que impede o desenho e o drag da toolbar de funcionar correctamente. Contribuições são bem-vindas — veja [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) |
+| niri e outros compositors wlr | ⚠️ Não suportado oficialmente | pode funcionar parcialmente; sem testes regulares. Contribuições são bem-vindas |
+
 ### Arquitetura da janela
 
-O EpicPen Linux usa uma arquitectura de **janela única expansível**:
+O EpicPen Linux usa **duas janelas independentes**:
 
-- `ToolbarWindow` é a única superfície Wayland (layer-shell `Layer::Top`)
-- `OverlayWindow` é um widget filho da `ToolbarWindow` — não tem superfície Wayland própria
-- **Modo idle**: toolbar ocupa apenas 56×altura px (coluna lateral)
-- **Modo desenho**: toolbar expande para cobrir o ecrã inteiro; o overlay filho aparece sobre ela
+- `OverlayWindow` — superfície layer-shell `Layer::Top` que cobre o ecrã inteiro; recebe os eventos de desenho
+- `ToolbarWindow` — superfície layer-shell `Layer::Top` separada; flutua sobre o overlay
 
-Isto evita o problema de múltiplas superfícies Wayland em conflito e garante que o overlay está sempre acima de outras janelas.
+Em GNOME (XWayland) e X11, ambas as janelas usam `WindowStaysOnTopHint` + keepAbove para permanecerem acima de outras janelas.
 
 ## Desenvolvimento
 
