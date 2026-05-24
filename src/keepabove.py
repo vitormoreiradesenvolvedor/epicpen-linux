@@ -26,6 +26,17 @@ _JS = (
 
 _lock = threading.Lock()
 _script_path: str | None = None
+_available: bool | None = None  # None=não verificado, True=disponível, False=ausente
+
+
+def _is_available() -> bool:
+    global _available
+    if _available is None:
+        import shutil
+        _available = shutil.which("qdbus-qt6") is not None
+        if not _available:
+            print("[keepabove] qdbus-qt6 não encontrado — keepAbove KWin desativado", flush=True)
+    return _available
 
 
 def _qdbus(*args, timeout=5):
@@ -67,4 +78,6 @@ def _run(pid: int):
 
 def set_keepabove():
     """Set keepAbove=true para todas as janelas do processo via KWin scripting."""
+    if not _is_available():
+        return
     threading.Thread(target=_run, args=(os.getpid(),), daemon=True).start()

@@ -404,11 +404,18 @@ class ToolbarWindow(QWidget):
     # ── Color ─────────────────────────────────────────────────────────────────
 
     def _pick_color(self):
+        was_drawing = self._drawing_active
+        if was_drawing:
+            self._btn_toggle.setChecked(True)
+            self._toggle_drawing(True)
         color = QColorDialog.getColor(self._current_color, self, "Escolher cor")
         if color.isValid():
             self._current_color = color
             self._overlay.set_color(color)
             self._update_color_button()
+        if was_drawing:
+            self._btn_toggle.setChecked(False)
+            self._toggle_drawing(False)
 
     def _update_color_button(self):
         self._color_btn.setIcon(icons.color_dot(self._current_color))
@@ -473,10 +480,11 @@ class ToolbarWindow(QWidget):
         if self._presentation_mode:
             self._hide_timer.stop()
             self.setWindowOpacity(1.0)
-        # Wayland: puxa foco de teclado ao entrar na toolbar
-        self.raise_()
-        self.activateWindow()
-        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        # Wayland: puxa foco de teclado ao entrar na toolbar (não durante drag)
+        if not self._dragging:
+            self.raise_()
+            self.activateWindow()
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
         super().enterEvent(event)
 
     def wheelEvent(self, event):
@@ -508,6 +516,9 @@ class ToolbarWindow(QWidget):
             from PyQt6.QtWidgets import QApplication
             self._current_screen = (self._screen_at(self._lsw_pos)
                                     or QApplication.primaryScreen())
+        # Sem layer-shell (GNOME): sincroniza _lsw_pos com onde o compositor colocou a janela
+        if not self._lsw_ptr and self.parent() is None:
+            QTimer.singleShot(300, self._sync_lsw_pos_from_widget)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -519,6 +530,12 @@ class ToolbarWindow(QWidget):
 
     def _sync_overlay_mask(self):
         self._overlay.set_toolbar_region(self.geometry())
+
+    def _sync_lsw_pos_from_widget(self):
+        """Atualiza _lsw_pos a partir de self.pos() quando layer-shell não está ativo."""
+        p = self.pos()
+        if p.x() != 0 or p.y() != 0:
+            self._lsw_pos = p
 
     # ── Multi-monitor ─────────────────────────────────────────────────────────
 
@@ -595,6 +612,13 @@ class ToolbarWindow(QWidget):
     def eventFilter(self, obj, event):
         t = event.type()
 
+        # Suprime hover/enter/leave em filhos durante drag — evita piscar dos botões
+        if self._dragging and t in (
+            QEvent.Type.HoverMove, QEvent.Type.HoverEnter, QEvent.Type.HoverLeave,
+            QEvent.Type.Enter, QEvent.Type.Leave,
+        ):
+            return True
+
         # Tab antes do sistema de foco consumir
         if t == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Tab:
             self._btn_toggle.toggle()
@@ -607,15 +631,13 @@ class ToolbarWindow(QWidget):
             self._toggle_drawing(self._btn_toggle.isChecked())
             return True
 
-        # Sliders gerenciam o próprio drag — não interferir
-        if isinstance(obj, QSlider):
+        # Sliders gerenciam o próprio drag — mas durante drag da toolbar têm prioridade zero
+        if isinstance(obj, QSlider) and not self._dragging:
             return False
 
         if t == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
             sp = event.scenePosition().toPoint()
             self._drag_start        = sp
-            # screen_pos = scenePos + lsw_pos: invariante à mudança de coords
-            # quando a toolbar se move (scenePos é relativo à surface atual)
             self._drag_start_screen = sp + self._lsw_pos
             self._drag_start_pos    = QPoint(self._lsw_pos)
             self._dragging          = False
@@ -626,20 +648,22 @@ class ToolbarWindow(QWidget):
                 delta = event.scenePosition().toPoint() - self._drag_start
                 if abs(delta.x()) + abs(delta.y()) >= 6:
                     self._dragging = True
+                    if not self._lsw_ptr and self.parent() is None:
+                        # GNOME/sem layer-shell: pede ao compositor para mover a janela.
+                        # startSystemMove() envia xdg_toplevel_move; o compositor trata
+                        # o resto do arrasto e para de enviar MouseMove para a app.
+                        wh = self.windowHandle()
+                        if wh:
+                            wh.startSystemMove()
                     return True
-            if self._dragging:
-                # Converte scenePos atual para coords de ecrã; subtrai o ponto
-                # de início (também em coords de ecrã) → delta correto mesmo
-                # depois de layershell.move_to() ter mudado o sistema de coords.
-                # Clamp ao monitor atual: margens negativas tornariam a superfície
-                # invisível; mudança de output acontece apenas no release.
+            if self._dragging and (self.parent() is not None or self._lsw_ptr):
                 screen_cursor = event.scenePosition().toPoint() + self._lsw_pos
                 cursor_delta  = screen_cursor - self._drag_start_screen
                 new_pos = self._clamp_to_screen(self._drag_start_pos + cursor_delta,
                                                 self._current_screen)
                 if self.parent() is not None:
                     self.move(new_pos)
-                elif self._lsw_ptr:
+                else:
                     scr = self._current_screen
                     origin = scr.geometry().topLeft() if scr else QPoint(0, 0)
                     rel = new_pos - origin
@@ -647,20 +671,25 @@ class ToolbarWindow(QWidget):
                     self.update()
                 self._lsw_pos = new_pos
                 return True
+            if self._dragging:
+                # startSystemMove() ativo — compositor move; consumir eventos residuais
+                return True
 
         if t == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
             was_dragging      = self._dragging
             self._drag_start  = None
             self._dragging    = False
             if was_dragging:
-                # Usa a posição absoluta do cursor (não _lsw_pos clamped) para
-                # detectar se o utilizador soltou noutro monitor.
-                cursor_abs = event.scenePosition().toPoint() + self._lsw_pos
-                new_screen = self._screen_at(cursor_abs)
-                if new_screen and new_screen != self._current_screen:
-                    self._lsw_pos = self._clamp_pos(cursor_abs)
-                    self._current_screen = new_screen
-                    self._change_toolbar_screen(new_screen)
+                if self._lsw_ptr:
+                    cursor_abs = event.scenePosition().toPoint() + self._lsw_pos
+                    new_screen = self._screen_at(cursor_abs)
+                    if new_screen and new_screen != self._current_screen:
+                        self._lsw_pos = self._clamp_pos(cursor_abs)
+                        self._current_screen = new_screen
+                        self._change_toolbar_screen(new_screen)
+                elif self.parent() is None:
+                    # Sem layer-shell: sincroniza _lsw_pos com posição real após drag
+                    self._lsw_pos = self.pos()
                 return True  # consome release → botão não dispara click após drag
 
         return False  # passa todos os demais eventos adiante

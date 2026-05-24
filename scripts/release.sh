@@ -129,7 +129,55 @@ echo -e "${BOLD}A construir AppImage...${RESET}"
 echo ""
 
 APPDIR="$ROOT/AppDir"
-rm -rf "$APPDIR/usr/bin" "$APPDIR/usr/lib/epicpen-venv"
+
+# Python standalone (portátil, sem deps de sistema)
+# venvs criados com o Python do sistema usam symlinks para o intérprete da
+# máquina de build — não funcionam em outras distros. python-build-standalone
+# inclui o intérprete + stdlib num único dir relocável.
+PYTHON_CACHE="$ROOT/tools/python-standalone"
+PYTHON_BIN="$PYTHON_CACHE/bin/python3"
+
+if [ ! -x "$PYTHON_BIN" ]; then
+  echo "→ Python standalone não encontrado — a descarregar python-build-standalone..."
+  mkdir -p "$ROOT/tools"
+
+  ARCHIVE_URL=$(curl -fsSL "https://api.github.com/repos/indygreg/python-build-standalone/releases/latest" | \
+    python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for a in data.get('assets', []):
+    n = a['name']
+    if ('cpython-3.12' in n
+            and 'x86_64-unknown-linux-gnu' in n
+            and 'install_only_stripped' in n
+            and n.endswith('.tar.gz')):
+        print(a['browser_download_url'])
+        break
+" 2>/dev/null || true)
+
+  if [ -z "$ARCHIVE_URL" ]; then
+    echo -e "${RED}ERRO: não foi possível determinar URL do Python standalone.${RESET}"
+    echo "  Aceda a https://github.com/indygreg/python-build-standalone/releases"
+    echo "  e coloque o tarball extraído em: $PYTHON_CACHE"
+    exit 1
+  fi
+
+  ARCHIVE="/tmp/epicpen-python-standalone.tar.gz"
+  echo "  URL: $ARCHIVE_URL"
+  curl -fL --progress-bar "$ARCHIVE_URL" -o "$ARCHIVE"
+  mkdir -p "$PYTHON_CACHE"
+  # O tarball extrai para python/ — strip-components=1 coloca direto em PYTHON_CACHE
+  tar -xzf "$ARCHIVE" --strip-components=1 -C "$PYTHON_CACHE"
+  rm -f "$ARCHIVE"
+  echo -e "${GREEN}→ Python standalone instalado: $("$PYTHON_BIN" --version 2>&1)${RESET}"
+else
+  echo "→ Python standalone em cache ($("$PYTHON_BIN" --version 2>&1))."
+fi
+
+rm -rf "$APPDIR/usr/bin" "$APPDIR/usr/lib/python-standalone" "$APPDIR/usr/lib/epicpen-venv"
+# Remove libs que possam ter ficado de builds anteriores
+rm -f "$APPDIR/usr/lib/libstdc++.so.6" "$APPDIR/usr/lib/libgcc_s.so.1"
+rm -f "$APPDIR/usr/lib"/libxcb*.so* "$APPDIR/usr/lib"/libxkbcommon*.so* "$APPDIR/usr/lib/libX11-xcb.so.1"
 mkdir -p \
   "$APPDIR/usr/bin" \
   "$APPDIR/usr/lib" \
@@ -139,15 +187,15 @@ mkdir -p \
 echo "→ Gerando ícone..."
 python3 "$SCRIPT_DIR/generate_icon.py"
 
-echo "→ Instalando dependências no venv (PyQt6==6.10.1)..."
-VENV="$APPDIR/usr/lib/epicpen-venv"
-python3 -m venv "$VENV"
-"$VENV/bin/pip" install --quiet "PyQt6==6.10.1"
+echo "→ Copiando Python standalone para AppDir..."
+cp -r "$PYTHON_CACHE" "$APPDIR/usr/lib/python-standalone"
+APPDIR_PYTHON="$APPDIR/usr/lib/python-standalone/bin/python3"
 
-PYQT6_PLUGINS=$("$VENV/bin/python" -c \
+echo "→ Instalando dependências (PyQt6==6.10.1)..."
+"$APPDIR_PYTHON" -m pip install --quiet "PyQt6==6.10.1"
+
+PYQT6_PLUGINS=$("$APPDIR_PYTHON" -c \
   "import PyQt6, os; print(os.path.join(os.path.dirname(PyQt6.__file__), 'Qt6', 'plugins'))")
-PYQT6_LIBS=$("$VENV/bin/python" -c \
-  "import PyQt6, os; print(os.path.join(os.path.dirname(PyQt6.__file__), 'Qt6', 'lib'))")
 
 echo "→ Copiando fontes e recursos..."
 cp -r "$ROOT/src/"* "$APPDIR/usr/bin/"
@@ -168,21 +216,112 @@ if [ -f "$WSI_SYSTEM" ] && [ -d "$WSI_DIR" ]; then
   cp "$WSI_SYSTEM" "$WSI_DIR/"
 fi
 
+# Bundla libs xcb/X11 + C++ runtime (Ubuntu 22.04) — sem DT_RELR
+# Fedora 43 usa binutils 2.41+ → DT_RELR → requer glibc 2.36 → quebra Ubuntu 22.04 (glibc 2.35).
+# libstdc++/libgcc_s do Ubuntu 22.04 GCC 12: GLIBCXX_3.4.30, necessário para Ubuntu 20.04.
+echo "→ Bundling libs xcb/X11 (Ubuntu 22.04 Jammy)..."
+
+XCB_CACHE="$ROOT/tools/xcb-ubuntu"
+mkdir -p "$XCB_CACHE"
+[ -f "$ROOT/tools/libxcb-cursor.so.0" ] && \
+  mv "$ROOT/tools/libxcb-cursor.so.0" "$XCB_CACHE/libxcb-cursor.so.0" 2>/dev/null || true
+
+_extract_so_from_deb() {
+  local deb="$1" prefix="$2" dest="$3"
+  local dir
+  dir=$(mktemp -d)
+  (cd "$dir" && ar x "$deb" 2>/dev/null)
+  local tf
+  tf=$(ls "$dir"/data.tar.* 2>/dev/null | head -1)
+  [ -n "$tf" ] && tar xf "$tf" -C "$dir" 2>/dev/null
+  local so
+  so=$(find "$dir" -name "${prefix}*.so*" -type f ! -name "*.py" | head -1)
+  [ -n "$so" ] && cp "$so" "$dest"
+  rm -rf "$dir"
+  [ -n "$so" ]
+}
+
+_fetch_ubuntu_lib() {
+  local pool_url="$1" deb_name="$2" so_name="$3"
+  local cache_file="$XCB_CACHE/$so_name"
+  if [ ! -f "$cache_file" ]; then
+    local deb_tmp="/tmp/ubuntu-xcb-${deb_name}"
+    if curl -fsSL --connect-timeout 30 "${pool_url}${deb_name}" -o "$deb_tmp" 2>/dev/null; then
+      local prefix="${so_name%%.*}"
+      if _extract_so_from_deb "$deb_tmp" "$prefix" "$cache_file"; then
+        echo "  $so_name ← $deb_name"
+      else
+        echo -e "${YELLOW}  AVISO: $so_name não extraída de $deb_name${RESET}"
+      fi
+    else
+      echo -e "${YELLOW}  AVISO: falha ao descarregar $deb_name${RESET}"
+    fi
+    rm -f "$deb_tmp"
+  fi
+  [ -f "$cache_file" ] && cp "$cache_file" "$APPDIR/usr/lib/$so_name"
+}
+
+POOL_LIBXCB="http://archive.ubuntu.com/ubuntu/pool/main/libx/libxcb/"
+POOL_XCB_UTIL="http://archive.ubuntu.com/ubuntu/pool/main/x/xcb-util/"
+POOL_XCB_WM="http://archive.ubuntu.com/ubuntu/pool/main/x/xcb-util-wm/"
+POOL_XCB_IMAGE="http://archive.ubuntu.com/ubuntu/pool/main/x/xcb-util-image/"
+POOL_XCB_KEYS="http://archive.ubuntu.com/ubuntu/pool/main/x/xcb-util-keysyms/"
+POOL_XCB_RUTIL="http://archive.ubuntu.com/ubuntu/pool/main/x/xcb-util-renderutil/"
+POOL_XKBCOMMON="http://archive.ubuntu.com/ubuntu/pool/main/libx/libxkbcommon/"
+POOL_LIBX11="http://archive.ubuntu.com/ubuntu/pool/main/libx/libx11/"
+POOL_XCB_CURSOR="http://archive.ubuntu.com/ubuntu/pool/universe/x/xcb-util-cursor/"
+
+_fetch_ubuntu_lib "$POOL_LIBXCB"    "libxcb-shm0_1.14-3ubuntu3_amd64.deb"          "libxcb-shm.so.0"
+_fetch_ubuntu_lib "$POOL_LIBXCB"    "libxcb-render0_1.14-3ubuntu3_amd64.deb"        "libxcb-render.so.0"
+_fetch_ubuntu_lib "$POOL_LIBXCB"    "libxcb-shape0_1.14-3ubuntu3_amd64.deb"         "libxcb-shape.so.0"
+_fetch_ubuntu_lib "$POOL_LIBXCB"    "libxcb-randr0_1.14-3ubuntu3_amd64.deb"         "libxcb-randr.so.0"
+_fetch_ubuntu_lib "$POOL_LIBXCB"    "libxcb-sync1_1.14-3ubuntu3_amd64.deb"          "libxcb-sync.so.1"
+_fetch_ubuntu_lib "$POOL_LIBXCB"    "libxcb-xfixes0_1.14-3ubuntu3_amd64.deb"        "libxcb-xfixes.so.0"
+_fetch_ubuntu_lib "$POOL_LIBXCB"    "libxcb-xkb1_1.14-3ubuntu3_amd64.deb"           "libxcb-xkb.so.1"
+_fetch_ubuntu_lib "$POOL_XCB_UTIL"  "libxcb-util1_0.4.0-0ubuntu3_amd64.deb"         "libxcb-util.so.1"
+_fetch_ubuntu_lib "$POOL_XCB_WM"    "libxcb-icccm4_0.4.1-1.1_amd64.deb"            "libxcb-icccm.so.4"
+_fetch_ubuntu_lib "$POOL_XCB_IMAGE" "libxcb-image0_0.4.0-2build1_amd64.deb"         "libxcb-image.so.0"
+_fetch_ubuntu_lib "$POOL_XCB_KEYS"  "libxcb-keysyms1_0.4.0-1build1_amd64.deb"      "libxcb-keysyms.so.1"
+_fetch_ubuntu_lib "$POOL_XCB_RUTIL" "libxcb-render-util0_0.3.9-1build1_amd64.deb"  "libxcb-render-util.so.0"
+_fetch_ubuntu_lib "$POOL_XKBCOMMON" "libxkbcommon0_1.4.0-1_amd64.deb"              "libxkbcommon.so.0"
+_fetch_ubuntu_lib "$POOL_XKBCOMMON" "libxkbcommon-x11-0_1.4.0-1_amd64.deb"          "libxkbcommon-x11.so.0"
+_fetch_ubuntu_lib "$POOL_LIBX11"    "libx11-xcb1_1.7.5-1_amd64.deb"                "libX11-xcb.so.1"
+_fetch_ubuntu_lib "$POOL_XCB_CURSOR" "libxcb-cursor0_0.1.1-3ubuntu1_amd64.deb"     "libxcb-cursor.so.0"
+
+# C++ runtime — Ubuntu 22.04 GCC 12 (GLIBCXX_3.4.30, sem DT_RELR, glibc ≥ 2.17)
+POOL_GCC12="http://archive.ubuntu.com/ubuntu/pool/main/g/gcc-12/"
+_fetch_ubuntu_lib "$POOL_GCC12" "libstdc++6_12.3.0-1ubuntu1~22.04.3_amd64.deb" "libstdc++.so.6"
+_fetch_ubuntu_lib "$POOL_GCC12" "libgcc-s1_12.3.0-1ubuntu1~22.04.3_amd64.deb"  "libgcc_s.so.1"
+
+if [ -f "$XCB_CACHE/libxcb-cursor.so.0" ]; then
+  PYQT6_QT6LIB=$("$APPDIR_PYTHON" -c \
+    "import PyQt6, os; print(os.path.join(os.path.dirname(PyQt6.__file__), 'Qt6', 'lib'))")
+  cp "$XCB_CACHE/libxcb-cursor.so.0" "$PYQT6_QT6LIB/libxcb-cursor.so.0"
+  echo "  libxcb-cursor.so.0 → $(basename $PYQT6_QT6LIB)/ também (RUNPATH)"
+else
+  echo -e "${RED}  ERRO: libxcb-cursor.so.0 não disponível — X11 não vai funcionar${RESET}"
+fi
+
 cat > "$APPDIR/usr/bin/epicpen" << 'WRAPPER'
 #!/usr/bin/env bash
 SELF_DIR="$(dirname "$(readlink -f "$0")")"
-exec "$SELF_DIR/../lib/epicpen-venv/bin/python3" "$SELF_DIR/main.py" "$@"
+exec "$SELF_DIR/../lib/python-standalone/bin/python3" "$SELF_DIR/main.py" "$@"
 WRAPPER
 chmod +x "$APPDIR/usr/bin/epicpen"
 
-PYQT6_LIBS_REL="${PYQT6_LIBS#${APPDIR}/}"
-cat > "$APPDIR/AppRun" << APPRUN
+cat > "$APPDIR/AppRun" << 'APPRUN'
 #!/usr/bin/env bash
-HERE="\$(dirname "\$(readlink -f "\$0")")"
+HERE="$(dirname "$(readlink -f "$0")")"
 export QT_AUTO_SCREEN_SCALE_FACTOR=1
 export QT_ACCESSIBILITY=0
-export LD_LIBRARY_PATH="\${HERE}/usr/lib:\${HERE}/${PYQT6_LIBS_REL}\${LD_LIBRARY_PATH:+:\${LD_LIBRARY_PATH}}"
-exec "\${HERE}/usr/bin/epicpen" "\$@"
+if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -z "${QT_QPA_PLATFORM:-}" ]; then
+  export QT_QPA_PLATFORM=wayland
+fi
+export LD_LIBRARY_PATH="${HERE}/usr/lib:${HERE}/usr/lib/python-standalone/lib/python3.12/site-packages/PyQt6/Qt6/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+if [ -f "${HERE}/usr/lib/libxcb-cursor.so.0" ]; then
+  export LD_PRELOAD="${HERE}/usr/lib/libxcb-cursor.so.0${LD_PRELOAD:+:${LD_PRELOAD}}"
+fi
+exec "${HERE}/usr/bin/epicpen" "$@"
 APPRUN
 chmod +x "$APPDIR/AppRun"
 
@@ -193,6 +332,36 @@ if [ -f "$ICON_SRC" ]; then
   cp "$ICON_SRC" "$APPDIR/epicpen.png"
   cp "$ICON_SRC" "$APPDIR/usr/share/icons/hicolor/256x256/apps/epicpen.png"
 fi
+
+# Arch/Manjaro têm apenas FUSE3 (fusermount3); o runtime padrão (continuous)
+# usa FUSE2 e segfaulta. Passamos --runtime-file com o runtime fuse3 do release
+# "old" (651680 bytes), que suporta FUSE2 e FUSE3.
+# NOTA: appimagetool deve terminar sem pipe (SIGPIPE interrompe a gravação do ELF).
+FUSE3_RUNTIME="$ROOT/tools/runtime-fuse3-x86_64"
+
+ensure_fuse3_runtime() {
+  if [ -f "$FUSE3_RUNTIME" ]; then
+    local sz
+    sz=$(wc -c < "$FUSE3_RUNTIME")
+    if [ "$sz" -ge 600000 ]; then
+      echo "→ runtime-fuse3 em cache ($sz bytes)."
+      return
+    fi
+    echo "  runtime-fuse3 em cache parece inválido ($sz bytes) — removendo..."
+    rm -f "$FUSE3_RUNTIME"
+  fi
+  echo "→ Descarregando runtime AppImage com suporte FUSE3..."
+  local url="https://github.com/AppImage/type2-runtime/releases/download/old/runtime-fuse3-x86_64"
+  if curl -fsSL --connect-timeout 60 "$url" -o "$FUSE3_RUNTIME" 2>/dev/null; then
+    chmod +x "$FUSE3_RUNTIME"
+    echo "  runtime-fuse3-x86_64 descarregado ($(wc -c < "$FUSE3_RUNTIME") bytes)"
+  else
+    rm -f "$FUSE3_RUNTIME"
+    echo -e "${YELLOW}  AVISO: falha ao descarregar runtime-fuse3 — AppImage pode não funcionar no Arch/Manjaro${RESET}"
+  fi
+}
+
+ensure_fuse3_runtime
 
 APPIMAGETOOL=""
 for candidate in appimagetool "$ROOT/tools/appimagetool" "$ROOT/tools/appimagetool-${ARCH}.AppImage"; do
@@ -211,11 +380,9 @@ if [ -z "$APPIMAGETOOL" ]; then
 fi
 
 echo "→ Empacotando com appimagetool..."
-ARCH="$ARCH" "$APPIMAGETOOL" "$APPDIR" "$OUTPUT" 2>&1 \
-  | grep -v "^$" | grep -v "^Parallel" | grep -v "^Creating" \
-  | grep -v "^Exportable" | grep -v "^\s" | grep -v "^Number" \
-  | grep -v "^Inode\|^Direct\|^Xattr\|^Filesystem\|^Embedding\|^Marking\|^Success\|^Please\|^  " \
-  || true
+RUNTIME_OPT=()
+[ -f "$FUSE3_RUNTIME" ] && RUNTIME_OPT=(--runtime-file "$FUSE3_RUNTIME")
+ARCH="$ARCH" "$APPIMAGETOOL" "${RUNTIME_OPT[@]}" "$APPDIR" "$OUTPUT"
 
 # ── 7. Resultado ──────────────────────────────────────────────────────────────
 echo ""

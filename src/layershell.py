@@ -24,6 +24,12 @@ IS_WAYLAND = (
     and os.environ.get("QT_QPA_PLATFORM", "wayland") != "xcb"
 )
 
+# GNOME (Mutter) não suporta wlr-layer-shell nativamente.
+# Sem detecção, apply() devolve um ponteiro válido mas move_to() não move a janela,
+# fazendo _lsw_pos derivar e a toolbar ir para as extremidades do ecrã ao arrastar.
+_DESKTOP = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+IS_LAYERSHELL_COMPOSITOR = IS_WAYLAND and "gnome" not in _DESKTOP
+
 LAYER_BACKGROUND = 0
 LAYER_BOTTOM     = 1
 LAYER_TOP        = 2
@@ -94,6 +100,9 @@ def apply(widget,
           f" QT_QPA_PLATFORM={os.environ.get('QT_QPA_PLATFORM')!r} IS_WAYLAND={IS_WAYLAND}")
     if not IS_WAYLAND:
         print("[layershell] ambiente não é Wayland nativo — abortando")
+        return None
+    if not IS_LAYERSHELL_COMPOSITOR:
+        print(f"[layershell] compositor não suporta wlr-layer-shell (GNOME?) — desativado")
         return None
 
     lib = _get_lib()

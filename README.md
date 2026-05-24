@@ -14,16 +14,27 @@ Reimplementação open-source da ferramenta [EpicPen](https://epic-pen.com/) par
 - Painel flutuante sempre no topo
 - Suporte a múltiplos monitores
 
+## Requisitos do sistema (AppImage)
+
+| Componente | Mínimo |
+|---|---|
+| Distribuição Linux | Ubuntu **20.04** LTS / Debian 11 / Fedora 36+ / Arch Linux ou equivalente |
+| glibc | **2.28** (requisito do PyQt6 manylinux; Ubuntu 20.04 tem 2.31 ✓) |
+| Sessão gráfica | Wayland (KDE Plasma, GNOME 42+, Sway, Hyprland) ou X11 |
+| Arquitectura | x86\_64 |
+
+> `libstdc++`, `libgcc_s` e todas as libs xcb/X11 são bundladas — sem dependências de sistema além de glibc ≥ 2.28 e kernel com FUSE2 ou FUSE3.
+
 ## Stack tecnológica
 
-- **Python 3.11+**
-- **PyQt6** — interface gráfica e overlay transparente
+- **Python 3.12** (bundlado no AppImage via python-build-standalone — sem dependências de sistema)
+- **PyQt6 6.10** — interface gráfica e overlay transparente
 - **AppImageTool** — empacotamento como AppImage
 
 ## Requisitos de desenvolvimento
 
 ```bash
-pip install PyQt6
+pip install PyQt6==6.10.1
 ```
 
 ## Executar em desenvolvimento
