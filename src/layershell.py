@@ -181,6 +181,11 @@ def apply(widget,
         _set_margins(lib, lsw, x, y)
         print(f"[layershell] apply() concluído — layer={layer} pos=({x},{y}) excl={exclusive_zone}")
 
+        # Aproveitar que a integração Wayland está activa para cachear wl_compositor/display.
+        # Em PyQt6, platformNativeInterface() não está acessível como classmethod —
+        # deve ser chamado na instância. Fazemos isso aqui onde tudo já está inicializado.
+        _cache_wl_globals(widget)
+
         return lsw  # raw pointer (int) for later move_to() calls
 
     except Exception as e:
@@ -211,10 +216,12 @@ def _set_margins(lib, lsw_ptr: int, x: int, y: int) -> None:
 # Qt mapeia setMask(QRegion()) → set_input_region(NULL) = aceita tudo (errado).
 # A diferença protocolar:
 #   NULL          → aceita input em toda a superfície
-#   empty_region  → rejeita todo input (região sem rectângulos)
+#   empty_region  → rejeita todo input (wl_region sem rectângulos)
 # Só o caminho direto via libwayland-client garante o comportamento correto.
 
-_wl_client = None
+_wl_client      = None
+_wl_compositor  = None   # wl_compositor* cacheado em apply()
+_wl_display_ptr = None   # wl_display*    cacheado em apply()
 
 
 def _get_wl_client():
@@ -231,25 +238,83 @@ def _get_wl_client():
     return None
 
 
-def _get_wl_native(widget):
-    """Devolve (wl_surface*, wl_compositor*, wl_display*) ou (None, None, None)."""
+def _get_nif():
+    """Devolve QPlatformNativeInterface ou None.
+
+    PyQt6 expõe como método de instância — não funciona como classmethod.
+    """
     try:
         from PyQt6.QtGui import QGuiApplication
-        nif = QGuiApplication.platformNativeInterface()
+        app = QGuiApplication.instance()
+        if app is None:
+            return None
+        # Instância first; fallback para classmethod (alguns builds antigos)
+        for name in ("platformNativeInterface",):
+            fn = getattr(app, name, None) or getattr(QGuiApplication, name, None)
+            if callable(fn):
+                try:
+                    nif = fn()
+                    if nif is not None:
+                        return nif
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return None
+
+
+def _cache_wl_globals(widget) -> None:
+    """Cacheia wl_compositor* e wl_display* enquanto a integração Wayland está activa.
+
+    Chamado em apply() que é executado antes de qualquer show(), quando o NIF
+    ainda está totalmente operacional.
+    """
+    global _wl_compositor, _wl_display_ptr
+    if _wl_compositor is not None:
+        return  # já cacheado
+    try:
+        wh = widget.windowHandle()
+        nif = _get_nif()
         if nif is None:
-            return None, None, None
+            print("[layershell] _cache_wl_globals: NIF indisponível — passthrough ctypes desactivado")
+            return
+        if wh is not None:
+            # wl_surface* como verificação de sanidade
+            sf = nif.nativeResourceForWindow(b"surface", wh)
+            if not sf:
+                print("[layershell] _cache_wl_globals: surface NULL (janela ainda não criada?)")
+        comp = (nif.nativeResourceForIntegration(b"compositor") or
+                nif.nativeResourceForIntegration(b"wl_compositor"))
+        disp = (nif.nativeResourceForIntegration(b"wl_display") or
+                nif.nativeResourceForIntegration(b"display"))
+        if comp:
+            _wl_compositor  = comp
+            _wl_display_ptr = disp
+            print(f"[layershell] wl globals cacheados: compositor={hex(comp)}"
+                  f" display={hex(disp) if disp else None!r}")
+        else:
+            print("[layershell] _cache_wl_globals: compositor NULL")
+    except Exception as e:
+        print(f"[layershell] _cache_wl_globals erro: {e}")
+
+
+def _get_wl_surface(widget) -> "int | None":
+    """Devolve wl_surface* do widget ou None."""
+    try:
         wh = widget.windowHandle()
         if wh is None:
-            return None, None, None
-        surface = nif.nativeResourceForWindow(b"surface", wh)
-        compositor = (nif.nativeResourceForIntegration(b"compositor") or
-                      nif.nativeResourceForIntegration(b"wl_compositor"))
-        display = (nif.nativeResourceForIntegration(b"wl_display") or
-                   nif.nativeResourceForIntegration(b"display"))
-        return surface, compositor, display
+            return None
+        nif = _get_nif()
+        if nif is not None:
+            sf = nif.nativeResourceForWindow(b"surface", wh)
+            if sf:
+                return sf
+        # Fallback: wl_proxy_get_display não ajuda a obter surface sem NIF.
+        print("[layershell] _get_wl_surface: NIF indisponível")
+        return None
     except Exception as e:
-        print(f"[layershell] _get_wl_native erro: {e}")
-        return None, None, None
+        print(f"[layershell] _get_wl_surface erro: {e}")
+        return None
 
 
 def _wl_flush(wl, display_ptr) -> None:
@@ -275,9 +340,12 @@ def set_empty_input_region(widget) -> bool:
     wl = _get_wl_client()
     if wl is None:
         return False
-    surface, compositor, display = _get_wl_native(widget)
+    surface    = _get_wl_surface(widget)
+    compositor = _wl_compositor
+    display    = _wl_display_ptr
     if not surface or not compositor:
-        print(f"[layershell] set_empty_input_region: surface={surface!r} compositor={compositor!r}")
+        print(f"[layershell] set_empty_input_region: surface={surface!r} "
+              f"compositor={compositor!r} — passthrough indisponível")
         return False
     try:
         wl.wl_compositor_create_region.restype  = ctypes.c_void_p
@@ -316,7 +384,8 @@ def clear_input_region(widget) -> bool:
     wl = _get_wl_client()
     if wl is None:
         return False
-    surface, _, display = _get_wl_native(widget)
+    surface = _get_wl_surface(widget)
+    display = _wl_display_ptr
     if not surface:
         return False
     try:
