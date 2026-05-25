@@ -174,7 +174,7 @@ else
   echo "→ Python standalone em cache ($("$PYTHON_BIN" --version 2>&1))."
 fi
 
-rm -rf "$APPDIR/usr/bin" "$APPDIR/usr/lib/python-standalone" "$APPDIR/usr/lib/epicpen-venv"
+rm -rf "$APPDIR/usr/bin" "$APPDIR/usr/lib/python-standalone" "$APPDIR/usr/lib/epicpen-venv" "$APPDIR/usr/resources"
 # Remove libs que possam ter ficado de builds anteriores
 rm -f "$APPDIR/usr/lib/libstdc++.so.6" "$APPDIR/usr/lib/libgcc_s.so.1"
 rm -f "$APPDIR/usr/lib"/libxcb*.so* "$APPDIR/usr/lib"/libxkbcommon*.so* "$APPDIR/usr/lib/libX11-xcb.so.1"
