@@ -174,7 +174,7 @@ else
   echo "→ Python standalone em cache ($("$PYTHON_BIN" --version 2>&1))."
 fi
 
-rm -rf "$APPDIR/usr/bin" "$APPDIR/usr/lib/python-standalone" "$APPDIR/usr/lib/epicpen-venv"
+rm -rf "$APPDIR/usr/bin" "$APPDIR/usr/lib/python-standalone" "$APPDIR/usr/lib/epicpen-venv" "$APPDIR/usr/resources"
 # Remove libs que possam ter ficado de builds anteriores
 rm -f "$APPDIR/usr/lib/libstdc++.so.6" "$APPDIR/usr/lib/libgcc_s.so.1"
 rm -f "$APPDIR/usr/lib"/libxcb*.so* "$APPDIR/usr/lib"/libxkbcommon*.so* "$APPDIR/usr/lib/libX11-xcb.so.1"
@@ -184,15 +184,15 @@ mkdir -p \
   "$APPDIR/usr/share/applications" \
   "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 
-echo "→ Gerando ícone..."
-python3 "$SCRIPT_DIR/generate_icon.py"
-
 echo "→ Copiando Python standalone para AppDir..."
 cp -r "$PYTHON_CACHE" "$APPDIR/usr/lib/python-standalone"
 APPDIR_PYTHON="$APPDIR/usr/lib/python-standalone/bin/python3"
 
 echo "→ Instalando dependências (PyQt6==6.10.1)..."
 "$APPDIR_PYTHON" -m pip install --quiet "PyQt6==6.10.1"
+
+echo "→ Gerando ícone..."
+QT_QPA_PLATFORM=offscreen "$APPDIR_PYTHON" "$SCRIPT_DIR/generate_icon.py"
 
 PYQT6_PLUGINS=$("$APPDIR_PYTHON" -c \
   "import PyQt6, os; print(os.path.join(os.path.dirname(PyQt6.__file__), 'Qt6', 'plugins'))")
