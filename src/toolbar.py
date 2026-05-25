@@ -1,6 +1,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QSlider, QColorDialog, QFrame, QLayout,
+    QDialog, QLabel, QLineEdit, QSpinBox, QFontComboBox, QDialogButtonBox,
 )
 from PyQt6.QtCore import Qt, QPoint, QTimer, QSize, QEvent
 from PyQt6.QtGui import QColor, QCursor
@@ -57,6 +58,78 @@ _STYLE_COLLAPSED = """
 """
 
 
+class TextDialog(QDialog):
+    """Diálogo para configurar texto antes de inserir na tela."""
+
+    def __init__(self, default_color, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Inserir Texto")
+        self._color = QColor(default_color)
+
+        lay = QVBoxLayout(self)
+        lay.setSpacing(6)
+
+        lay.addWidget(QLabel("Texto:"))
+        self._text_edit = QLineEdit()
+        self._text_edit.setMinimumWidth(250)
+        lay.addWidget(self._text_edit)
+
+        row_font = QHBoxLayout()
+        row_font.addWidget(QLabel("Fonte:"))
+        self._font_combo = QFontComboBox()
+        self._font_combo.setCurrentFont(self._font_combo.currentFont())
+        row_font.addWidget(self._font_combo)
+        lay.addLayout(row_font)
+
+        row_size = QHBoxLayout()
+        row_size.addWidget(QLabel("Tamanho:"))
+        self._size_spin = QSpinBox()
+        self._size_spin.setRange(6, 144)
+        self._size_spin.setValue(24)
+        row_size.addWidget(self._size_spin)
+        lay.addLayout(row_size)
+
+        row_color = QHBoxLayout()
+        row_color.addWidget(QLabel("Cor:"))
+        self._color_btn = QPushButton()
+        self._color_btn.setFixedSize(28, 22)
+        self._update_color_preview()
+        self._color_btn.clicked.connect(self._pick_color)
+        row_color.addWidget(self._color_btn)
+        row_color.addStretch()
+        lay.addLayout(row_color)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+    def _pick_color(self):
+        c = QColorDialog.getColor(self._color, self, "Cor do texto")
+        if c.isValid():
+            self._color = c
+            self._update_color_preview()
+
+    def _update_color_preview(self):
+        self._color_btn.setStyleSheet(
+            f"background:{self._color.name()}; border:1px solid #888;"
+        )
+
+    def text(self) -> str:
+        return self._text_edit.text()
+
+    def font_family(self) -> str:
+        return self._font_combo.currentFont().family()
+
+    def font_size(self) -> int:
+        return self._size_spin.value()
+
+    def color(self):
+        return QColor(self._color)
+
+
 class ToolbarWindow(QWidget):
     """Barra de ferramentas flutuante, colapsável, sempre no topo."""
 
@@ -102,6 +175,8 @@ class ToolbarWindow(QWidget):
         self._hotkeys = GlobalHotkeyListener(self)
         self._hotkeys.toggled.connect(self._on_global_hotkey)
         self._hotkeys.start()
+
+        overlay.text_placement_requested.connect(self._on_text_placement_requested)
 
 
     # ── Window setup ──────────────────────────────────────────────────────────
@@ -193,10 +268,13 @@ class ToolbarWindow(QWidget):
         self._btn_eraser.setIcon(icons.eraser())
         self._btn_laser  = self._mk_btn("Ponteiro Laser (S)")
         self._btn_laser.setIcon(icons.laser())
+        self._btn_text   = self._mk_btn("Texto (T)")
+        self._btn_text.setIcon(icons.text_tool())
 
         self._tool_buttons = [
             self._btn_pen, self._btn_hl, self._btn_line,
-            self._btn_rect, self._btn_circle, self._btn_eraser, self._btn_laser,
+            self._btn_rect, self._btn_circle, self._btn_eraser,
+            self._btn_laser, self._btn_text,
         ]
         self._btn_pen.setChecked(True)
         for b in self._tool_buttons:
@@ -209,6 +287,7 @@ class ToolbarWindow(QWidget):
         self._btn_circle.clicked.connect(lambda: self._select_tool("circle"))
         self._btn_eraser.clicked.connect(lambda: self._select_tool("eraser"))
         self._btn_laser.clicked.connect(lambda: self._select_tool("laser"))
+        self._btn_text.clicked.connect(lambda: self._select_tool("text"))
 
         self._add_sep(lay)
 
@@ -404,11 +483,20 @@ class ToolbarWindow(QWidget):
             "pen": self._btn_pen, "highlighter": self._btn_hl,
             "line": self._btn_line, "rect": self._btn_rect,
             "circle": self._btn_circle, "eraser": self._btn_eraser,
-            "laser": self._btn_laser,
+            "laser": self._btn_laser, "text": self._btn_text,
         }
         if tool in btn_map:
             btn_map[tool].setChecked(True)
         self._overlay.set_tool(tool)
+
+    # ── Text tool ─────────────────────────────────────────────────────────────
+
+    def _on_text_placement_requested(self, pos):
+        dlg = TextDialog(self._current_color, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._overlay.place_text(
+                pos, dlg.text(), dlg.font_family(), dlg.font_size(), dlg.color()
+            )
 
     # ── Color ─────────────────────────────────────────────────────────────────
 
@@ -740,6 +828,7 @@ class ToolbarWindow(QWidget):
             Qt.Key.Key_E: "circle",
             Qt.Key.Key_X: "eraser",
             Qt.Key.Key_S: "laser",
+            Qt.Key.Key_T: "text",
         }
         if key in tool_keys:
             self._select_tool(tool_keys[key])
