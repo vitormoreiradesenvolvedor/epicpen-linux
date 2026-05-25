@@ -398,6 +398,12 @@ class ToolbarWindow(QWidget):
     # ── Tool selection ────────────────────────────────────────────────────────
 
     def _select_tool(self, tool: str):
+        # Ao selecionar uma ferramenta de desenho, sai do modo pass-through
+        if self._btn_toggle.isChecked():
+            self._btn_toggle.setChecked(False)
+            self._drawing_active = True
+            self._overlay.set_active(True)
+            self._btn_toggle.setIcon(icons.mouse_pause())
         for b in self._tool_buttons:
             b.setChecked(False)
         btn_map = {
@@ -454,8 +460,23 @@ class ToolbarWindow(QWidget):
         self._drawing_active = not checked
         self._overlay.set_active(self._drawing_active)
         self._btn_toggle.setIcon(icons.mouse_active() if checked else icons.mouse_pause())
-        if self._drawing_active:
-            # Ativa uma vez para que KWin/Wayland registre o estado "always on top"
+        if checked:
+            # Modo pass-through ON: desmarca ferramentas de desenho visualmente
+            for b in self._tool_buttons:
+                b.setChecked(False)
+        else:
+            # Retoma desenho: remarca a ferramenta activa
+            btn_map = {
+                "pen": self._btn_pen, "highlighter": self._btn_hl,
+                "line": self._btn_line, "rect": self._btn_rect,
+                "circle": self._btn_circle, "eraser": self._btn_eraser,
+                "laser": self._btn_laser,
+            }
+            tool = getattr(self._overlay, "_tool", "pen")
+            for b in self._tool_buttons:
+                b.setChecked(False)
+            if tool in btn_map:
+                btn_map[tool].setChecked(True)
             QTimer.singleShot(100, self._reaffirm_top)
 
     # ── Presentation mode ─────────────────────────────────────────────────────

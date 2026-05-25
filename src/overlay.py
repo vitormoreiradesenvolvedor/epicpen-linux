@@ -198,34 +198,35 @@ class OverlayWindow(QWidget):
     def set_active(self, active: bool):
         self._active = active
         if self._toolbar_widget is not None:
-            # Modo embed: nunca esconde — usa máscara para pass-through
+            # Modo embed: usa máscara para pass-through
             self._apply_input_mask()
             self._refresh_cursor()
             self.update()
         elif self._layer_shell_active:
-            # Layer-shell: unmap real libera o input para outras janelas
+            # Layer-shell: mantém superfície mapeada em ambos os modos.
+            # Pass-through via input region vazia (offscreen mask) —
+            # desenhos ficam visíveis mas o compositor entrega eventos às janelas abaixo.
             if active:
-                was_hidden = not self.isVisible()
-                if was_hidden:
-                    super().show()
                 self.clearMask()
-                self._refresh_cursor()
-                self.update()
-                # Superfície remapeada vai para o topo da z-order dentro de Layer::Top,
-                # ficando acima do toolbar. Notifica main.py para recolocar o toolbar.
-                if was_hidden and self._on_remapped:
-                    self._on_remapped()
             else:
-                super().hide()
+                self.setMask(self._offscreen_region())
+            self._refresh_cursor()
+            self.update()
         else:
-            # Fallback legacy (X11, sem layer-shell): show/hide real
-            if active:
+            # X11 / sem layer-shell: mantém janela visível; WA_TransparentForMouseEvents
+            # faz o X11 ignorar esta janela na entrega de eventos de rato.
+            if not self.isVisible():
                 super().show()
                 self.raise_()
+            if active:
+                self.clearMask()
+                self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
                 self._apply_input_mask()
-                self._refresh_cursor()
             else:
-                super().hide()
+                self.setMask(self._offscreen_region())
+                self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self._refresh_cursor()
+            self.update()
 
     def show(self):
         if self._layer_shell_active:
