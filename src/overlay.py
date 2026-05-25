@@ -203,6 +203,9 @@ class OverlayWindow(QWidget):
         # Ao esconder, cancela qualquer passthrough activo
         if not active and self._passthrough:
             self._passthrough = False
+            import layershell
+            if layershell.IS_WAYLAND:
+                layershell.clear_input_region(self)
             wh = self.windowHandle()
             if wh:
                 from PyQt6.QtGui import QRegion
@@ -244,33 +247,38 @@ class OverlayWindow(QWidget):
         """Modo seta: desenhos visíveis mas input passa para apps abaixo.
 
         Diferente de set_active(False) que oculta o overlay completamente.
+        Wayland: usa set_input_region(empty_region) via ctypes directo — o caminho
+        via Qt mapeia QRegion() para set_input_region(NULL) = aceita tudo (errado).
         """
         self._passthrough = active
         self._refresh_cursor()
         self.update()
+        import layershell as _ls
         if active:
-            from PyQt6.QtGui import QRegion
             # Garante que a superfície está visível
             if not self.isVisible():
-                if self._layer_shell_active:
-                    super().show()
-                else:
-                    super().show()
+                super().show()
+                if not self._layer_shell_active:
                     self.raise_()
-            offscreen = self._offscreen_region()
-            # Aplica máscara directamente no QWindow (wl_surface.set_input_region)
-            # e no QWidget como fallback para X11/embed.
-            wh = self.windowHandle()
-            if wh:
-                wh.setMask(offscreen)
-            self.setMask(offscreen)
-            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            if _ls.IS_WAYLAND and _ls.set_empty_input_region(self):
+                # Wayland directo OK — não usar setMask (Qt sobreescreveria na próx. commit)
+                pass
+            else:
+                # Fallback: X11 / GNOME XWayland / embed
+                offscreen = self._offscreen_region()
+                wh = self.windowHandle()
+                if wh:
+                    wh.setMask(offscreen)
+                self.setMask(offscreen)
+                self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         else:
-            # Restaura input normal
+            if _ls.IS_WAYLAND:
+                _ls.clear_input_region(self)
+            # Limpa Qt-level mask para X11/embed e garante consistência interna
             wh = self.windowHandle()
             if wh:
                 from PyQt6.QtGui import QRegion
-                wh.setMask(QRegion())  # null → compositor entrega eventos normalmente
+                wh.setMask(QRegion())
             self.clearMask()
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
             if not self._layer_shell_active:

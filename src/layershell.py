@@ -205,3 +205,131 @@ def _set_margins(lib, lsw_ptr: int, x: int, y: int) -> None:
     fn.argtypes = [ctypes.c_void_p, ctypes.POINTER(_QMargins)]
     m = _QMargins(m_left=x, m_top=y, m_right=0, m_bottom=0)
     fn(ctypes.c_void_p(lsw_ptr), ctypes.byref(m))
+
+
+# ── Wayland input-region direto ───────────────────────────────────────────────
+# Qt mapeia setMask(QRegion()) → set_input_region(NULL) = aceita tudo (errado).
+# A diferença protocolar:
+#   NULL          → aceita input em toda a superfície
+#   empty_region  → rejeita todo input (região sem rectângulos)
+# Só o caminho direto via libwayland-client garante o comportamento correto.
+
+_wl_client = None
+
+
+def _get_wl_client():
+    global _wl_client
+    if _wl_client is not None:
+        return _wl_client
+    for name in ("libwayland-client.so.0", "libwayland-client.so"):
+        try:
+            _wl_client = ctypes.CDLL(name)
+            return _wl_client
+        except OSError:
+            pass
+    print("[layershell] libwayland-client não encontrada")
+    return None
+
+
+def _get_wl_native(widget):
+    """Devolve (wl_surface*, wl_compositor*, wl_display*) ou (None, None, None)."""
+    try:
+        from PyQt6.QtGui import QGuiApplication
+        nif = QGuiApplication.platformNativeInterface()
+        if nif is None:
+            return None, None, None
+        wh = widget.windowHandle()
+        if wh is None:
+            return None, None, None
+        surface = nif.nativeResourceForWindow(b"surface", wh)
+        compositor = (nif.nativeResourceForIntegration(b"compositor") or
+                      nif.nativeResourceForIntegration(b"wl_compositor"))
+        display = (nif.nativeResourceForIntegration(b"wl_display") or
+                   nif.nativeResourceForIntegration(b"display"))
+        return surface, compositor, display
+    except Exception as e:
+        print(f"[layershell] _get_wl_native erro: {e}")
+        return None, None, None
+
+
+def _wl_flush(wl, display_ptr) -> None:
+    if not display_ptr:
+        return
+    try:
+        wl.wl_display_flush.restype  = ctypes.c_int
+        wl.wl_display_flush.argtypes = [ctypes.c_void_p]
+        wl.wl_display_flush(ctypes.c_void_p(display_ptr))
+    except Exception:
+        pass
+
+
+def set_empty_input_region(widget) -> bool:
+    """Define a input region do wl_surface como vazia → rejeita todo input.
+
+    Wayland: set_input_region(empty_region) ≠ set_input_region(NULL).
+    NULL = aceita tudo; empty_region (0 rectângulos) = rejeita tudo.
+    Retorna True se bem-sucedido.
+    """
+    if not IS_WAYLAND:
+        return False
+    wl = _get_wl_client()
+    if wl is None:
+        return False
+    surface, compositor, display = _get_wl_native(widget)
+    if not surface or not compositor:
+        print(f"[layershell] set_empty_input_region: surface={surface!r} compositor={compositor!r}")
+        return False
+    try:
+        wl.wl_compositor_create_region.restype  = ctypes.c_void_p
+        wl.wl_compositor_create_region.argtypes = [ctypes.c_void_p]
+        wl.wl_surface_set_input_region.restype  = None
+        wl.wl_surface_set_input_region.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        wl.wl_surface_commit.restype            = None
+        wl.wl_surface_commit.argtypes           = [ctypes.c_void_p]
+        wl.wl_region_destroy.restype            = None
+        wl.wl_region_destroy.argtypes           = [ctypes.c_void_p]
+
+        empty_region = wl.wl_compositor_create_region(ctypes.c_void_p(compositor))
+        if not empty_region:
+            print("[layershell] set_empty_input_region: wl_compositor_create_region → NULL")
+            return False
+        # Sem wl_region_add → região com zero rectângulos → rejeita tudo
+        wl.wl_surface_set_input_region(ctypes.c_void_p(surface),
+                                       ctypes.c_void_p(empty_region))
+        wl.wl_surface_commit(ctypes.c_void_p(surface))
+        wl.wl_region_destroy(ctypes.c_void_p(empty_region))
+        _wl_flush(wl, display)
+        print("[layershell] set_empty_input_region OK")
+        return True
+    except Exception as e:
+        print(f"[layershell] set_empty_input_region erro: {e}")
+        return False
+
+
+def clear_input_region(widget) -> bool:
+    """Restaura a input region do wl_surface para NULL → aceita todo input.
+
+    Retorna True se bem-sucedido.
+    """
+    if not IS_WAYLAND:
+        return False
+    wl = _get_wl_client()
+    if wl is None:
+        return False
+    surface, _, display = _get_wl_native(widget)
+    if not surface:
+        return False
+    try:
+        wl.wl_surface_set_input_region.restype  = None
+        wl.wl_surface_set_input_region.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        wl.wl_surface_commit.restype            = None
+        wl.wl_surface_commit.argtypes           = [ctypes.c_void_p]
+        # NULL = aceita todo input
+        wl.wl_surface_set_input_region(ctypes.c_void_p(surface), None)
+        wl.wl_surface_commit(ctypes.c_void_p(surface))
+        _wl_flush(wl, display)
+        print("[layershell] clear_input_region OK")
+        return True
+    except Exception as e:
+        print(f"[layershell] clear_input_region erro: {e}")
+        return False
