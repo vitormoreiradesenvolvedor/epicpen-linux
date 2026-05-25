@@ -297,6 +297,13 @@ class ToolbarWindow(QWidget):
         self._btn_toggle.clicked.connect(self._toggle_drawing)
         lay.addWidget(self._btn_toggle, alignment=Qt.AlignmentFlag.AlignHCenter)
 
+        self._add_sep(lay)
+
+        self._btn_exit = self._mk_btn("Sair", checkable=False)
+        self._btn_exit.setIcon(icons.exit_btn())
+        self._btn_exit.clicked.connect(self._quit_app)
+        lay.addWidget(self._btn_exit, alignment=Qt.AlignmentFlag.AlignHCenter)
+
         return w
 
     # ── Collapse / expand ─────────────────────────────────────────────────────
@@ -460,6 +467,10 @@ class ToolbarWindow(QWidget):
 
     # ── Presentation mode ─────────────────────────────────────────────────────
 
+    def _quit_app(self):
+        from PyQt6.QtWidgets import QApplication
+        QApplication.instance().quit()
+
     def _toggle_presentation(self, checked: bool):
         self._presentation_mode = checked
         if checked:
@@ -620,6 +631,13 @@ class ToolbarWindow(QWidget):
 
     def eventFilter(self, obj, event):
         t = event.type()
+
+        # Botão de saída: ícone vermelho no hover
+        if obj is self._btn_exit and not self._dragging:
+            if t == QEvent.Type.Enter:
+                self._btn_exit.setIcon(icons.exit_btn(hover=True))
+            elif t == QEvent.Type.Leave:
+                self._btn_exit.setIcon(icons.exit_btn())
 
         # Suprime hover/enter/leave em filhos durante drag — evita piscar dos botões
         if self._dragging and t in (

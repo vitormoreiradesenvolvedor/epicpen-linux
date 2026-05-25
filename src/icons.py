@@ -290,6 +290,18 @@ def drag_handle() -> QIcon:
     return _make(draw)
 
 
+def exit_btn(hover: bool = False) -> QIcon:
+    c = _R if hover else _W
+    def draw(p):
+        p.setPen(QPen(c, 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        # Arco 280° com abertura de 80° centrada no topo (90°): de 130° a 50° CCW
+        p.drawArc(QRectF(3, 4, 16, 16), 130 * 16, 280 * 16)
+        # Linha vertical pelo centro da abertura
+        p.drawLine(QPointF(11, 2), QPointF(11, 11))
+    return _make(draw)
+
+
 def logo() -> QIcon:
     """Ícone para o botão colapsado — mesmo PNG usado pela tray."""
     from pathlib import Path
