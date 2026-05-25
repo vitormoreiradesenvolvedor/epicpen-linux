@@ -192,7 +192,7 @@ echo "→ Instalando dependências (PyQt6==6.10.1)..."
 "$APPDIR_PYTHON" -m pip install --quiet "PyQt6==6.10.1"
 
 echo "→ Gerando ícone..."
-"$APPDIR_PYTHON" "$SCRIPT_DIR/generate_icon.py"
+QT_QPA_PLATFORM=offscreen "$APPDIR_PYTHON" "$SCRIPT_DIR/generate_icon.py"
 
 PYQT6_PLUGINS=$("$APPDIR_PYTHON" -c \
   "import PyQt6, os; print(os.path.join(os.path.dirname(PyQt6.__file__), 'Qt6', 'plugins'))")
