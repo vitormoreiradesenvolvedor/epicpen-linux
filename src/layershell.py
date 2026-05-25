@@ -238,6 +238,63 @@ def _get_wl_client():
     return None
 
 
+# ── Helpers de baixo nível (wl_proxy_marshal_array_flags) ─────────────────────
+# No libwayland moderno as funções geradas do protocolo (wl_display_get_registry,
+# wl_compositor_create_region, wl_surface_set_input_region, etc.) são static inline
+# no header — não existem como símbolos na .so. Usamos wl_proxy_marshal_array_flags
+# (não variádica, sempre exportada) em substituição.
+
+_wl_iface_addrs: dict = {}
+
+
+def _wl_iface_addr(wl, sym: str) -> int:
+    """Endereço do wl_interface* com o símbolo dado (data section de libwayland-client)."""
+    if sym not in _wl_iface_addrs:
+        class _I(ctypes.Structure):
+            _fields_ = [("_", ctypes.c_byte)]
+        _wl_iface_addrs[sym] = ctypes.addressof(_I.in_dll(wl, sym))
+    return _wl_iface_addrs[sym]
+
+
+def _wl_iface_name_ptr(wl, sym: str) -> int:
+    """Endereço da string name dentro de wl_interface (primeiro campo: const char*)."""
+    class _I(ctypes.Structure):
+        _fields_ = [("name", ctypes.c_void_p)]
+    return _I.in_dll(wl, sym).name  # int = endereço estático da string de nome
+
+
+def _wl_ver(wl, proxy: int) -> int:
+    fn = wl.wl_proxy_get_version
+    fn.restype  = ctypes.c_uint32
+    fn.argtypes = [ctypes.c_void_p]
+    return int(fn(ctypes.c_void_p(proxy)))
+
+
+def _wl_marshal(wl, proxy: int, opcode: int,
+                iface_addr: "int | None", version: int, flags: int,
+                args: list) -> "int | None":
+    """Envolve wl_proxy_marshal_array_flags.
+
+    args: lista de int/ptr a passar como union wl_argument (8 bytes por entrada).
+    Devolve novo proxy (int) quando iface_addr != None; None caso contrário.
+    WL_MARSHAL_FLAG_DESTROY = 1: flags=1 destrói o proxy depois de enviar.
+    """
+    fn = wl.wl_proxy_marshal_array_flags
+    fn.restype  = ctypes.c_void_p
+    fn.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p,
+                   ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+    a_ptr = None
+    if args:
+        arr   = (ctypes.c_uint64 * len(args))(*args)
+        a_ptr = ctypes.byref(arr)
+    return fn(ctypes.c_void_p(proxy),
+              ctypes.c_uint32(opcode),
+              ctypes.c_void_p(iface_addr) if iface_addr is not None else None,
+              ctypes.c_uint32(version),
+              ctypes.c_uint32(flags),
+              a_ptr)
+
+
 def _get_nif():
     """Devolve QPlatformNativeInterface ou None.
 
@@ -335,11 +392,13 @@ def _cache_wl_globals(widget) -> None:
             print("[layershell] wl_display_create_queue NULL")
             return
 
-        wl.wl_display_get_registry.restype  = ctypes.c_void_p
-        wl.wl_display_get_registry.argtypes = [ctypes.c_void_p]
-        registry = wl.wl_display_get_registry(ctypes.c_void_p(disp_ptr))
+        # wl_display.get_registry: opcode=1, sig='n' (typed new_id → wl_registry_interface)
+        # arg: NULL placeholder (wl_object*) para o new_id — libwayland cria o proxy.
+        reg_iface  = _wl_iface_addr(wl, "wl_registry_interface")
+        disp_ver   = _wl_ver(wl, disp_ptr)
+        registry   = _wl_marshal(wl, disp_ptr, 1, reg_iface, disp_ver, 0, [0])
         if not registry:
-            print("[layershell] wl_display_get_registry NULL")
+            print("[layershell] wl_display.get_registry NULL")
             wl.wl_event_queue_destroy.restype  = None
             wl.wl_event_queue_destroy.argtypes = [ctypes.c_void_p]
             wl.wl_event_queue_destroy(ctypes.c_void_p(queue))
@@ -370,19 +429,13 @@ def _cache_wl_globals(widget) -> None:
         def _on_global(data, reg, name, iface, ver):
             if iface == b"wl_compositor" and compositor_result[0] is None:
                 try:
-                    # wl_compositor_interface é símbolo público em libwayland-client
-                    class _WlIface(ctypes.Structure):
-                        _fields_ = [("_", ctypes.c_byte)]
-                    iface_obj = _WlIface.in_dll(wl, "wl_compositor_interface")
-                    wl.wl_registry_bind.restype  = ctypes.c_void_p
-                    wl.wl_registry_bind.argtypes = [
-                        ctypes.c_void_p, ctypes.c_uint32,
-                        ctypes.c_void_p, ctypes.c_uint32,
-                    ]
-                    comp = wl.wl_registry_bind(
-                        ctypes.c_void_p(reg), name,
-                        ctypes.addressof(iface_obj), min(ver, 4),
-                    )
+                    # wl_registry.bind: opcode=0, sig='usun'
+                    # args: u=name, s=comp_name_ptr(char*), u=bound_ver, n=NULL(new_id)
+                    comp_iface = _wl_iface_addr(wl, "wl_compositor_interface")
+                    comp_name  = _wl_iface_name_ptr(wl, "wl_compositor_interface")
+                    bound_ver  = min(ver, 4)
+                    comp = _wl_marshal(wl, reg, 0, comp_iface, bound_ver, 0,
+                                       [name, comp_name, bound_ver, 0])
                     if comp:
                         # Mover compositor para a fila principal (NULL = default queue)
                         wl.wl_proxy_set_queue(ctypes.c_void_p(comp), None)
@@ -565,24 +618,21 @@ def set_empty_input_region(widget) -> bool:
               f"compositor={compositor!r} — passthrough indisponível")
         return False
     try:
-        wl.wl_compositor_create_region.restype  = ctypes.c_void_p
-        wl.wl_compositor_create_region.argtypes = [ctypes.c_void_p]
-        wl.wl_surface_set_input_region.restype  = None
-        wl.wl_surface_set_input_region.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-        wl.wl_surface_commit.restype            = None
-        wl.wl_surface_commit.argtypes           = [ctypes.c_void_p]
-        wl.wl_region_destroy.restype            = None
-        wl.wl_region_destroy.argtypes           = [ctypes.c_void_p]
-
-        empty_region = wl.wl_compositor_create_region(ctypes.c_void_p(compositor))
+        # wl_compositor.create_region: opcode=1, sig='n' → wl_region_interface
+        region_iface = _wl_iface_addr(wl, "wl_region_interface")
+        empty_region = _wl_marshal(wl, compositor, 1, region_iface,
+                                   _wl_ver(wl, compositor), 0, [0])
         if not empty_region:
-            print("[layershell] set_empty_input_region: wl_compositor_create_region → NULL")
+            print("[layershell] set_empty_input_region: create_region NULL")
             return False
-        # Sem wl_region_add → região com zero rectângulos → rejeita tudo
-        wl.wl_surface_set_input_region(ctypes.c_void_p(surface),
-                                       ctypes.c_void_p(empty_region))
-        wl.wl_surface_commit(ctypes.c_void_p(surface))
-        wl.wl_region_destroy(ctypes.c_void_p(empty_region))
+
+        surf_ver = _wl_ver(wl, surface)
+        # wl_surface.set_input_region: opcode=5, sig='?o', args=[empty_region]
+        _wl_marshal(wl, surface, 5, None, surf_ver, 0, [empty_region])
+        # wl_surface.commit: opcode=6, sig=''
+        _wl_marshal(wl, surface, 6, None, surf_ver, 0, [])
+        # wl_region.destroy: opcode=0, WL_MARSHAL_FLAG_DESTROY=1 (destrói o proxy)
+        _wl_marshal(wl, empty_region, 0, None, _wl_ver(wl, empty_region), 1, [])
         _wl_flush(wl, display)
         print("[layershell] set_empty_input_region OK")
         return True
@@ -606,13 +656,11 @@ def clear_input_region(widget) -> bool:
     if not surface:
         return False
     try:
-        wl.wl_surface_set_input_region.restype  = None
-        wl.wl_surface_set_input_region.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-        wl.wl_surface_commit.restype            = None
-        wl.wl_surface_commit.argtypes           = [ctypes.c_void_p]
-        # NULL = aceita todo input
-        wl.wl_surface_set_input_region(ctypes.c_void_p(surface), None)
-        wl.wl_surface_commit(ctypes.c_void_p(surface))
+        surf_ver = _wl_ver(wl, surface)
+        # wl_surface.set_input_region(NULL): opcode=5, sig='?o', args=[0=NULL]
+        _wl_marshal(wl, surface, 5, None, surf_ver, 0, [0])
+        # wl_surface.commit: opcode=6, sig=''
+        _wl_marshal(wl, surface, 6, None, surf_ver, 0, [])
         _wl_flush(wl, display)
         print("[layershell] clear_input_region OK")
         return True
