@@ -193,10 +193,13 @@ class ToolbarWindow(QWidget):
         self._btn_eraser.setIcon(icons.eraser())
         self._btn_laser  = self._mk_btn("Ponteiro Laser (S)")
         self._btn_laser.setIcon(icons.laser())
+        self._btn_drag   = self._mk_btn("Arrastar (G)")
+        self._btn_drag.setIcon(icons.drag_tool())
 
         self._tool_buttons = [
             self._btn_pen, self._btn_hl, self._btn_line,
-            self._btn_rect, self._btn_circle, self._btn_eraser, self._btn_laser,
+            self._btn_rect, self._btn_circle, self._btn_eraser,
+            self._btn_laser, self._btn_drag,
         ]
         self._btn_pen.setChecked(True)
         for b in self._tool_buttons:
@@ -209,6 +212,7 @@ class ToolbarWindow(QWidget):
         self._btn_circle.clicked.connect(lambda: self._select_tool("circle"))
         self._btn_eraser.clicked.connect(lambda: self._select_tool("eraser"))
         self._btn_laser.clicked.connect(lambda: self._select_tool("laser"))
+        self._btn_drag.clicked.connect(lambda: self._select_tool("drag"))
 
         self._add_sep(lay)
 
@@ -404,7 +408,7 @@ class ToolbarWindow(QWidget):
             "pen": self._btn_pen, "highlighter": self._btn_hl,
             "line": self._btn_line, "rect": self._btn_rect,
             "circle": self._btn_circle, "eraser": self._btn_eraser,
-            "laser": self._btn_laser,
+            "laser": self._btn_laser, "drag": self._btn_drag,
         }
         if tool in btn_map:
             btn_map[tool].setChecked(True)
@@ -740,6 +744,7 @@ class ToolbarWindow(QWidget):
             Qt.Key.Key_E: "circle",
             Qt.Key.Key_X: "eraser",
             Qt.Key.Key_S: "laser",
+            Qt.Key.Key_G: "drag",
         }
         if key in tool_keys:
             self._select_tool(tool_keys[key])
