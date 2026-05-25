@@ -41,6 +41,13 @@ class OverlayWindow(QWidget):
         self._spotlight_pos: QPoint | None = None
         self._spotlight_radius = 150
 
+        # whiteboard infinito
+        self._wb_pan: QPointF = QPointF(0.0, 0.0)
+        self._wb_bg: QColor = QColor(255, 255, 255, 255)
+        self._wb_panning: bool = False
+        self._wb_pan_start_mouse: QPoint | None = None
+        self._wb_pan_start_val: QPointF | None = None
+
         # Canvas acumulado: strokes concluídos são commitados aqui uma vez.
         # paintEvent faz blit deste pixmap + desenha apenas o stroke actual.
         # Invalida (None) quando o widget é redimensionado ou undo/clear ocorre.
@@ -98,6 +105,9 @@ class OverlayWindow(QWidget):
         """Atualiza o cursor de acordo com a ferramenta e estado atuais."""
         if not self._active:
             self.setCursor(Qt.CursorShape.ArrowCursor)
+            return
+        if self._wb_panning:
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
             return
         if self._tool == "laser":
             self.setCursor(Qt.CursorShape.BlankCursor)
@@ -277,6 +287,14 @@ class OverlayWindow(QWidget):
 
     def set_whiteboard(self, active: bool):
         self._whiteboard = active
+        if not active:
+            self._wb_pan = QPointF(0.0, 0.0)
+            self._wb_panning = False
+        self._update_tracking()
+        self.update()
+
+    def set_whiteboard_bg(self, color: QColor):
+        self._wb_bg = QColor(color)
         self.update()
 
     def set_spotlight(self, active: bool):
@@ -333,8 +351,9 @@ class OverlayWindow(QWidget):
         if self._undo_stack:
             stroke = self._undo_stack.pop()
             self._strokes.append(stroke)
-            self._ensure_canvas()
-            self._commit_stroke(stroke)
+            if not self._whiteboard:
+                self._ensure_canvas()
+                self._commit_stroke(stroke)
             self.update()
 
     def clear(self):
@@ -348,15 +367,24 @@ class OverlayWindow(QWidget):
     # ── Mouse events ──────────────────────────────────────────────────────
 
     def mousePressEvent(self, event):
+        # Botão do meio: inicia pan no modo whiteboard
+        if event.button() == Qt.MouseButton.MiddleButton and self._whiteboard:
+            self._wb_panning = True
+            self._wb_pan_start_mouse = event.pos()
+            self._wb_pan_start_val = QPointF(self._wb_pan)
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+
         if not self._active or event.button() != Qt.MouseButton.LeftButton:
             return
         if self._tool == "laser":
             return
         self._drawing = True
-        self._current_stroke = [(event.pos(), self._brush_props())]
+        self._current_stroke = [(self._to_canvas(event.pos()), self._brush_props())]
         self._undo_stack.clear()
-        # Borracha: inicia scratch canvas como cópia do estado actual
-        if self._tool == "eraser":
+        # Borracha: scratch canvas (apenas fora do whiteboard — no wb renderiza ao vivo)
+        if self._tool == "eraser" and not self._whiteboard:
             self._ensure_canvas()
             self._erase_scratch = QPixmap(self._canvas)
             p = QPainter(self._erase_scratch)
@@ -366,6 +394,16 @@ class OverlayWindow(QWidget):
 
     def mouseMoveEvent(self, event):
         pos = event.pos()
+
+        # Pan whiteboard com botão do meio
+        if self._wb_panning and self._wb_pan_start_mouse is not None:
+            delta = pos - self._wb_pan_start_mouse
+            self._wb_pan = QPointF(
+                self._wb_pan_start_val.x() + delta.x(),
+                self._wb_pan_start_val.y() + delta.y(),
+            )
+            self.update()
+            return
 
         if self._spotlight:
             self._spotlight_pos = pos
@@ -381,9 +419,9 @@ class OverlayWindow(QWidget):
 
         if not self._drawing:
             return
-        self._current_stroke.append((pos, self._brush_props()))
+        self._current_stroke.append((self._to_canvas(pos), self._brush_props()))
 
-        # Borracha: aplica apenas o novo segmento no scratch — O(1) por frame
+        # Borracha: aplica apenas o novo segmento no scratch — O(1) por frame (só fora do wb)
         if self._tool == "eraser" and self._erase_scratch is not None:
             pts = self._current_stroke
             if len(pts) >= 2:
@@ -395,13 +433,24 @@ class OverlayWindow(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, event):
+        # Fim do pan com botão do meio
+        if event.button() == Qt.MouseButton.MiddleButton and self._wb_panning:
+            self._wb_panning = False
+            self._wb_pan_start_mouse = None
+            self._wb_pan_start_val = None
+            self._refresh_cursor()
+            event.accept()
+            return
+
         if self._tool == "laser" or not self._drawing:
             return
         self._drawing = False
         if self._current_stroke:
             stroke = list(self._current_stroke)
             self._strokes.append(stroke)
-            if self._erase_scratch is not None:
+            if self._whiteboard:
+                pass  # whiteboard renderiza direto de _strokes, sem cache
+            elif self._erase_scratch is not None:
                 # Borracha: scratch já tem o resultado final — promove a canvas
                 self._canvas = self._erase_scratch
                 self._erase_scratch = None
@@ -411,6 +460,15 @@ class OverlayWindow(QWidget):
         self._current_stroke = []
         self.update()
 
+    def wheelEvent(self, event):
+        if self._whiteboard:
+            delta = event.angleDelta()
+            self._wb_pan += QPointF(delta.x() / 8.0, delta.y() / 8.0)
+            self.update()
+            event.accept()
+            return
+        event.ignore()
+
     # ── Painting ──────────────────────────────────────────────────────────
 
     def resizeEvent(self, event):
@@ -419,22 +477,31 @@ class OverlayWindow(QWidget):
         self._canvas = None   # tamanho mudou — recria no próximo paint
 
     def paintEvent(self, _event):
-        self._ensure_canvas()
-
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         if self._whiteboard:
-            painter.fillRect(self.rect(), QColor(255, 255, 255, 255))
-
-        # Borracha activa: blit do scratch (já tem o apagado acumulado) — O(1)
-        # Outros casos: blit do canvas + stroke em progresso
-        if self._erase_scratch is not None:
-            painter.drawPixmap(0, 0, self._erase_scratch)
-        else:
-            painter.drawPixmap(0, 0, self._canvas)
+            # Renderiza em pixmap intermediário para compositing correto da borracha
+            wb_px = QPixmap(self.size())
+            wb_px.fill(self._wb_bg)
+            wb_p = QPainter(wb_px)
+            wb_p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            wb_p.translate(self._wb_pan)
+            for stroke in self._strokes:
+                self._draw_stroke(wb_p, stroke)
             if self._current_stroke:
-                self._draw_stroke(painter, self._current_stroke)
+                self._draw_stroke(wb_p, self._current_stroke)
+            wb_p.end()
+            painter.drawPixmap(0, 0, wb_px)
+        else:
+            self._ensure_canvas()
+            # Borracha activa: blit do scratch (já tem o apagado acumulado) — O(1)
+            if self._erase_scratch is not None:
+                painter.drawPixmap(0, 0, self._erase_scratch)
+            else:
+                painter.drawPixmap(0, 0, self._canvas)
+                if self._current_stroke:
+                    self._draw_stroke(painter, self._current_stroke)
 
         if self._tool == "laser" and self._laser_pos:
             self._draw_laser(painter)
@@ -452,9 +519,17 @@ class OverlayWindow(QWidget):
         tool, color, size = props["tool"], props["color"], props["size"]
 
         if tool == "eraser":
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-            pen = QPen(Qt.GlobalColor.transparent, size * 4, Qt.PenStyle.SolidLine,
-                       Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            if self._whiteboard:
+                # No whiteboard, "apagar" = pintar com cor de fundo
+                painter.setCompositionMode(
+                    QPainter.CompositionMode.CompositionMode_SourceOver)
+                pen = QPen(self._wb_bg, size * 4, Qt.PenStyle.SolidLine,
+                           Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            else:
+                painter.setCompositionMode(
+                    QPainter.CompositionMode.CompositionMode_Clear)
+                pen = QPen(Qt.GlobalColor.transparent, size * 4, Qt.PenStyle.SolidLine,
+                           Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
         elif tool == "highlighter":
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
             hi = QColor(color)
@@ -531,8 +606,17 @@ class OverlayWindow(QWidget):
         painter.setBrush(QBrush(QColor(255, 255, 255, 255)))
         painter.drawEllipse(QPointF(pos), 4.0, 4.0)
 
+    def _to_canvas(self, pos: QPoint) -> QPoint:
+        """Converte posição de ecrã para coordenadas de canvas (desconta pan do whiteboard)."""
+        if self._whiteboard:
+            return QPoint(pos.x() - int(self._wb_pan.x()),
+                          pos.y() - int(self._wb_pan.y()))
+        return pos
+
     def _brush_props(self) -> dict:
         return {"tool": self._tool, "color": QColor(self._color), "size": self._size}
 
     def _update_tracking(self):
-        self.setMouseTracking((self._tool == "laser") or self._spotlight)
+        self.setMouseTracking(
+            (self._tool == "laser") or self._spotlight or self._whiteboard
+        )
