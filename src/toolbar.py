@@ -297,6 +297,13 @@ class ToolbarWindow(QWidget):
         self._btn_toggle.clicked.connect(self._toggle_drawing)
         lay.addWidget(self._btn_toggle, alignment=Qt.AlignmentFlag.AlignHCenter)
 
+        self._add_sep(lay)
+
+        b_exit = self._mk_btn("Sair", checkable=False)
+        b_exit.setIcon(icons.exit_btn())
+        b_exit.clicked.connect(self._quit_app)
+        lay.addWidget(b_exit, alignment=Qt.AlignmentFlag.AlignHCenter)
+
         return w
 
     # ── Collapse / expand ─────────────────────────────────────────────────────
@@ -459,6 +466,10 @@ class ToolbarWindow(QWidget):
             QTimer.singleShot(100, self._reaffirm_top)
 
     # ── Presentation mode ─────────────────────────────────────────────────────
+
+    def _quit_app(self):
+        from PyQt6.QtWidgets import QApplication
+        QApplication.instance().quit()
 
     def _toggle_presentation(self, checked: bool):
         self._presentation_mode = checked
