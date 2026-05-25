@@ -31,6 +31,10 @@ class OverlayWindow(QWidget):
         self._drawing = False
         self._active = True
 
+        # drag tool state
+        self._drag_stroke_idx: int | None = None
+        self._drag_last_pos: QPoint | None = None
+
         # laser
         self._laser_pos: QPoint | None = None
         self._laser_trail: list[QPoint] = []
@@ -105,6 +109,8 @@ class OverlayWindow(QWidget):
             self.setCursor(make_eraser_cursor(self._size))
         elif self._tool in ("line", "rect", "circle"):
             self.setCursor(make_crosshair_cursor())
+        elif self._tool == "drag":
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
         else:  # pen, highlighter
             self.setCursor(make_pen_cursor(self._color))
 
@@ -345,12 +351,58 @@ class OverlayWindow(QWidget):
             self._canvas.fill(Qt.GlobalColor.transparent)
         self.update()
 
+    # ── Drag tool helpers ─────────────────────────────────────────────────────
+
+    _DRAG_THRESHOLD = 20  # pixels
+
+    def _find_stroke_at(self, pos: QPoint) -> "int | None":
+        best_idx, best_dist = None, float("inf")
+        for i, stroke in enumerate(self._strokes):
+            for pt, _ in stroke:
+                d = abs(pt.x() - pos.x()) + abs(pt.y() - pos.y())
+                if d < best_dist:
+                    best_dist, best_idx = d, i
+        return best_idx if best_idx is not None and best_dist <= self._DRAG_THRESHOLD else None
+
+    def _translate_stroke(self, idx: int, delta: QPoint):
+        self._strokes[idx] = [
+            (QPoint(pt.x() + delta.x(), pt.y() + delta.y()), props)
+            for pt, props in self._strokes[idx]
+        ]
+
+    def _scale_stroke(self, idx: int, factor: float):
+        stroke = self._strokes[idx]
+        if not stroke:
+            return
+        if stroke[0][1].get("tool") == "text":
+            pt, props = stroke[0]
+            self._strokes[idx] = [(pt, {**props, "size": max(6, int(props["size"] * factor))})]
+        else:
+            pts = [pt for pt, _ in stroke]
+            cx = sum(p.x() for p in pts) / len(pts)
+            cy = sum(p.y() for p in pts) / len(pts)
+            self._strokes[idx] = [
+                (QPoint(int(cx + (pt.x() - cx) * factor),
+                        int(cy + (pt.y() - cy) * factor)), props)
+                for pt, props in stroke
+            ]
+        self._canvas = None
+        self.update()
+
     # ── Mouse events ──────────────────────────────────────────────────────
 
     def mousePressEvent(self, event):
         if not self._active or event.button() != Qt.MouseButton.LeftButton:
             return
         if self._tool == "laser":
+            return
+        if self._tool == "drag":
+            idx = self._find_stroke_at(event.pos())
+            if idx is not None:
+                self._drag_stroke_idx = idx
+                self._drag_last_pos = event.pos()
+                self._drawing = True
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
             return
         self._drawing = True
         self._current_stroke = [(event.pos(), self._brush_props())]
@@ -370,6 +422,15 @@ class OverlayWindow(QWidget):
         if self._spotlight:
             self._spotlight_pos = pos
             self.update()
+
+        if self._tool == "drag" and self._drawing and self._drag_stroke_idx is not None:
+            delta = QPoint(pos.x() - self._drag_last_pos.x(),
+                           pos.y() - self._drag_last_pos.y())
+            self._translate_stroke(self._drag_stroke_idx, delta)
+            self._drag_last_pos = pos
+            self._canvas = None
+            self.update()
+            return
 
         if self._tool == "laser":
             self._laser_trail.append(pos)
@@ -395,6 +456,13 @@ class OverlayWindow(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, event):
+        if self._tool == "drag":
+            if self._drawing:
+                self._drawing = False
+                self._drag_stroke_idx = None
+                self._drag_last_pos = None
+                self.setCursor(Qt.CursorShape.OpenHandCursor)
+            return
         if self._tool == "laser" or not self._drawing:
             return
         self._drawing = False
@@ -410,6 +478,16 @@ class OverlayWindow(QWidget):
                 self._commit_stroke(stroke)
         self._current_stroke = []
         self.update()
+
+    def wheelEvent(self, event):
+        if self._active and self._tool == "drag":
+            idx = self._find_stroke_at(event.position().toPoint())
+            if idx is not None:
+                factor = 1.1 if event.angleDelta().y() > 0 else 0.9
+                self._scale_stroke(idx, factor)
+            event.accept()
+        else:
+            event.ignore()
 
     # ── Painting ──────────────────────────────────────────────────────────
 
