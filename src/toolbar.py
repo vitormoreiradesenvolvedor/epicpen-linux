@@ -321,6 +321,16 @@ class ToolbarWindow(QWidget):
         self._container.setStyleSheet(_STYLE)  # restaura fundo escuro
         self.setFixedWidth(_W)
         self.adjustSize()
+        # Re-clamp: a altura expandida pode ultrapassar o fundo da área disponível.
+        clamped = self._clamp_pos(self._lsw_pos)
+        if clamped != self._lsw_pos:
+            self._lsw_pos = clamped
+            if self._lsw_ptr:
+                scr = self._current_screen
+                origin = scr.geometry().topLeft() if scr else QPoint(0, 0)
+                layershell.move_to(self._lsw_ptr, (clamped - origin).x(), (clamped - origin).y())
+            else:
+                self.move(clamped)
         # Expansão retoma o desenho automaticamente
         self._btn_toggle.setChecked(False)
         self._toggle_drawing(False)
@@ -342,14 +352,13 @@ class ToolbarWindow(QWidget):
     # ── Config ────────────────────────────────────────────────────────────────
 
     def _apply_config(self):
-        self._select_tool(self._cfg.get("tool", "pen"))
+        self._select_tool("pen")
         self._overlay.set_color(self._current_color)
         self._overlay.set_size(self._size_slider.value())
         self._magnifier.set_zoom(self._zoom_slider.value())
 
     def get_state(self) -> dict:
         return {
-            "tool": self._overlay._tool,
             "color": self._current_color.name(),
             "size": self._size_slider.value(),
             "toolbar_pos": {"x": self._lsw_pos.x(), "y": self._lsw_pos.y()},
