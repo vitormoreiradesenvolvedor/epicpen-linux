@@ -263,54 +263,185 @@ def _get_nif():
     return None
 
 
-def _cache_wl_globals(widget) -> None:
-    """Cacheia wl_compositor* e wl_display* enquanto a integração Wayland está activa.
+def _load_qt_wayland_client():
+    """Carrega libQt6WaylandClient.so.6 (ou variante) via ctypes."""
+    for name in ("libQt6WaylandClient.so.6", "libQt6WaylandClient.so"):
+        try:
+            return ctypes.CDLL(name)
+        except OSError:
+            pass
+    return None
 
-    Chamado em apply() que é executado antes de qualquer show(), quando o NIF
-    ainda está totalmente operacional.
+
+def _cache_wl_globals(widget) -> None:
+    """Cacheia wl_compositor* e wl_display*.
+
+    Caminho 1: QPlatformNativeInterface via instância QGuiApplication (PyQt6 que o expõe).
+    Caminho 2: libQt6WaylandClient.so.6 via ctypes — bypassa PyQt6 completamente:
+        QtWaylandClient::QWaylandIntegration::instance()
+          → QWaylandIntegration::display()
+          → QWaylandDisplay::compositor()   → wl_compositor* (é um wl_proxy cast)
+          → QWaylandDisplay::wl_display()   → wl_display*
     """
     global _wl_compositor, _wl_display_ptr
     if _wl_compositor is not None:
-        return  # já cacheado
+        return
+
+    # ── Caminho 1: NIF ────────────────────────────────────────────────────────
     try:
-        wh = widget.windowHandle()
         nif = _get_nif()
-        if nif is None:
-            print("[layershell] _cache_wl_globals: NIF indisponível — passthrough ctypes desactivado")
+        if nif is not None:
+            wh = widget.windowHandle()
+            comp = (nif.nativeResourceForIntegration(b"compositor") or
+                    nif.nativeResourceForIntegration(b"wl_compositor"))
+            disp = (nif.nativeResourceForIntegration(b"wl_display") or
+                    nif.nativeResourceForIntegration(b"display"))
+            if comp:
+                _wl_compositor  = comp
+                _wl_display_ptr = disp
+                print(f"[layershell] wl globals via NIF: compositor={hex(comp)} "
+                      f"display={hex(disp) if disp else None!r}")
+                return
+    except Exception as e:
+        print(f"[layershell] _cache_wl_globals NIF erro: {e}")
+
+    # ── Caminho 2: libQt6WaylandClient.so.6 ──────────────────────────────────
+    # Símbolos exportados com namespace QtWaylandClient (C++ mangling Linux/GCC):
+    #   QtWaylandClient::QWaylandIntegration::instance()
+    #   QtWaylandClient::QWaylandIntegration::display() const
+    #   QtWaylandClient::QWaylandDisplay::compositor()  const  → struct wl_compositor*
+    #   QtWaylandClient::QWaylandDisplay::wl_display()  const  → struct wl_display*
+    try:
+        wl_qt = _load_qt_wayland_client()
+        if wl_qt is None:
+            print("[layershell] libQt6WaylandClient.so não encontrada")
             return
-        if wh is not None:
-            # wl_surface* como verificação de sanidade
-            sf = nif.nativeResourceForWindow(b"surface", wh)
-            if not sf:
-                print("[layershell] _cache_wl_globals: surface NULL (janela ainda não criada?)")
-        comp = (nif.nativeResourceForIntegration(b"compositor") or
-                nif.nativeResourceForIntegration(b"wl_compositor"))
-        disp = (nif.nativeResourceForIntegration(b"wl_display") or
-                nif.nativeResourceForIntegration(b"display"))
+
+        # static QWaylandIntegration* QWaylandIntegration::instance()
+        sym_inst = "_ZN17QtWaylandClient19QWaylandIntegration8instanceEv"
+        fn = wl_qt[sym_inst]
+        fn.restype  = ctypes.c_void_p
+        fn.argtypes = []
+        integration = fn()
+        if not integration:
+            print("[layershell] QWaylandIntegration::instance() NULL")
+            return
+        print(f"[layershell] QWaylandIntegration* = {hex(integration)}")
+
+        # QWaylandDisplay* QWaylandIntegration::display() const
+        sym_disp = "_ZNK17QtWaylandClient19QWaylandIntegration7displayEv"
+        fn = wl_qt[sym_disp]
+        fn.restype  = ctypes.c_void_p
+        fn.argtypes = [ctypes.c_void_p]
+        display_obj = fn(ctypes.c_void_p(integration))
+        if not display_obj:
+            print("[layershell] QWaylandIntegration::display() NULL")
+            return
+        print(f"[layershell] QWaylandDisplay* = {hex(display_obj)}")
+
+        # struct wl_compositor* QWaylandDisplay::compositor() const
+        sym_comp = "_ZNK17QtWaylandClient15QWaylandDisplay10compositorEv"
+        fn = wl_qt[sym_comp]
+        fn.restype  = ctypes.c_void_p
+        fn.argtypes = [ctypes.c_void_p]
+        comp = fn(ctypes.c_void_p(display_obj))
+
+        # struct wl_display* QWaylandDisplay::wl_display() const
+        sym_wld = "_ZNK17QtWaylandClient15QWaylandDisplay10wl_displayEv"
+        fn = wl_qt[sym_wld]
+        fn.restype  = ctypes.c_void_p
+        fn.argtypes = [ctypes.c_void_p]
+        disp = fn(ctypes.c_void_p(display_obj))
+
         if comp:
             _wl_compositor  = comp
             _wl_display_ptr = disp
-            print(f"[layershell] wl globals cacheados: compositor={hex(comp)}"
-                  f" display={hex(disp) if disp else None!r}")
+            print(f"[layershell] wl globals via libQt6WaylandClient: "
+                  f"compositor={hex(comp)} display={hex(disp) if disp else None!r}")
         else:
-            print("[layershell] _cache_wl_globals: compositor NULL")
+            print("[layershell] QWaylandDisplay::compositor() NULL")
+    except AttributeError as e:
+        # símbolo não encontrado na biblioteca
+        print(f"[layershell] _cache_wl_globals símbolo ausente: {e}")
     except Exception as e:
-        print(f"[layershell] _cache_wl_globals erro: {e}")
+        print(f"[layershell] _cache_wl_globals libQtWayland erro: {e}")
 
 
 def _get_wl_surface(widget) -> "int | None":
-    """Devolve wl_surface* do widget ou None."""
+    """Devolve wl_surface* do widget.
+
+    Caminho 1: NIF nativeResourceForWindow(b"surface", wh).
+    Caminho 2: libQt6WaylandClient.so.6 via ctypes:
+        QWindow::handle() (libQt6Gui) → QPlatformWindow* (= QWaylandWindow* + offset)
+        QWaylandWindow::surface() const → wl_surface*
+        O offset de QPlatformWindow dentro de QWaylandWindow é sizeof(vtable ptr) = 8
+        porque QNativeInterface::Private::QWaylandWindow (1.ª base, sem dados) precede QPlatformWindow.
+    """
     try:
         wh = widget.windowHandle()
         if wh is None:
             return None
+
+        # Caminho 1: NIF
         nif = _get_nif()
         if nif is not None:
             sf = nif.nativeResourceForWindow(b"surface", wh)
             if sf:
                 return sf
-        # Fallback: wl_proxy_get_display não ajuda a obter surface sem NIF.
-        print("[layershell] _get_wl_surface: NIF indisponível")
+
+        # Caminho 2: via libQt6Gui + libQt6WaylandClient
+        import PyQt6.sip as sip
+        qwin_ptr = sip.unwrapinstance(wh)
+        if not qwin_ptr:
+            return None
+
+        qtgui = None
+        for name in ("libQt6Gui.so.6", "libQt6Gui.so"):
+            try:
+                qtgui = ctypes.CDLL(name)
+                break
+            except OSError:
+                pass
+        if qtgui is None:
+            print("[layershell] _get_wl_surface: libQt6Gui não encontrada")
+            return None
+
+        # QPlatformWindow* QWindow::handle() const
+        fn = qtgui["_ZNK7QWindow6handleEv"]
+        fn.restype  = ctypes.c_void_p
+        fn.argtypes = [ctypes.c_void_p]
+        platform_win = fn(ctypes.c_void_p(qwin_ptr))
+        if not platform_win:
+            print("[layershell] _get_wl_surface: QWindow::handle() NULL")
+            return None
+
+        wl_qt = _load_qt_wayland_client()
+        if wl_qt is None:
+            return None
+
+        # struct wl_surface* QWaylandWindow::surface() const
+        # QWaylandWindow herda: 1) QNativeInterface::Private::QWaylandWindow (8 bytes, vtable)
+        #                       2) QPlatformWindow (offset 8)
+        # handle() devolve QPlatformWindow* → subtrai 8 para obter QWaylandWindow*.
+        fn = wl_qt["_ZNK17QtWaylandClient13QWaylandWindow7surfaceEv"]
+        fn.restype  = ctypes.c_void_p
+        fn.argtypes = [ctypes.c_void_p]
+
+        for offset in (8, 0, 16):
+            qwayland_win = platform_win - offset
+            try:
+                sf = fn(ctypes.c_void_p(qwayland_win))
+                if sf:
+                    print(f"[layershell] wl_surface via QWaylandWindow::surface() offset={offset}: "
+                          f"{hex(sf)}")
+                    return sf
+            except Exception:
+                pass
+
+        print("[layershell] _get_wl_surface: QWaylandWindow::surface() retornou NULL em todos os offsets")
+        return None
+    except AttributeError as e:
+        print(f"[layershell] _get_wl_surface símbolo ausente: {e}")
         return None
     except Exception as e:
         print(f"[layershell] _get_wl_surface erro: {e}")
