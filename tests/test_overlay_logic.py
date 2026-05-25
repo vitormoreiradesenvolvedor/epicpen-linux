@@ -26,6 +26,22 @@ class _QColor:
     def name(self): return self._name
 
 
+class _QPixmap:
+    def __init__(self, *a): pass
+    def fill(self, *a): pass
+    def size(self): return MagicMock()
+    def isNull(self): return False
+
+
+class _QPainter:
+    """Stub de QPainter — aceita qualquer chamada de método sem efeitos."""
+    RenderHint      = MagicMock()
+    CompositionMode = MagicMock()
+    def __init__(self, *a): pass
+    def __getattr__(self, _): return lambda *a, **kw: None
+    def end(self): pass
+
+
 class _QWidget:
     """Stub mínimo de QWidget que não interfere com __new__ nem __setattr__."""
     def __init__(self, *a, **kw): pass
@@ -41,6 +57,7 @@ class _QWidget:
     def isVisible(self): return True
     def windowHandle(self): return MagicMock()
     def rect(self): return MagicMock()
+    def size(self): return MagicMock()
 
 
 class _QTimer:
@@ -68,7 +85,7 @@ def _make_qt_stubs():
     qtcore    = _mod("PyQt6.QtCore")
     qtgui     = _mod("PyQt6.QtGui")
 
-    # QtWidgets — QWidget precisa ser uma classe real para herança funcionar
+    # QWidget precisa ser uma classe real para herança funcionar
     qtwidgets.QWidget      = _QWidget
     qtwidgets.QApplication = MagicMock
 
@@ -81,13 +98,14 @@ def _make_qt_stubs():
     qtcore.QTimer  = _QTimer
 
     # QtGui
-    qtgui.QPainter        = MagicMock
+    qtgui.QPainter        = _QPainter
     qtgui.QPen            = MagicMock
     qtgui.QColor          = _QColor
     qtgui.QScreen         = MagicMock
     qtgui.QPainterPath    = MagicMock
     qtgui.QRadialGradient = MagicMock
     qtgui.QBrush          = MagicMock
+    qtgui.QPixmap         = _QPixmap
 
 
 _make_qt_stubs()
@@ -123,8 +141,10 @@ def overlay():
     ov._spotlight      = False
     ov._spotlight_pos  = None
     ov._spotlight_radius = 150
-    ov.update          = MagicMock()
-    ov._update_tracking = MagicMock()
+    ov._canvas           = None
+    ov._erase_scratch    = None
+    ov.update            = MagicMock()
+    ov._update_tracking  = MagicMock()
     return ov
 
 
