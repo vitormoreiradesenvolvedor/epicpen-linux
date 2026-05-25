@@ -61,6 +61,9 @@ class OverlayWindow(QWidget):
         # Chamado após remapar a superfície (layer-shell); usado em main.py
         # para forçar o toolbar de volta ao topo da z-order.
         self._on_remapped = None
+        # True quando em modo pass-through: desenhos visíveis, input vai para apps abaixo.
+        # Diferente de set_active(False) que oculta o overlay completamente.
+        self._passthrough = False
 
         self._setup_window()
         self._refresh_cursor()
@@ -196,37 +199,82 @@ class OverlayWindow(QWidget):
         self.setMask(full)
 
     def set_active(self, active: bool):
+        """Ativa ou desativa o overlay. False oculta completamente (sem desenhos)."""
+        # Ao esconder, cancela qualquer passthrough activo
+        if not active and self._passthrough:
+            self._passthrough = False
+            wh = self.windowHandle()
+            if wh:
+                from PyQt6.QtGui import QRegion
+                wh.setMask(QRegion())
+            self.clearMask()
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+
         self._active = active
         if self._toolbar_widget is not None:
-            # Modo embed: usa máscara para pass-through
             self._apply_input_mask()
             self._refresh_cursor()
             self.update()
         elif self._layer_shell_active:
-            # Layer-shell: mantém superfície mapeada em ambos os modos.
-            # Pass-through via input region vazia (offscreen mask) —
-            # desenhos ficam visíveis mas o compositor entrega eventos às janelas abaixo.
+            # Layer-shell: activo → mostra superfície; inactivo → oculta (desmapeia)
             if active:
+                was_hidden = not self.isVisible()
+                if was_hidden:
+                    super().show()
                 self.clearMask()
+                self._refresh_cursor()
+                self.update()
+                if was_hidden and self._on_remapped:
+                    self._on_remapped()
             else:
-                self.setMask(self._offscreen_region())
-            self._refresh_cursor()
-            self.update()
+                super().hide()
         else:
-            # X11 / sem layer-shell: mantém janela visível; WA_TransparentForMouseEvents
-            # faz o X11 ignorar esta janela na entrega de eventos de rato.
-            if not self.isVisible():
+            # X11 / fallback
+            if active:
                 super().show()
                 self.raise_()
-            if active:
                 self.clearMask()
                 self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
                 self._apply_input_mask()
+                self._refresh_cursor()
             else:
-                self.setMask(self._offscreen_region())
-                self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-            self._refresh_cursor()
-            self.update()
+                super().hide()
+
+    def set_passthrough(self, active: bool):
+        """Modo seta: desenhos visíveis mas input passa para apps abaixo.
+
+        Diferente de set_active(False) que oculta o overlay completamente.
+        """
+        self._passthrough = active
+        self._refresh_cursor()
+        self.update()
+        if active:
+            from PyQt6.QtGui import QRegion
+            # Garante que a superfície está visível
+            if not self.isVisible():
+                if self._layer_shell_active:
+                    super().show()
+                else:
+                    super().show()
+                    self.raise_()
+            offscreen = self._offscreen_region()
+            # Aplica máscara directamente no QWindow (wl_surface.set_input_region)
+            # e no QWidget como fallback para X11/embed.
+            wh = self.windowHandle()
+            if wh:
+                wh.setMask(offscreen)
+            self.setMask(offscreen)
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        else:
+            # Restaura input normal
+            wh = self.windowHandle()
+            if wh:
+                from PyQt6.QtGui import QRegion
+                wh.setMask(QRegion())  # null → compositor entrega eventos normalmente
+            self.clearMask()
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+            if not self._layer_shell_active:
+                self._apply_input_mask()
 
     def show(self):
         if self._layer_shell_active:
