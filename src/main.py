@@ -2,6 +2,11 @@
 import os as _os
 import sys
 
+import instance_guard
+if not instance_guard.acquire():
+    print("[epicpen] Já existe uma instância em execução.", file=sys.stderr)
+    sys.exit(0)
+
 # GNOME Wayland não suporta wlr-layer-shell nem honra WindowStaysOnTopHint
 # para xdg_toplevel nativo. QT_QPA_PLATFORM=xcb força XWayland; o Mutter
 # honra _NET_WM_STATE_ABOVE (mapeado de WindowStaysOnTopHint) para clientes XWayland.
