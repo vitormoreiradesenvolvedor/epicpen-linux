@@ -321,6 +321,16 @@ class ToolbarWindow(QWidget):
         self._container.setStyleSheet(_STYLE)  # restaura fundo escuro
         self.setFixedWidth(_W)
         self.adjustSize()
+        # Re-clamp: a altura expandida pode ultrapassar o fundo da área disponível.
+        clamped = self._clamp_pos(self._lsw_pos)
+        if clamped != self._lsw_pos:
+            self._lsw_pos = clamped
+            if self._lsw_ptr:
+                scr = self._current_screen
+                origin = scr.geometry().topLeft() if scr else QPoint(0, 0)
+                layershell.move_to(self._lsw_ptr, (clamped - origin).x(), (clamped - origin).y())
+            else:
+                self.move(clamped)
         # Expansão retoma o desenho automaticamente
         self._btn_toggle.setChecked(False)
         self._toggle_drawing(False)
@@ -342,14 +352,13 @@ class ToolbarWindow(QWidget):
     # ── Config ────────────────────────────────────────────────────────────────
 
     def _apply_config(self):
-        self._select_tool(self._cfg.get("tool", "pen"))
+        self._select_tool("pen")
         self._overlay.set_color(self._current_color)
         self._overlay.set_size(self._size_slider.value())
         self._magnifier.set_zoom(self._zoom_slider.value())
 
     def get_state(self) -> dict:
         return {
-            "tool": self._overlay._tool,
             "color": self._current_color.name(),
             "size": self._size_slider.value(),
             "toolbar_pos": {"x": self._lsw_pos.x(), "y": self._lsw_pos.y()},
@@ -548,12 +557,12 @@ class ToolbarWindow(QWidget):
         return None
 
     def _clamp_pos(self, pos: QPoint) -> QPoint:
-        """Clipa pos para que a toolbar não saia dos limites de nenhum monitor."""
+        """Clipa pos para que a toolbar não saia da área disponível de nenhum monitor."""
         from PyQt6.QtWidgets import QApplication
         tw = self.width() or _W
         th = self.height() or _BTN * 3
         for scr in QApplication.screens():
-            g = scr.geometry()
+            g = scr.availableGeometry()
             if g.contains(pos):
                 return QPoint(
                     max(g.left(), min(pos.x(), g.left() + g.width()  - tw)),
@@ -562,7 +571,7 @@ class ToolbarWindow(QWidget):
         # Fora de todos os monitores — clamp ao ecrã mais próximo
         best, best_d = pos, float('inf')
         for scr in QApplication.screens():
-            g = scr.geometry()
+            g = scr.availableGeometry()
             cx = max(g.left(), min(pos.x(), g.left() + g.width()  - tw))
             cy = max(g.top(),  min(pos.y(), g.top()  + g.height() - th))
             cp = QPoint(cx, cy)
@@ -572,10 +581,10 @@ class ToolbarWindow(QWidget):
         return best
 
     def _clamp_to_screen(self, pos: QPoint, screen) -> QPoint:
-        """Clipa pos dentro dos limites de um monitor específico."""
+        """Clipa pos dentro da área disponível de um monitor específico."""
         if screen is None:
             return self._clamp_pos(pos)
-        g = screen.geometry()
+        g = screen.availableGeometry()
         tw = self.width() or _W
         th = self.height() or _BTN * 3
         return QPoint(
@@ -688,8 +697,10 @@ class ToolbarWindow(QWidget):
                         self._current_screen = new_screen
                         self._change_toolbar_screen(new_screen)
                 elif self.parent() is None:
-                    # Sem layer-shell: sincroniza _lsw_pos com posição real após drag
-                    self._lsw_pos = self.pos()
+                    clamped = self._clamp_pos(self.pos())
+                    if clamped != self.pos():
+                        self.move(clamped)
+                    self._lsw_pos = clamped
                 return True  # consome release → botão não dispara click após drag
 
         return False  # passa todos os demais eventos adiante
