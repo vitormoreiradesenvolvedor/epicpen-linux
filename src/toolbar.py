@@ -548,12 +548,12 @@ class ToolbarWindow(QWidget):
         return None
 
     def _clamp_pos(self, pos: QPoint) -> QPoint:
-        """Clipa pos para que a toolbar não saia dos limites de nenhum monitor."""
+        """Clipa pos para que a toolbar não saia da área disponível de nenhum monitor."""
         from PyQt6.QtWidgets import QApplication
         tw = self.width() or _W
         th = self.height() or _BTN * 3
         for scr in QApplication.screens():
-            g = scr.geometry()
+            g = scr.availableGeometry()
             if g.contains(pos):
                 return QPoint(
                     max(g.left(), min(pos.x(), g.left() + g.width()  - tw)),
@@ -562,7 +562,7 @@ class ToolbarWindow(QWidget):
         # Fora de todos os monitores — clamp ao ecrã mais próximo
         best, best_d = pos, float('inf')
         for scr in QApplication.screens():
-            g = scr.geometry()
+            g = scr.availableGeometry()
             cx = max(g.left(), min(pos.x(), g.left() + g.width()  - tw))
             cy = max(g.top(),  min(pos.y(), g.top()  + g.height() - th))
             cp = QPoint(cx, cy)
@@ -572,10 +572,10 @@ class ToolbarWindow(QWidget):
         return best
 
     def _clamp_to_screen(self, pos: QPoint, screen) -> QPoint:
-        """Clipa pos dentro dos limites de um monitor específico."""
+        """Clipa pos dentro da área disponível de um monitor específico."""
         if screen is None:
             return self._clamp_pos(pos)
-        g = screen.geometry()
+        g = screen.availableGeometry()
         tw = self.width() or _W
         th = self.height() or _BTN * 3
         return QPoint(
@@ -688,8 +688,10 @@ class ToolbarWindow(QWidget):
                         self._current_screen = new_screen
                         self._change_toolbar_screen(new_screen)
                 elif self.parent() is None:
-                    # Sem layer-shell: sincroniza _lsw_pos com posição real após drag
-                    self._lsw_pos = self.pos()
+                    clamped = self._clamp_pos(self.pos())
+                    if clamped != self.pos():
+                        self.move(clamped)
+                    self._lsw_pos = clamped
                 return True  # consome release → botão não dispara click após drag
 
         return False  # passa todos os demais eventos adiante
