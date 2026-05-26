@@ -38,6 +38,7 @@ _STYLE = """
     QSlider::groove:vertical {
         background: rgba(255,255,255,40);
         width: 4px; border-radius: 2px;
+        margin: 6px 0px;
     }
     QSlider::handle:vertical {
         background: white;
