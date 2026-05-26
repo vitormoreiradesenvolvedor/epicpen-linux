@@ -522,8 +522,7 @@ class OverlayWindow(QWidget):
 
     def mousePressEvent(self, event):
         # Botão do meio OU Shift+esquerdo: inicia pan no modo whiteboard
-        _shift = bool(QApplication.queryKeyboardModifiers()
-                      & Qt.KeyboardModifier.ShiftModifier)
+        _shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
         _is_pan_trigger = (
             event.button() == Qt.MouseButton.MiddleButton
             or (event.button() == Qt.MouseButton.LeftButton and _shift)
@@ -578,8 +577,7 @@ class OverlayWindow(QWidget):
 
         # Cursor mão aberta no whiteboard quando Shift segurado (indica que pode arrastar)
         if self._whiteboard and not self._wb_panning and not self._drawing:
-            _shift = bool(QApplication.queryKeyboardModifiers()
-                          & Qt.KeyboardModifier.ShiftModifier)
+            _shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
             if _shift:
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
             else:
@@ -666,8 +664,7 @@ class OverlayWindow(QWidget):
 
     def wheelEvent(self, event):
         if self._whiteboard and not (self._tool == "drag"):
-            _shift = bool(QApplication.queryKeyboardModifiers()
-                          & Qt.KeyboardModifier.ShiftModifier)
+            _shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
             if _shift:
                 # Zoom centrado no cursor
                 delta_y = event.angleDelta().y()
