@@ -38,6 +38,7 @@ class OverlayWindow(QWidget):
         # drag tool state
         self._drag_stroke_idx: int | None = None
         self._drag_last_pos: QPoint | None = None
+        self._drag_hover_idx: int | None = None
 
         # laser
         self._laser_pos: QPoint | None = None
@@ -129,6 +130,8 @@ class OverlayWindow(QWidget):
         self._tool = tool
         self._laser_pos = None
         self._laser_trail.clear()
+        self._drag_hover_idx = None
+        self._drag_stroke_idx = None
         self._update_tracking()
         self._refresh_cursor()
         self.update()
@@ -496,13 +499,19 @@ class OverlayWindow(QWidget):
             self._spotlight_pos = pos
             self.update()
 
-        if self._tool == "drag" and self._drawing and self._drag_stroke_idx is not None:
-            delta = QPoint(pos.x() - self._drag_last_pos.x(),
-                           pos.y() - self._drag_last_pos.y())
-            self._translate_stroke(self._drag_stroke_idx, delta)
-            self._drag_last_pos = pos
-            self._canvas = None
-            self.update()
+        if self._tool == "drag":
+            if self._drawing and self._drag_stroke_idx is not None:
+                delta = QPoint(pos.x() - self._drag_last_pos.x(),
+                               pos.y() - self._drag_last_pos.y())
+                self._translate_stroke(self._drag_stroke_idx, delta)
+                self._drag_last_pos = pos
+                self._canvas = None
+                self.update()
+            else:
+                new_hover = self._find_stroke_at(pos)
+                if new_hover != self._drag_hover_idx:
+                    self._drag_hover_idx = new_hover
+                    self.update()
             return
 
         if self._tool == "laser":
@@ -554,7 +563,12 @@ class OverlayWindow(QWidget):
 
     def wheelEvent(self, event):
         if self._active and self._tool == "drag":
-            idx = self._find_stroke_at(event.position().toPoint())
+            # Durante drag (mão fechada), redimensiona o stroke segurado;
+            # caso contrário, procura pelo stroke sob o cursor.
+            if self._drawing and self._drag_stroke_idx is not None:
+                idx = self._drag_stroke_idx
+            else:
+                idx = self._find_stroke_at(event.position().toPoint())
             if idx is not None:
                 factor = 1.1 if event.angleDelta().y() > 0 else 0.9
                 self._scale_stroke(idx, factor)
@@ -586,6 +600,9 @@ class OverlayWindow(QWidget):
             painter.drawPixmap(0, 0, self._canvas)
             if self._current_stroke:
                 self._draw_stroke(painter, self._current_stroke)
+
+        if self._tool == "drag" and self._strokes:
+            self._draw_drag_handles(painter)
 
         if self._tool == "laser" and self._laser_pos:
             self._draw_laser(painter)
@@ -646,6 +663,70 @@ class OverlayWindow(QWidget):
         elif tool == "circle" and len(raw) >= 2:
             painter.drawEllipse(QRect(raw[0], raw[-1]).normalized())
 
+    def _draw_drag_handles(self, painter: QPainter):
+        """Desenha ícones de arrasto (4 setas) em cada stroke quando drag tool ativo."""
+        from PyQt6.QtGui import QBrush
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+
+        for i, stroke in enumerate(self._strokes):
+            if not stroke:
+                continue
+
+            # Âncora: posição do texto ou centroide dos pontos do stroke
+            if stroke[0][1].get("tool") == "text":
+                anchor = stroke[0][0]
+            else:
+                pts = [pt for pt, _ in stroke]
+                anchor = QPoint(
+                    sum(p.x() for p in pts) // len(pts),
+                    sum(p.y() for p in pts) // len(pts),
+                )
+
+            is_active = (self._drawing and i == self._drag_stroke_idx)
+            is_hover  = (not self._drawing and i == self._drag_hover_idx)
+
+            if is_active:
+                c = QColor(255, 200, 50, 230)   # amarelo: segurando
+            elif is_hover:
+                c = QColor(80, 200, 255, 230)   # azul: hover
+            else:
+                c = QColor(255, 255, 255, 150)  # branco: normal
+
+            cx, cy = float(anchor.x()), float(anchor.y())
+            R  = 10.0   # raio do círculo
+            AL = 7.0    # comprimento do braço da seta (do centro à ponta)
+            AW = 3.0    # semi-largura da cabeça da seta
+
+            # Círculo de fundo (sombra)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor(0, 0, 0, 90)))
+            painter.drawEllipse(QPointF(cx, cy), R, R)
+
+            # Borda do círculo
+            painter.setPen(QPen(c, 1.5))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(QPointF(cx, cy), R, R)
+
+            # Setas: 4 triângulos preenchidos + linhas dos braços
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(c))
+            for tip, w1, w2 in [
+                (QPointF(cx,      cy - AL), QPointF(cx - AW, cy - AL + AW), QPointF(cx + AW, cy - AL + AW)),  # cima
+                (QPointF(cx,      cy + AL), QPointF(cx - AW, cy + AL - AW), QPointF(cx + AW, cy + AL - AW)),  # baixo
+                (QPointF(cx - AL, cy),      QPointF(cx - AL + AW, cy - AW), QPointF(cx - AL + AW, cy + AW)),  # esquerda
+                (QPointF(cx + AL, cy),      QPointF(cx + AL - AW, cy - AW), QPointF(cx + AL - AW, cy + AW)),  # direita
+            ]:
+                tri = QPainterPath()
+                tri.moveTo(tip); tri.lineTo(w1); tri.lineTo(w2)
+                tri.closeSubpath()
+                painter.drawPath(tri)
+
+            # Linhas de cruz centrais
+            painter.setPen(QPen(c, 1.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            half = AL - AW
+            painter.drawLine(QPointF(cx, cy - half), QPointF(cx, cy + half))
+            painter.drawLine(QPointF(cx - half, cy), QPointF(cx + half, cy))
+
     def _draw_spotlight(self, painter: QPainter):
         pos = self._spotlight_pos
         r = float(self._spotlight_radius)
@@ -692,4 +773,6 @@ class OverlayWindow(QWidget):
         return {"tool": self._tool, "color": QColor(self._color), "size": self._size}
 
     def _update_tracking(self):
-        self.setMouseTracking((self._tool == "laser") or self._spotlight)
+        self.setMouseTracking(
+            (self._tool == "laser") or self._spotlight or (self._tool == "drag")
+        )
