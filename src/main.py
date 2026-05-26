@@ -108,7 +108,7 @@ def main():
     # compositor dimensiona a janela para a área disponível (exclui painel KDE).
     _lsw_o = layershell.apply(
         overlay,
-        layer=layershell.LAYER_OVERLAY,
+        layer=layershell.LAYER_TOP,
         anchors=(layershell.ANCHOR_TOP | layershell.ANCHOR_BOTTOM |
                  layershell.ANCHOR_LEFT | layershell.ANCHOR_RIGHT),
         exclusive_zone=0,
@@ -124,7 +124,7 @@ def main():
 
     _lsw_t = layershell.apply(
         toolbar,
-        layer=layershell.LAYER_OVERLAY,
+        layer=layershell.LAYER_TOP,
         exclusive_zone=-1,
         initial_pos=(_tb_rel_x, _tb_rel_y),
         screen=_tb_screen,
@@ -146,9 +146,9 @@ def main():
             toolbar.hide()
             toolbar.show()
         overlay._on_remapped = _reraise_toolbar
-        print("[layershell] overlay Layer::Overlay 4-anchor ExclusiveZone=0 + toolbar Layer::Overlay")
+        print("[layershell] overlay Layer::Top 4-anchor ExclusiveZone=0 + toolbar Layer::Overlay")
     elif _lsw_o:
-        print("[layershell] overlay Layer::Overlay (toolbar sem layer-shell)")
+        print("[layershell] overlay Layer::Top (toolbar sem layer-shell)")
     elif _use_embed:
         # embed_toolbar() deve ser chamado ANTES de overlay.show()
         overlay.embed_toolbar(toolbar)
