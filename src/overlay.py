@@ -52,6 +52,7 @@ class OverlayWindow(QWidget):
 
         # whiteboard infinito
         self._wb_pan: QPointF = QPointF(0.0, 0.0)
+        self._wb_zoom: float = 1.0
         self._wb_bg: QColor = QColor(255, 255, 255, 255)
         self._wb_panning: bool = False
         self._wb_pan_start_mouse: QPoint | None = None
@@ -368,6 +369,7 @@ class OverlayWindow(QWidget):
         self._whiteboard = active
         if not active:
             self._wb_pan = QPointF(0.0, 0.0)
+            self._wb_zoom = 1.0
             self._wb_panning = False
         self._update_tracking()
         self.update()
@@ -519,8 +521,14 @@ class OverlayWindow(QWidget):
     # ── Mouse events ──────────────────────────────────────────────────────
 
     def mousePressEvent(self, event):
-        # Botão do meio: inicia pan no modo whiteboard
-        if event.button() == Qt.MouseButton.MiddleButton and self._whiteboard:
+        # Botão do meio OU Shift+esquerdo: inicia pan no modo whiteboard
+        _shift = bool(QApplication.queryKeyboardModifiers()
+                      & Qt.KeyboardModifier.ShiftModifier)
+        _is_pan_trigger = (
+            event.button() == Qt.MouseButton.MiddleButton
+            or (event.button() == Qt.MouseButton.LeftButton and _shift)
+        )
+        if _is_pan_trigger and self._whiteboard:
             self._wb_panning = True
             self._wb_pan_start_mouse = event.pos()
             self._wb_pan_start_val = QPointF(self._wb_pan)
@@ -568,6 +576,15 @@ class OverlayWindow(QWidget):
             self.update()
             return
 
+        # Cursor mão aberta no whiteboard quando Shift segurado (indica que pode arrastar)
+        if self._whiteboard and not self._wb_panning and not self._drawing:
+            _shift = bool(QApplication.queryKeyboardModifiers()
+                          & Qt.KeyboardModifier.ShiftModifier)
+            if _shift:
+                self.setCursor(Qt.CursorShape.OpenHandCursor)
+            else:
+                self._refresh_cursor()
+
         if self._spotlight:
             self._spotlight_pos = pos
             self.update()
@@ -611,8 +628,10 @@ class OverlayWindow(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, event):
-        # Fim do pan com botão do meio
-        if event.button() == Qt.MouseButton.MiddleButton and self._wb_panning:
+        # Fim do pan (botão do meio ou esquerdo com Shift)
+        if self._wb_panning and event.button() in (
+            Qt.MouseButton.MiddleButton, Qt.MouseButton.LeftButton
+        ):
             self._wb_panning = False
             self._wb_pan_start_mouse = None
             self._wb_pan_start_val = None
@@ -647,8 +666,23 @@ class OverlayWindow(QWidget):
 
     def wheelEvent(self, event):
         if self._whiteboard and not (self._tool == "drag"):
-            delta = event.angleDelta()
-            self._wb_pan += QPointF(delta.x() / 8.0, delta.y() / 8.0)
+            _shift = bool(QApplication.queryKeyboardModifiers()
+                          & Qt.KeyboardModifier.ShiftModifier)
+            if _shift:
+                # Zoom centrado no cursor
+                delta_y = event.angleDelta().y()
+                if delta_y != 0:
+                    factor = 1.1 if delta_y > 0 else 0.9
+                    cp = event.position()
+                    self._wb_pan = QPointF(
+                        cp.x() * (1.0 - factor) + self._wb_pan.x() * factor,
+                        cp.y() * (1.0 - factor) + self._wb_pan.y() * factor,
+                    )
+                    self._wb_zoom *= factor
+                    self._canvas = None
+            else:
+                delta = event.angleDelta()
+                self._wb_pan += QPointF(delta.x() / 8.0, delta.y() / 8.0)
             self.update()
             event.accept()
             return
@@ -682,6 +716,7 @@ class OverlayWindow(QWidget):
             wb_p = QPainter(wb_px)
             wb_p.setRenderHint(QPainter.RenderHint.Antialiasing)
             wb_p.translate(self._wb_pan)
+            wb_p.scale(self._wb_zoom, self._wb_zoom)
             for stroke in self._strokes:
                 self._draw_stroke(wb_p, stroke)
             if self._current_stroke:
@@ -865,12 +900,15 @@ class OverlayWindow(QWidget):
         painter.setBrush(QBrush(QColor(255, 255, 255, 255)))
         painter.drawEllipse(QPointF(pos), 4.0, 4.0)
 
-    def _to_canvas(self, pos: QPoint) -> QPoint:
-        """Converte posição de ecrã para coordenadas de canvas (desconta pan do whiteboard)."""
+    def _to_canvas(self, pos: QPoint) -> QPointF:
+        """Converte posição de ecrã para coordenadas de canvas (desconta pan + zoom)."""
         if self._whiteboard:
-            return QPoint(pos.x() - int(self._wb_pan.x()),
-                          pos.y() - int(self._wb_pan.y()))
-        return pos
+            z = self._wb_zoom if self._wb_zoom != 0 else 1.0
+            return QPointF(
+                (pos.x() - self._wb_pan.x()) / z,
+                (pos.y() - self._wb_pan.y()) / z,
+            )
+        return QPointF(pos)
 
     def _brush_props(self) -> dict:
         return {"tool": self._tool, "color": QColor(self._color), "size": self._size}

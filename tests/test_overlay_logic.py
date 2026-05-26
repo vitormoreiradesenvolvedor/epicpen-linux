@@ -168,6 +168,7 @@ def overlay():
     ov._canvas           = None
     ov._erase_scratch    = None
     ov._wb_pan           = _QPointF(0.0, 0.0)
+    ov._wb_zoom          = 1.0
     ov._wb_bg            = _QColor("#ffffff")
     ov._wb_panning       = False
     ov._wb_pan_start_mouse = None
