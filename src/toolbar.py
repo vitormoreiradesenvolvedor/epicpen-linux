@@ -691,9 +691,20 @@ class ToolbarWindow(QWidget):
         if not self._presentation_mode:
             return
         cursor = QCursor.pos()
-        if abs(cursor.x() - self.pos().x()) <= 60:
+        # self.pos() retorna (0,0) em superfícies wlr-layer-shell — usa _lsw_pos
+        # No modo embed/X11 (sem layer-shell), self.pos() é confiável
+        ref = self._lsw_pos if self._lsw_ptr is not None else self.pos()
+        tx, ty = ref.x(), ref.y()
+        th = max(self.height(), 100)
+        near_x = abs(cursor.x() - tx) <= 60
+        near_y = ty - 20 <= cursor.y() <= ty + th + 20
+        if near_x and near_y:
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
             self.setWindowOpacity(1.0)
+            self.raise_()
+            if not self._lsw_ptr:
+                import keepabove
+                keepabove.set_keepabove()
             self._hide_timer.start()
 
     def enterEvent(self, event):
