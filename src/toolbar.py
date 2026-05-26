@@ -108,10 +108,20 @@ class TextDialog(QDialog):
         lay.addWidget(buttons)
 
     def _pick_color(self):
-        c = QColorDialog.getColor(self._color, self, "Cor do texto")
-        if c.isValid():
-            self._color = c
-            self._update_color_preview()
+        if self.windowFlags() & Qt.WindowType.Popup:
+            dlg = QColorDialog(self._color, self)
+            dlg.setOption(QColorDialog.ColorDialogOption.DontUseNativeDialog, True)
+            dlg.setWindowFlags(Qt.WindowType.Popup)
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                c = dlg.currentColor()
+                if c.isValid():
+                    self._color = c
+                    self._update_color_preview()
+        else:
+            c = QColorDialog.getColor(self._color, self, "Cor do texto")
+            if c.isValid():
+                self._color = c
+                self._update_color_preview()
 
     def _update_color_preview(self):
         self._color_btn.setStyleSheet(
@@ -546,37 +556,70 @@ class ToolbarWindow(QWidget):
             btn_map[tool].setChecked(True)
         self._overlay.set_tool(tool)
 
+    # ── Dialog helpers ────────────────────────────────────────────────────────
+
+    def _pre_dialog(self) -> bool:
+        """Prepara overlay para abrir diálogo. Retorna was_drawing.
+
+        Layer-shell: diálogos abrem como xdg_popup (Qt::Popup) acima da superfície
+        layer-shell — sem necessidade de manipular a camada do overlay.
+        Embed/X11: pausa o overlay normalmente via _toggle_drawing.
+        """
+        was_drawing = self._drawing_active
+        ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
+        if was_drawing and not ov_lsw:
+            self._btn_toggle.setChecked(True)
+            self._toggle_drawing(True)
+        return was_drawing
+
+    def _post_dialog(self, was_drawing: bool):
+        """Restaura overlay após fechar diálogo."""
+        ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
+        if was_drawing and not ov_lsw:
+            self._btn_toggle.setChecked(False)
+            self._toggle_drawing(False)
+
     # ── Text tool ─────────────────────────────────────────────────────────────
 
     def _on_text_placement_requested(self, pos):
-        was_drawing = self._drawing_active
-        if was_drawing:
-            self._btn_toggle.setChecked(True)
-            self._toggle_drawing(True)
-        dlg = TextDialog(self._current_color, parent=self)
+        was_drawing = self._pre_dialog()
+        ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
+        # Em layer-shell, usa o overlay (full-screen) como pai do popup.
+        # O overlay cobre o monitor desde (0,0), então pos é anchor_rect direto.
+        # O toolbar (56px) como pai causaria clamp do compositor para o canto.
+        dlg = TextDialog(self._current_color, parent=self._overlay if ov_lsw else self)
+        if ov_lsw:
+            dlg.setWindowFlags(Qt.WindowType.Popup)
+            dlg.adjustSize()
+            dlg.move(pos.x() + 8, pos.y() + 8)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._overlay.place_text(
                 pos, dlg.text(), dlg.font_family(), dlg.font_size(), dlg.color()
             )
-        if was_drawing:
-            self._btn_toggle.setChecked(False)
-            self._toggle_drawing(False)
+        self._post_dialog(was_drawing)
 
     # ── Color ─────────────────────────────────────────────────────────────────
 
     def _pick_color(self):
-        was_drawing = self._drawing_active
-        if was_drawing:
-            self._btn_toggle.setChecked(True)
-            self._toggle_drawing(True)
-        color = QColorDialog.getColor(self._current_color, self, "Escolher cor")
-        if color.isValid():
-            self._current_color = color
-            self._overlay.set_color(color)
-            self._update_color_button()
-        if was_drawing:
-            self._btn_toggle.setChecked(False)
-            self._toggle_drawing(False)
+        was_drawing = self._pre_dialog()
+        ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
+        if ov_lsw:
+            dlg = QColorDialog(self._current_color, self._overlay)
+            dlg.setOption(QColorDialog.ColorDialogOption.DontUseNativeDialog, True)
+            dlg.setWindowFlags(Qt.WindowType.Popup)
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                color = dlg.currentColor()
+                if color.isValid():
+                    self._current_color = color
+                    self._overlay.set_color(color)
+                    self._update_color_button()
+        else:
+            color = QColorDialog.getColor(self._current_color, self, "Escolher cor")
+            if color.isValid():
+                self._current_color = color
+                self._overlay.set_color(color)
+                self._update_color_button()
+        self._post_dialog(was_drawing)
 
     def _update_color_button(self):
         self._color_btn.setIcon(icons.color_dot(self._current_color))
@@ -595,18 +638,25 @@ class ToolbarWindow(QWidget):
         self.adjustSize()
 
     def _pick_whiteboard_bg(self):
-        was_drawing = self._drawing_active
-        if was_drawing:
-            self._btn_toggle.setChecked(True)
-            self._toggle_drawing(True)
-        color = QColorDialog.getColor(self._wb_bg_color, self, "Cor do fundo do quadro")
-        if color.isValid():
-            self._wb_bg_color = color
-            self._overlay.set_whiteboard_bg(color)
-            self._btn_wb_bg.setIcon(icons.color_dot(color))
-        if was_drawing:
-            self._btn_toggle.setChecked(False)
-            self._toggle_drawing(False)
+        was_drawing = self._pre_dialog()
+        ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
+        if ov_lsw:
+            dlg = QColorDialog(self._wb_bg_color, self._overlay)
+            dlg.setOption(QColorDialog.ColorDialogOption.DontUseNativeDialog, True)
+            dlg.setWindowFlags(Qt.WindowType.Popup)
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                color = dlg.currentColor()
+                if color.isValid():
+                    self._wb_bg_color = color
+                    self._overlay.set_whiteboard_bg(color)
+                    self._btn_wb_bg.setIcon(icons.color_dot(color))
+        else:
+            color = QColorDialog.getColor(self._wb_bg_color, self, "Cor do fundo do quadro")
+            if color.isValid():
+                self._wb_bg_color = color
+                self._overlay.set_whiteboard_bg(color)
+                self._btn_wb_bg.setIcon(icons.color_dot(color))
+        self._post_dialog(was_drawing)
 
     def _toggle_spotlight(self, checked: bool):
         self._overlay.set_spotlight(checked)

@@ -200,13 +200,22 @@ class OverlayWindow(QWidget):
         from PyQt6.QtGui import QRegion
 
         if self._toolbar_widget is not None:
-            # Embed: só a área da toolbar recebe input quando desenho inativo
+            # Embed (GNOME): usa QWindow.setMask para restringir input à toolbar.
+            # QWindow.setMask envia wl_surface_set_input_region sem clipar o rendering —
+            # os desenhos ficam visíveis enquanto o diálogo está aberto.
+            wh = self.windowHandle()
             if self._active:
+                # Restaura set_input_region(NULL) = aceita tudo
+                if wh:
+                    wh.setMask(QRegion())
                 self.clearMask()
             else:
                 tb_rect = self._toolbar_widget.geometry()
-                self.setMask(QRegion(tb_rect) if not tb_rect.isEmpty()
-                             else self._offscreen_region())
+                region = (QRegion(tb_rect) if not tb_rect.isEmpty()
+                          else self._offscreen_region())
+                if wh:
+                    wh.setMask(region)  # input restrito à toolbar; rendering inalterado
+                # Não chamar self.setMask() — cliparia também o rendering
             return
 
         if self._layer_shell_active:
@@ -337,6 +346,24 @@ class OverlayWindow(QWidget):
         em vez de set_input_region(null) que o Qt usa para QRegion() vazio."""
         from PyQt6.QtGui import QRegion
         return QRegion(max(self.width(), 9999) + 1, 0, 1, 1)
+
+    def _remap_layer(self, layer: int) -> None:
+        """Remapeia a wl_layer_surface na camada indicada sem alterar _active.
+
+        LayerShellQt aplica a camada na recriação da superfície (hide+show).
+        Não chama _on_remapped — esse callback é reservado para toggle de modo
+        de desenho. Usar QWidget.hide/show para contornar os overrides que
+        alterariam _active e disparariam lógica de passthrough.
+        """
+        if not self._layer_shell_active or not self._lsw_ptr:
+            return
+        import layershell as _ls
+        _ls.set_layer(self._lsw_ptr, layer)
+        QWidget.hide(self)
+        QWidget.show(self)
+        self.clearMask()
+        self._refresh_cursor()
+        self.update()
 
     def change_screen(self, screen):
         """Move o overlay para outro monitor (layer-shell).
