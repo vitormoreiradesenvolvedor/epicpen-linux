@@ -203,10 +203,6 @@ class OverlayWindow(QWidget):
         # Ao esconder, cancela qualquer passthrough activo
         if not active and self._passthrough:
             self._passthrough = False
-            from PyQt6.QtGui import QRegion
-            wh = self.windowHandle()
-            if wh:
-                wh.setMask(QRegion())
             self.clearMask()
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
 
@@ -260,14 +256,14 @@ class OverlayWindow(QWidget):
             offscreen = self._offscreen_region()
             wh = self.windowHandle()
             if wh:
+                # QWindow.setMask → wl_surface_set_input_region(offscreen_rect) + commit
+                # NÃO chamar self.setMask(offscreen): QWidget.setMask clipa também o
+                # rendering (drawings tornam-se invisíveis).
                 wh.setMask(offscreen)
-            self.setMask(offscreen)
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         else:
-            from PyQt6.QtGui import QRegion
-            wh = self.windowHandle()
-            if wh:
-                wh.setMask(QRegion())
+            # clearMask() → QWidget.setMask(empty) → QWindow.setMask(empty)
+            # → wl_surface_set_input_region(NULL) = aceita tudo + restaura rendering.
             self.clearMask()
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
             if not self._layer_shell_active:
