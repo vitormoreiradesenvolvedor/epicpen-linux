@@ -181,11 +181,6 @@ def apply(widget,
         _set_margins(lib, lsw, x, y)
         print(f"[layershell] apply() concluído — layer={layer} pos=({x},{y}) excl={exclusive_zone}")
 
-        # Aproveitar que a integração Wayland está activa para cachear wl_compositor/display.
-        # Em PyQt6, platformNativeInterface() não está acessível como classmethod —
-        # deve ser chamado na instância. Fazemos isso aqui onde tudo já está inicializado.
-        _cache_wl_globals(widget)
-
         return lsw  # raw pointer (int) for later move_to() calls
 
     except Exception as e:
@@ -548,11 +543,12 @@ def _get_wl_surface(widget) -> "int | None":
         # Layout de QWaylandWindow:
         #   offset 0: vptr → vtable de QNativeInterface::Private::QWaylandWindow
         #             vtable[0]=D1 destrutor, vtable[1]=D0 destrutor, vtable[2]=surface()
-        #   offset 8: QPlatformWindow (segunda base)
-        # handle() devolve QPlatformWindow* = QWaylandWindow* + 8 → subtrai 8.
+        #   offset 16: QPlatformWindow (segunda base)
+        # handle() devolve QPlatformWindow* = QWaylandWindow* + 16 → subtrai 16.
+        # Provado pelo thunk _ZThn16_NK15QtWaylandClient14QWaylandWindow6formatEv no backtrace.
         SURFACE_FN = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p)
 
-        for obj_offset in (8, 0, 16):
+        for obj_offset in (16, 8, 0):
             qwayland_win = platform_win - obj_offset
             if qwayland_win <= 0:
                 continue
@@ -651,6 +647,8 @@ def clear_input_region(widget) -> bool:
     wl = _get_wl_client()
     if wl is None:
         return False
+    if _wl_display_ptr is None:
+        _cache_wl_globals(widget)
     surface = _get_wl_surface(widget)
     display = _wl_display_ptr
     if not surface:
