@@ -17,8 +17,30 @@ if ("gnome" in _xdg
     _os.environ["QT_QPA_PLATFORM"] = "xcb"
     print("[gnome] GNOME Wayland detectado — usando XWayland (QT_QPA_PLATFORM=xcb)")
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QMessageBox
 from PyQt6.QtCore import QTimer
+from PyQt6.QtGui import QAction
+
+
+def _show_about(overlay):
+    """Exibe modal 'Sobre' pausando o overlay para o dialog receber cliques."""
+    was_active = getattr(overlay, '_active', False)
+    if was_active:
+        overlay.set_active(False)
+    name    = QApplication.applicationName()
+    version = QApplication.applicationVersion()
+    dlg = QMessageBox()
+    dlg.setWindowTitle(f"Sobre {name}")
+    dlg.setText(f"<b>{name}</b>")
+    dlg.setInformativeText(
+        f"Versão: <b>{version}</b><br><br>"
+        "Clone Linux do EpicPen para desenho em tela,<br>"
+        "com suporte nativo a Wayland e X11."
+    )
+    dlg.setStandardButtons(QMessageBox.StandardButton.Ok)
+    dlg.exec()
+    if was_active:
+        overlay.set_active(True)
 
 import config as cfg
 from overlay import OverlayWindow
@@ -31,7 +53,7 @@ import layershell
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("EpicPen")
-    app.setApplicationVersion("0.1.0")
+    app.setApplicationVersion("1.0.5")
     app.setQuitOnLastWindowClosed(False)
 
     settings = cfg.load()
@@ -40,6 +62,13 @@ def main():
     toolbar = ToolbarWindow(overlay, config=settings)
     tray    = TrayIcon(overlay, toolbar, app)
     toolbar.set_tray(tray)
+
+    # Insere "Sobre" antes de "Sair" no menu da tray (sem modificar tray.py)
+    _tray_menu = tray.contextMenu()
+    _quit_act  = _tray_menu.actions()[-1]          # "Sair" é sempre o último
+    _act_about = QAction("ℹ️  Sobre", _tray_menu)
+    _act_about.triggered.connect(lambda: _show_about(overlay))
+    _tray_menu.insertAction(_quit_act, _act_about)
 
     # Restaura modo quadro branco salvo
     if settings.get("whiteboard"):

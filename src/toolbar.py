@@ -38,6 +38,7 @@ _STYLE = """
     QSlider::groove:vertical {
         background: rgba(255,255,255,40);
         width: 4px; border-radius: 2px;
+        margin: 6px 0px;
     }
     QSlider::handle:vertical {
         background: white;
@@ -179,6 +180,21 @@ class ToolbarWindow(QWidget):
 
         overlay.text_placement_requested.connect(self._on_text_placement_requested)
 
+        # Tooltip interno: QLabel filho da janela, posicionado à direita da coluna
+        # de botões. Não depende de popup Qt — funciona em wlr-layer-shell.
+        self._tt_label = QLabel("", self)
+        self._tt_label.setStyleSheet(
+            "background:#1e1e1e; color:white;"
+            "border:1px solid rgba(255,255,255,60);"
+            "border-radius:4px; padding:3px 8px; font-size:12px;"
+        )
+        self._tt_label.hide()
+        self._tt_timer = QTimer(self)
+        self._tt_timer.setSingleShot(True)
+        self._tt_timer.setInterval(1000)
+        self._tt_timer.timeout.connect(self._fire_tooltip)
+        self._tt_widget: "QPushButton | None" = None
+
 
     # ── Window setup ──────────────────────────────────────────────────────────
 
@@ -201,10 +217,13 @@ class ToolbarWindow(QWidget):
         root.setSpacing(0)
         # Bloqueia resize externo (compositor não pode redimensionar)
         root.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
+        self._root_layout = root
 
         self._container = QFrame(self)
         self._container.setObjectName("toolbar")
         self._container.setStyleSheet(_STYLE)
+        # Largura fixa do container: nunca expande quando a janela cresce para tooltip
+        self._container.setFixedWidth(_W - 8)  # _W - margens root (4+4)
 
         outer = QVBoxLayout(self._container)
         outer.setContentsMargins(5, 5, 5, 5)
@@ -698,6 +717,42 @@ class ToolbarWindow(QWidget):
             self._hide_timer.start()
         super().leaveEvent(event)
 
+    # ── Tooltip interno ───────────────────────────────────────────────────────
+
+    def _fire_tooltip(self):
+        """Exibe o label de tooltip à direita da coluna, expandindo a janela."""
+        if not self._tt_widget or not self._tt_widget.toolTip():
+            return
+        raw = self._tt_widget.toolTip()
+        # Remove a dica de tecla no final: "Marcador (H)" → "Marcador"
+        text = raw[:raw.rfind(" (")] if " (" in raw else raw
+        self._tt_label.setText(text)
+        self._tt_label.adjustSize()
+        lbl_w = self._tt_label.width()
+        lbl_h = self._tt_label.height()
+        btn_local = self._tt_widget.mapTo(self, QPoint(0, 0))
+        y = btn_local.y() + (self._tt_widget.height() - lbl_h) // 2
+        y = max(0, min(y, self.height() - lbl_h))
+        self._tt_label.move(_W + 4, y)
+        new_w = _W + lbl_w + 8
+        # setFixedWidth deixa maximumWidth=_W; precisa remover antes de resize
+        self._root_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        self.setMinimumWidth(new_w)
+        self.setMaximumWidth(new_w)
+        self.resize(new_w, self.height())
+        self._tt_label.show()
+        self._tt_label.raise_()
+
+    def _cancel_tooltip(self):
+        """Cancela o timer e recolhe o label de tooltip."""
+        self._tt_timer.stop()
+        self._tt_widget = None
+        if self._tt_label.isVisible():
+            self._tt_label.hide()
+            self._root_layout.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
+            self.setFixedWidth(_W)
+            self.adjustSize()
+
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     @staticmethod
@@ -819,6 +874,14 @@ class ToolbarWindow(QWidget):
                 self._btn_exit.setIcon(icons.exit_btn(hover=True))
             elif t == QEvent.Type.Leave:
                 self._btn_exit.setIcon(icons.exit_btn())
+
+        # Tooltip interno com delay de 1.5 s (não depende de popup Qt)
+        if isinstance(obj, QPushButton) and not self._dragging:
+            if t == QEvent.Type.Enter:
+                self._tt_widget = obj
+                self._tt_timer.start()
+            elif t in (QEvent.Type.Leave, QEvent.Type.MouseButtonPress):
+                self._cancel_tooltip()
 
         # Suprime hover/enter/leave em filhos durante drag — evita piscar dos botões
         if self._dragging and t in (
