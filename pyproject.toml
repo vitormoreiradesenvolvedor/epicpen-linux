@@ -4,7 +4,7 @@ build-backend = "setuptools.backends.legacy:build"
 
 [project]
 name = "epicpen-linux"
-version = "1.0.8"
+version = "1.0.7"
 description = "Reimplementação open-source do EpicPen para Linux como AppImage"
 requires-python = ">=3.11"
 dependencies = ["PyQt6>=6.6", "pynput>=1.7"]

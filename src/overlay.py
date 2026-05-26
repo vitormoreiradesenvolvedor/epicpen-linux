@@ -27,8 +27,7 @@ class OverlayWindow(QWidget):
         super().__init__()
         self._strokes: list[list[tuple[QPoint, dict]]] = []
         self._current_stroke: list[tuple[QPoint, dict]] = []
-        self._history: list = []   # acções confirmadas (stroke ou erase)
-        self._redo_stack: list = []  # buffer de redo
+        self._undo_stack: list[list[tuple[QPoint, dict]]] = []
 
         self._tool = "pen"
         self._color = QColor("#FF0000")
@@ -40,6 +39,7 @@ class OverlayWindow(QWidget):
         self._drag_stroke_idx: int | None = None
         self._drag_last_pos: QPoint | None = None
         self._drag_hover_idx: int | None = None
+        self._drag_linked_erasers: list[int] = []  # erasers ancorados ao stroke activo
 
         # laser
         self._laser_pos: QPoint | None = None
@@ -63,14 +63,6 @@ class OverlayWindow(QWidget):
         # paintEvent faz blit deste pixmap + desenha apenas o stroke actual.
         # Invalida (None) quando o widget é redimensionado ou undo/clear ocorre.
         self._canvas: QPixmap | None = None
-
-        # Base de canvas baked por apagamentos destrutivos anteriores.
-        # _rebuild_canvas() blita este primeiro, depois pinta _strokes por cima.
-        self._canvas_base: QPixmap | None = None
-
-        # Estado pré-apagamento (salvo em mousePressEvent para undo destrutivo).
-        self._pre_erase_base: QPixmap | None = None
-        self._pre_erase_strokes: list | None = None
 
         # Scratch canvas para a borracha activa: cópia do canvas principal onde
         # cada novo segmento apagado é aplicado incrementalmente durante o drag.
@@ -179,8 +171,7 @@ class OverlayWindow(QWidget):
             "text": text,
         })]
         self._strokes.append(stroke)
-        self._redo_stack.clear()
-        self._history.append({"type": "stroke", "stroke": stroke})
+        self._undo_stack.clear()
         self._ensure_canvas()
         self._commit_stroke(stroke)
         self.update()
@@ -439,13 +430,6 @@ class OverlayWindow(QWidget):
         if self._canvas is None:
             return
         self._canvas.fill(Qt.GlobalColor.transparent)
-        if self._canvas_base is not None:
-            if self._canvas_base.size() == self._canvas.size():
-                p = QPainter(self._canvas)
-                p.drawPixmap(0, 0, self._canvas_base)
-                p.end()
-            else:
-                self._canvas_base = None  # base obsoleta após redimensionamento
         if not self._strokes:
             return
         p = QPainter(self._canvas)
@@ -466,41 +450,24 @@ class OverlayWindow(QWidget):
     # ── Undo / redo / clear ───────────────────────────────────────────────
 
     def undo(self):
-        if not self._history:
-            return
-        record = self._history.pop()
-        self._redo_stack.append(record)
-        if record["type"] == "stroke":
-            self._strokes.pop()
-        elif record["type"] == "erase":
-            self._canvas_base = record["old_base"]
-            self._strokes = list(record["old_strokes"])
-        self._erase_scratch = None
-        self._canvas = None
-        self.update()
+        if self._strokes:
+            self._undo_stack.append(self._strokes.pop())
+            self._erase_scratch = None
+            self._canvas = None   # força rebuild no próximo paint
+            self.update()
 
     def redo(self):
-        if not self._redo_stack:
-            return
-        record = self._redo_stack.pop()
-        self._history.append(record)
-        if record["type"] == "stroke":
-            stroke = record["stroke"]
+        if self._undo_stack:
+            stroke = self._undo_stack.pop()
             self._strokes.append(stroke)
             if not self._whiteboard:
                 self._ensure_canvas()
                 self._commit_stroke(stroke)
-        elif record["type"] == "erase":
-            self._canvas_base = record["new_base"]
-            self._strokes = []
-            self._canvas = None
-        self.update()
+            self.update()
 
     def clear(self):
         self._strokes.clear()
-        self._history.clear()
-        self._redo_stack.clear()
-        self._canvas_base = None
+        self._undo_stack.clear()
         self._erase_scratch = None
         if self._canvas is not None:
             self._canvas.fill(Qt.GlobalColor.transparent)
@@ -509,19 +476,6 @@ class OverlayWindow(QWidget):
     # ── Drag tool helpers ─────────────────────────────────────────────────────
 
     _DRAG_HANDLE_R = 12.0  # raio do círculo visual E da área de clique
-
-    def _is_draggable(self, idx: int) -> bool:
-        """Retorna False para strokes que não devem aparecer no drag tool.
-
-        No modo normal, strokes de borracha nunca chegam a _strokes (erase destrutivo).
-        No modo whiteboard, strokes de borracha ficam em _strokes mas não são arrastáveis.
-        """
-        stroke = self._strokes[idx]
-        if not stroke:
-            return False
-        if stroke[0][1].get("tool") == "eraser":
-            return False
-        return True
 
     @staticmethod
     def _stroke_anchor(stroke) -> QPointF:
@@ -535,6 +489,47 @@ class OverlayWindow(QWidget):
             sum(p.y() for p in pts) / len(pts),
         )
 
+    def _find_linked_erasers(self, stroke_idx: int) -> list[int]:
+        """Índices de strokes de borracha posteriores que cobrem stroke_idx.
+
+        Um stroke de borracha é considerado 'ancorado' ao stroke_idx se qualquer
+        ponto do traço de borracha está dentro do raio da borracha de qualquer
+        ponto do stroke_idx. Estes erasers movem-se junto quando stroke_idx é arrastado.
+        """
+        stroke = self._strokes[stroke_idx]
+        if not stroke:
+            return []
+        pen_pts = [(pt.x(), pt.y()) for pt, _ in stroke]
+        if not pen_pts:
+            return []
+        min_x = min(p[0] for p in pen_pts)
+        max_x = max(p[0] for p in pen_pts)
+        min_y = min(p[1] for p in pen_pts)
+        max_y = max(p[1] for p in pen_pts)
+
+        linked = []
+        for j in range(stroke_idx + 1, len(self._strokes)):
+            s = self._strokes[j]
+            if not s or s[0][1].get("tool") != "eraser":
+                continue
+            eraser_r = s[0][1].get("size", 3) * 2
+            r2 = eraser_r * eraser_r
+            overlaps = False
+            for pt, _ in s:
+                ex, ey = pt.x(), pt.y()
+                if (ex < min_x - eraser_r or ex > max_x + eraser_r
+                        or ey < min_y - eraser_r or ey > max_y + eraser_r):
+                    continue
+                for px, py in pen_pts:
+                    if (ex - px) ** 2 + (ey - py) ** 2 <= r2:
+                        overlaps = True
+                        break
+                if overlaps:
+                    break
+            if overlaps:
+                linked.append(j)
+        return linked
+
     def _find_stroke_at(self, pos: QPoint) -> "int | None":
         """Retorna o índice do stroke cujo círculo de arrasto contém pos."""
         # Converte pos de ecrã para canvas; o raio também fica em unidades de canvas
@@ -544,8 +539,10 @@ class OverlayWindow(QWidget):
         r2 = (self._DRAG_HANDLE_R / z) ** 2
         best_idx, best_dist2 = None, float("inf")
         for i, stroke in enumerate(self._strokes):
-            if not self._is_draggable(i):
+            if not stroke:
                 continue
+            if stroke[0][1].get("tool") == "eraser":
+                continue  # erasers movem-se com o stroke a que pertencem, não são arrastáveis por si
             a = self._stroke_anchor(stroke)
             d2 = (a.x() - px) ** 2 + (a.y() - py) ** 2
             if d2 < best_dist2:
@@ -620,6 +617,7 @@ class OverlayWindow(QWidget):
             idx = self._find_stroke_at(event.pos())
             if idx is not None:
                 self._drag_stroke_idx = idx
+                self._drag_linked_erasers = self._find_linked_erasers(idx)
                 self._drag_last_pos = event.pos()
                 self._drawing = True
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
@@ -629,14 +627,10 @@ class OverlayWindow(QWidget):
             return
         self._drawing = True
         self._current_stroke = [(self._to_canvas(event.pos()), self._brush_props())]
-        self._redo_stack.clear()
+        self._undo_stack.clear()
         # Borracha: scratch canvas (apenas fora do whiteboard — no wb renderiza ao vivo)
         if self._tool == "eraser" and not self._whiteboard:
             self._ensure_canvas()
-            # Salva estado pré-apagamento para undo destrutivo
-            self._pre_erase_base = (QPixmap(self._canvas_base)
-                                    if self._canvas_base is not None else None)
-            self._pre_erase_strokes = list(self._strokes)
             self._erase_scratch = QPixmap(self._canvas)
             p = QPainter(self._erase_scratch)
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -675,7 +669,11 @@ class OverlayWindow(QWidget):
                 if self._whiteboard and self._wb_zoom != 0:
                     dx /= self._wb_zoom
                     dy /= self._wb_zoom
-                self._translate_stroke(self._drag_stroke_idx, QPointF(dx, dy))
+                delta = QPointF(dx, dy)
+                self._translate_stroke(self._drag_stroke_idx, delta)
+                for j in self._drag_linked_erasers:
+                    if j < len(self._strokes):
+                        self._translate_stroke(j, delta)
                 self._drag_last_pos = pos
                 self._canvas = None
                 self.update()
@@ -725,6 +723,7 @@ class OverlayWindow(QWidget):
             if self._drawing:
                 self._drawing = False
                 self._drag_stroke_idx = None
+                self._drag_linked_erasers = []
                 self._drag_last_pos = None
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
             return
@@ -733,30 +732,16 @@ class OverlayWindow(QWidget):
         self._drawing = False
         if self._current_stroke:
             stroke = list(self._current_stroke)
-            if (self._tool == "eraser" and not self._whiteboard
-                    and self._erase_scratch is not None):
-                # Borracha destrutiva: bake no _canvas_base, não guarda stroke em _strokes
-                new_base = self._erase_scratch
-                self._history.append({
-                    "type": "erase",
-                    "old_base": self._pre_erase_base,
-                    "old_strokes": self._pre_erase_strokes or [],
-                    "new_base": new_base,
-                })
-                self._canvas_base = new_base
-                self._strokes = []
-                self._canvas = None
+            self._strokes.append(stroke)
+            if self._whiteboard:
+                pass  # whiteboard renderiza direto de _strokes, sem cache
+            elif self._erase_scratch is not None:
+                # Borracha: scratch já tem o resultado final — promove a canvas
+                self._canvas = self._erase_scratch
                 self._erase_scratch = None
-                self._pre_erase_base = None
-                self._pre_erase_strokes = None
             else:
-                self._strokes.append(stroke)
-                self._history.append({"type": "stroke", "stroke": stroke})
-                if self._whiteboard:
-                    pass  # whiteboard renderiza direto de _strokes, sem cache
-                else:
-                    self._ensure_canvas()
-                    self._commit_stroke(stroke)
+                self._ensure_canvas()
+                self._commit_stroke(stroke)
         self._current_stroke = []
         self.update()
 
@@ -904,8 +889,10 @@ class OverlayWindow(QWidget):
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
 
         for i, stroke in enumerate(self._strokes):
-            if not self._is_draggable(i):
+            if not stroke:
                 continue
+            if stroke[0][1].get("tool") == "eraser":
+                continue  # sem handle para borracha — move junto com o stroke ancorado
 
             anchor = self._stroke_anchor(stroke)
 
