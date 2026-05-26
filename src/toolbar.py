@@ -48,13 +48,6 @@ _STYLE = """
     }
 """
 
-# Durante drag: hover visualmente idêntico ao estado normal — evita flickering
-# causado por Enter/Leave que o compositor Wayland envia à medida que a superfície se move.
-_STYLE_DRAG = _STYLE.replace(
-    "QPushButton:hover  { background: rgba(255,255,255,30); }",
-    "QPushButton:hover  { background: transparent; }",
-)
-
 # Estilo colapsado: frame transparente, sem borda — só o ícone fica visível
 _STYLE_COLLAPSED = """
     QFrame#toolbar { background: transparent; border: none; }
@@ -175,15 +168,6 @@ class ToolbarWindow(QWidget):
         self._edge_timer = QTimer(self)
         self._edge_timer.setInterval(150)
         self._edge_timer.timeout.connect(self._check_edge_reveal)
-
-        # Coalescer de posição de drag: agrupa todas as posições recebidas num ciclo
-        # do event loop numa única move_to()+repaint() — evita enviar ao compositor
-        # dezenas de commits com buffer desatualizado por frame.
-        self._drag_commit_timer = QTimer(self)
-        self._drag_commit_timer.setInterval(0)
-        self._drag_commit_timer.setSingleShot(True)
-        self._drag_commit_timer.timeout.connect(self._flush_drag_pos)
-        self._drag_pending_pos: "QPoint | None" = None
 
         self._setup_window()
         self._build_ui()
@@ -745,14 +729,14 @@ class ToolbarWindow(QWidget):
             self._hide_timer.start()
 
     def enterEvent(self, event):
-        if self._dragging:
-            return
         if self._presentation_mode:
             self._hide_timer.stop()
             self.setWindowOpacity(1.0)
-        self.raise_()
-        self.activateWindow()
-        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        # Wayland: puxa foco de teclado ao entrar na toolbar (não durante drag)
+        if not self._dragging:
+            self.raise_()
+            self.activateWindow()
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
         super().enterEvent(event)
 
     def wheelEvent(self, event):
@@ -761,7 +745,7 @@ class ToolbarWindow(QWidget):
         event.accept()
 
     def leaveEvent(self, event):
-        if self._presentation_mode and not self._dragging:
+        if self._presentation_mode:
             self._hide_timer.start()
         super().leaveEvent(event)
 
@@ -905,23 +889,6 @@ class ToolbarWindow(QWidget):
         self.show()
         layershell.move_to(self._lsw_ptr, rel.x(), rel.y())
 
-    def _flush_drag_pos(self):
-        """Aplica ao compositor a última posição acumulada durante o drag.
-
-        Chamado pelo _drag_commit_timer (interval=0): dispara uma vez por ciclo do
-        event loop após todas as MouseMove serem processadas. Envia uma única
-        layershell.move_to() + repaint() por frame em vez de uma por evento de rato.
-        """
-        if self._drag_pending_pos is None or not self._lsw_ptr:
-            return
-        pos = self._drag_pending_pos
-        self._drag_pending_pos = None
-        scr = self._current_screen
-        origin = scr.geometry().topLeft() if scr else QPoint(0, 0)
-        rel = pos - origin
-        layershell.move_to(self._lsw_ptr, rel.x(), rel.y())
-        self.repaint()  # imediato: commit buffer sincronizado com a posição
-
     # ── Drag + event filter ───────────────────────────────────────────────────
 
     def _install_event_filters(self):
@@ -984,11 +951,6 @@ class ToolbarWindow(QWidget):
                 delta = event.scenePosition().toPoint() - self._drag_start
                 if abs(delta.x()) + abs(delta.y()) >= 6:
                     self._dragging = True
-                    self._tt_timer.stop()
-                    # Remove hover visual dos botões durante drag; evita flickering
-                    # causado por Enter/Leave que o Wayland envia conforme a superfície move
-                    if not self._collapsed:
-                        self._container.setStyleSheet(_STYLE_DRAG)
                     if not self._lsw_ptr and self.parent() is None:
                         # GNOME/sem layer-shell: pede ao compositor para mover a janela.
                         # startSystemMove() envia xdg_toplevel_move; o compositor trata
@@ -1005,12 +967,11 @@ class ToolbarWindow(QWidget):
                 if self.parent() is not None:
                     self.move(new_pos)
                 else:
-                    # Layer-shell: acumula posição; timer (interval=0) aplica uma vez
-                    # por ciclo do event loop com repaint() imediato — sincroniza
-                    # wl_surface.commit() da posição com o commit do buffer.
-                    self._drag_pending_pos = new_pos
-                    if not self._drag_commit_timer.isActive():
-                        self._drag_commit_timer.start()
+                    scr = self._current_screen
+                    origin = scr.geometry().topLeft() if scr else QPoint(0, 0)
+                    rel = new_pos - origin
+                    layershell.move_to(self._lsw_ptr, rel.x(), rel.y())
+                    self.update()
                 self._lsw_pos = new_pos
                 return True
             if self._dragging:
@@ -1022,17 +983,7 @@ class ToolbarWindow(QWidget):
             self._drag_start  = None
             self._dragging    = False
             if was_dragging:
-                self._drag_commit_timer.stop()
-                if not self._collapsed:
-                    self._container.setStyleSheet(_STYLE)
                 if self._lsw_ptr:
-                    # Aplica posição final pendente (se o timer não chegou a disparar)
-                    if self._drag_pending_pos is not None:
-                        _fp = self._drag_pending_pos
-                        self._drag_pending_pos = None
-                        scr = self._current_screen
-                        origin = scr.geometry().topLeft() if scr else QPoint(0, 0)
-                        layershell.move_to(self._lsw_ptr, (_fp - origin).x(), (_fp - origin).y())
                     cursor_abs = event.scenePosition().toPoint() + self._lsw_pos
                     new_screen = self._screen_at(cursor_abs)
                     if new_screen and new_screen != self._current_screen:
