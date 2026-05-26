@@ -684,11 +684,23 @@ class ToolbarWindow(QWidget):
         if checked:
             self._edge_timer.start()
             self._hide_timer.start()
+            # Sobe para LAYER_OVERLAY para ficar acima de apps fullscreen
+            if self._lsw_ptr:
+                layershell.set_layer(self._lsw_ptr, layershell.LAYER_OVERLAY)
+            _ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
+            if _ov_lsw:
+                layershell.set_layer(_ov_lsw, layershell.LAYER_OVERLAY)
         else:
             self._edge_timer.stop()
             self._hide_timer.stop()
             self.show()
             self.setWindowOpacity(1.0)
+            # Volta a LAYER_TOP quando sai do modo apresentação
+            if self._lsw_ptr:
+                layershell.set_layer(self._lsw_ptr, layershell.LAYER_TOP)
+            _ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
+            if _ov_lsw:
+                layershell.set_layer(_ov_lsw, layershell.LAYER_TOP)
 
     def _presentation_auto_hide(self):
         # Colapsado = ícone mínimo já visível; não esconder
