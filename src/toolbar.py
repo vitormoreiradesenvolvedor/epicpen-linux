@@ -427,6 +427,11 @@ class ToolbarWindow(QWidget):
         # Colapso pausa o desenho (como no EpicPen original)
         self._btn_toggle.setChecked(True)
         self._toggle_drawing(True)
+        # Em modo apresentação o ícone colapsado deve permanecer visível
+        if self._presentation_mode:
+            self._hide_timer.stop()
+            self.setWindowOpacity(1.0)
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         QTimer.singleShot(0, self._sync_overlay_mask)
         QTimer.singleShot(0, self._update_input_region)
 
@@ -452,6 +457,9 @@ class ToolbarWindow(QWidget):
         self._toggle_drawing(False)
         QTimer.singleShot(0, self._sync_overlay_mask)
         QTimer.singleShot(0, self._update_input_region)
+        # Em modo apresentação retoma o timer de auto-esconder após expandir
+        if self._presentation_mode:
+            self._hide_timer.start()
 
     def _update_input_region(self):
         """Restringe input ao botão logo quando colapsado; sem máscara ao expandir."""
@@ -683,7 +691,8 @@ class ToolbarWindow(QWidget):
             self.setWindowOpacity(1.0)
 
     def _presentation_auto_hide(self):
-        if self._presentation_mode:
+        # Colapsado = ícone mínimo já visível; não esconder
+        if self._presentation_mode and not self._collapsed:
             self.setWindowOpacity(0.0)
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
