@@ -549,29 +549,34 @@ class ToolbarWindow(QWidget):
     # ── Text tool ─────────────────────────────────────────────────────────────
 
     def _on_text_placement_requested(self, pos):
-        if self._drawing_active:
-            self._overlay.set_passthrough(True)
+        was_drawing = self._drawing_active
+        if was_drawing:
+            self._btn_toggle.setChecked(True)
+            self._toggle_drawing(True)
         dlg = TextDialog(self._current_color, parent=self)
-        accepted = dlg.exec() == QDialog.DialogCode.Accepted
-        if self._drawing_active:
-            self._overlay.set_passthrough(False)
-        if accepted:
+        if dlg.exec() == QDialog.DialogCode.Accepted:
             self._overlay.place_text(
                 pos, dlg.text(), dlg.font_family(), dlg.font_size(), dlg.color()
             )
+        if was_drawing:
+            self._btn_toggle.setChecked(False)
+            self._toggle_drawing(False)
 
     # ── Color ─────────────────────────────────────────────────────────────────
 
     def _pick_color(self):
-        if self._drawing_active:
-            self._overlay.set_passthrough(True)
+        was_drawing = self._drawing_active
+        if was_drawing:
+            self._btn_toggle.setChecked(True)
+            self._toggle_drawing(True)
         color = QColorDialog.getColor(self._current_color, self, "Escolher cor")
-        if self._drawing_active:
-            self._overlay.set_passthrough(False)
         if color.isValid():
             self._current_color = color
             self._overlay.set_color(color)
             self._update_color_button()
+        if was_drawing:
+            self._btn_toggle.setChecked(False)
+            self._toggle_drawing(False)
 
     def _update_color_button(self):
         self._color_btn.setIcon(icons.color_dot(self._current_color))
@@ -590,15 +595,18 @@ class ToolbarWindow(QWidget):
         self.adjustSize()
 
     def _pick_whiteboard_bg(self):
-        if self._drawing_active:
-            self._overlay.set_passthrough(True)
+        was_drawing = self._drawing_active
+        if was_drawing:
+            self._btn_toggle.setChecked(True)
+            self._toggle_drawing(True)
         color = QColorDialog.getColor(self._wb_bg_color, self, "Cor do fundo do quadro")
-        if self._drawing_active:
-            self._overlay.set_passthrough(False)
         if color.isValid():
             self._wb_bg_color = color
             self._overlay.set_whiteboard_bg(color)
             self._btn_wb_bg.setIcon(icons.color_dot(color))
+        if was_drawing:
+            self._btn_toggle.setChecked(False)
+            self._toggle_drawing(False)
 
     def _toggle_spotlight(self, checked: bool):
         self._overlay.set_spotlight(checked)

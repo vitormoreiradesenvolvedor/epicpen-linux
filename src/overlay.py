@@ -200,13 +200,22 @@ class OverlayWindow(QWidget):
         from PyQt6.QtGui import QRegion
 
         if self._toolbar_widget is not None:
-            # Embed: só a área da toolbar recebe input quando desenho inativo
+            # Embed (GNOME): usa QWindow.setMask para restringir input à toolbar.
+            # QWindow.setMask envia wl_surface_set_input_region sem clipar o rendering —
+            # os desenhos ficam visíveis enquanto o diálogo está aberto.
+            wh = self.windowHandle()
             if self._active:
+                # Restaura set_input_region(NULL) = aceita tudo
+                if wh:
+                    wh.setMask(QRegion())
                 self.clearMask()
             else:
                 tb_rect = self._toolbar_widget.geometry()
-                self.setMask(QRegion(tb_rect) if not tb_rect.isEmpty()
-                             else self._offscreen_region())
+                region = (QRegion(tb_rect) if not tb_rect.isEmpty()
+                          else self._offscreen_region())
+                if wh:
+                    wh.setMask(region)  # input restrito à toolbar; rendering inalterado
+                # Não chamar self.setMask() — cliparia também o rendering
             return
 
         if self._layer_shell_active:
