@@ -347,6 +347,24 @@ class OverlayWindow(QWidget):
         from PyQt6.QtGui import QRegion
         return QRegion(max(self.width(), 9999) + 1, 0, 1, 1)
 
+    def _remap_layer(self, layer: int) -> None:
+        """Remapeia a wl_layer_surface na camada indicada sem alterar _active.
+
+        LayerShellQt aplica a camada na recriação da superfície (hide+show).
+        Não chama _on_remapped — esse callback é reservado para toggle de modo
+        de desenho. Usar QWidget.hide/show para contornar os overrides que
+        alterariam _active e disparariam lógica de passthrough.
+        """
+        if not self._layer_shell_active or not self._lsw_ptr:
+            return
+        import layershell as _ls
+        _ls.set_layer(self._lsw_ptr, layer)
+        QWidget.hide(self)
+        QWidget.show(self)
+        self.clearMask()
+        self._refresh_cursor()
+        self.update()
+
     def change_screen(self, screen):
         """Move o overlay para outro monitor (layer-shell).
 
