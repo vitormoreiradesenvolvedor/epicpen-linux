@@ -730,9 +730,12 @@ class ToolbarWindow(QWidget):
         y = btn_local.y() + (self._tt_widget.height() - lbl_h) // 2
         y = max(0, min(y, self.height() - lbl_h))
         self._tt_label.move(_W + 4, y)
-        # Remove a restrição de tamanho do layout e expande a janela
+        new_w = _W + lbl_w + 8
+        # setFixedWidth deixa maximumWidth=_W; precisa remover antes de resize
         self._root_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
-        self.resize(_W + lbl_w + 8, self.height())
+        self.setMinimumWidth(new_w)
+        self.setMaximumWidth(new_w)
+        self.resize(new_w, self.height())
         self._tt_label.show()
         self._tt_label.raise_()
 
@@ -743,6 +746,7 @@ class ToolbarWindow(QWidget):
         if self._tt_label.isVisible():
             self._tt_label.hide()
             self._root_layout.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
+            self.setFixedWidth(_W)
             self.adjustSize()
 
     # ── Helpers ───────────────────────────────────────────────────────────────
