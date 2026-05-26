@@ -489,11 +489,12 @@ def _get_wl_surface(widget) -> "int | None":
     """Devolve wl_surface* do widget.
 
     Caminho 1: NIF nativeResourceForWindow(b"surface", wh).
-    Caminho 2: QWindow::handle() [símbolo público em libQt6Gui] → QPlatformWindow*
-               → QWaylandWindow* (subtraindo 8, offset da base QPlatformWindow)
-               → vtable[2] = surface() const  (índice 2 após os dois destrutores virtuais)
-               → validado com wl_proxy_get_class(b"wl_surface").
-               Necessário porque QWaylandWindow::surface() tem visibility=hidden no pip.
+    Caminho 2: QWindow::handle() → QPlatformWindow* → QWaylandWindow* (offset -16)
+               → vtable[2] = surface() const.
+               QPlatformWindow está em +16 no QWaylandWindow, provado pelo thunk
+               _ZThn16_NK15QtWaylandClient14QWaylandWindow6formatEv no backtrace.
+               NUNCA tentar outros offsets: offset incorreto chama format() em vez de
+               surface(), corrompendo a pilha com QSurfaceFormat copy ctor → SIGSEGV.
     """
     try:
         wh = widget.windowHandle()
@@ -521,16 +522,13 @@ def _get_wl_surface(widget) -> "int | None":
             except OSError:
                 pass
         if qtgui is None:
-            print("[layershell] _get_wl_surface: libQt6Gui não encontrada")
             return None
 
-        # QPlatformWindow* QWindow::handle() const  [exportado em libQt6Gui]
         handle_fn = qtgui["_ZNK7QWindow6handleEv"]
         handle_fn.restype  = ctypes.c_void_p
         handle_fn.argtypes = [ctypes.c_void_p]
         platform_win = handle_fn(ctypes.c_void_p(qwin_ptr))
         if not platform_win:
-            print("[layershell] _get_wl_surface: QWindow::handle() NULL")
             return None
 
         wl = _get_wl_client()
@@ -540,41 +538,24 @@ def _get_wl_surface(widget) -> "int | None":
         wl.wl_proxy_get_class.restype  = ctypes.c_char_p
         wl.wl_proxy_get_class.argtypes = [ctypes.c_void_p]
 
-        # Layout de QWaylandWindow:
-        #   offset 0: vptr → vtable de QNativeInterface::Private::QWaylandWindow
-        #             vtable[0]=D1 destrutor, vtable[1]=D0 destrutor, vtable[2]=surface()
-        #   offset 16: QPlatformWindow (segunda base)
-        # handle() devolve QPlatformWindow* = QWaylandWindow* + 16 → subtrai 16.
-        # Provado pelo thunk _ZThn16_NK15QtWaylandClient14QWaylandWindow6formatEv no backtrace.
+        # QPlatformWindow* = QWaylandWindow* + 16; só usamos offset 16.
+        # Se surface() retorna NULL, a superfície ainda não foi mapeada — retorna None.
+        qwayland_win = platform_win - 16
+        if qwayland_win <= 0:
+            return None
+        vtable_ptr = ctypes.cast(qwayland_win, ctypes.POINTER(ctypes.c_uint64))[0]
+        if not vtable_ptr:
+            return None
+        fn_ptr = ctypes.cast(vtable_ptr + 16, ctypes.POINTER(ctypes.c_uint64))[0]
+        if not fn_ptr:
+            return None
         SURFACE_FN = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p)
-
-        for obj_offset in (16, 8, 0):
-            qwayland_win = platform_win - obj_offset
-            if qwayland_win <= 0:
-                continue
-            try:
-                # Lê vtable pointer (primeiros 8 bytes do objecto)
-                vtable_ptr = ctypes.cast(
-                    qwayland_win, ctypes.POINTER(ctypes.c_uint64)
-                )[0]
-                if not vtable_ptr:
-                    continue
-                # vtable[2] = surface() const  (offset 16 = 2 × 8 bytes)
-                fn_ptr = ctypes.cast(
-                    vtable_ptr + 16, ctypes.POINTER(ctypes.c_uint64)
-                )[0]
-                if not fn_ptr:
-                    continue
-                sf = SURFACE_FN(fn_ptr)(ctypes.c_void_p(qwayland_win))
-                if sf and sf > 0x1000:
-                    cls = wl.wl_proxy_get_class(ctypes.c_void_p(sf))
-                    if cls == b"wl_surface":
-                        print(f"[layershell] wl_surface via vtable obj_off={obj_offset}: {hex(sf)}")
-                        return sf
-            except Exception:
-                pass
-
-        print("[layershell] _get_wl_surface: vtable não retornou wl_surface válido")
+        sf = SURFACE_FN(fn_ptr)(ctypes.c_void_p(qwayland_win))
+        if sf and sf > 0x1000:
+            cls = wl.wl_proxy_get_class(ctypes.c_void_p(sf))
+            if cls == b"wl_surface":
+                print(f"[layershell] wl_surface via vtable: {hex(sf)}")
+                return sf
         return None
     except Exception as e:
         print(f"[layershell] _get_wl_surface erro: {e}")
@@ -647,8 +628,6 @@ def clear_input_region(widget) -> bool:
     wl = _get_wl_client()
     if wl is None:
         return False
-    if _wl_display_ptr is None:
-        _cache_wl_globals(widget)
     surface = _get_wl_surface(widget)
     display = _wl_display_ptr
     if not surface:
