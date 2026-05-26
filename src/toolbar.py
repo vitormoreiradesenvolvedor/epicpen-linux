@@ -48,6 +48,13 @@ _STYLE = """
     }
 """
 
+# Durante drag: hover visualmente idêntico ao estado normal — evita flickering
+# causado por Enter/Leave que o compositor Wayland envia à medida que a superfície se move.
+_STYLE_DRAG = _STYLE.replace(
+    "QPushButton:hover  { background: rgba(255,255,255,30); }",
+    "QPushButton:hover  { background: transparent; }",
+)
+
 # Estilo colapsado: frame transparente, sem borda — só o ícone fica visível
 _STYLE_COLLAPSED = """
     QFrame#toolbar { background: transparent; border: none; }
@@ -951,9 +958,11 @@ class ToolbarWindow(QWidget):
                 delta = event.scenePosition().toPoint() - self._drag_start
                 if abs(delta.x()) + abs(delta.y()) >= 6:
                     self._dragging = True
-                    # Congela repaint dos filhos: impede hover-state de causar flickering
                     self._tt_timer.stop()
-                    self._container.setUpdatesEnabled(False)
+                    # Remove hover visual dos botões durante drag; evita flickering
+                    # causado por Enter/Leave que o Wayland envia conforme a superfície move
+                    if not self._collapsed:
+                        self._container.setStyleSheet(_STYLE_DRAG)
                     if not self._lsw_ptr and self.parent() is None:
                         # GNOME/sem layer-shell: pede ao compositor para mover a janela.
                         # startSystemMove() envia xdg_toplevel_move; o compositor trata
@@ -986,8 +995,8 @@ class ToolbarWindow(QWidget):
             self._drag_start  = None
             self._dragging    = False
             if was_dragging:
-                self._container.setUpdatesEnabled(True)
-                self._container.update()
+                if not self._collapsed:
+                    self._container.setStyleSheet(_STYLE)
                 if self._lsw_ptr:
                     cursor_abs = event.scenePosition().toPoint() + self._lsw_pos
                     new_screen = self._screen_at(cursor_abs)
