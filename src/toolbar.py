@@ -549,8 +549,13 @@ class ToolbarWindow(QWidget):
     # ── Text tool ─────────────────────────────────────────────────────────────
 
     def _on_text_placement_requested(self, pos):
+        if self._drawing_active:
+            self._overlay.set_passthrough(True)
         dlg = TextDialog(self._current_color, parent=self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
+        if self._drawing_active:
+            self._overlay.set_passthrough(False)
+        if accepted:
             self._overlay.place_text(
                 pos, dlg.text(), dlg.font_family(), dlg.font_size(), dlg.color()
             )
@@ -558,7 +563,11 @@ class ToolbarWindow(QWidget):
     # ── Color ─────────────────────────────────────────────────────────────────
 
     def _pick_color(self):
+        if self._drawing_active:
+            self._overlay.set_passthrough(True)
         color = QColorDialog.getColor(self._current_color, self, "Escolher cor")
+        if self._drawing_active:
+            self._overlay.set_passthrough(False)
         if color.isValid():
             self._current_color = color
             self._overlay.set_color(color)
@@ -581,7 +590,11 @@ class ToolbarWindow(QWidget):
         self.adjustSize()
 
     def _pick_whiteboard_bg(self):
+        if self._drawing_active:
+            self._overlay.set_passthrough(True)
         color = QColorDialog.getColor(self._wb_bg_color, self, "Cor do fundo do quadro")
+        if self._drawing_active:
+            self._overlay.set_passthrough(False)
         if color.isValid():
             self._wb_bg_color = color
             self._overlay.set_whiteboard_bg(color)
