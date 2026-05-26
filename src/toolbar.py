@@ -492,11 +492,18 @@ class ToolbarWindow(QWidget):
     # ── Text tool ─────────────────────────────────────────────────────────────
 
     def _on_text_placement_requested(self, pos):
+        was_drawing = self._drawing_active
+        if was_drawing:
+            self._btn_toggle.setChecked(True)
+            self._toggle_drawing(True)
         dlg = TextDialog(self._current_color, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._overlay.place_text(
                 pos, dlg.text(), dlg.font_family(), dlg.font_size(), dlg.color()
             )
+        if was_drawing:
+            self._btn_toggle.setChecked(False)
+            self._toggle_drawing(False)
 
     # ── Color ─────────────────────────────────────────────────────────────────
 
