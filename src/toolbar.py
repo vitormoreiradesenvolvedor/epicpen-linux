@@ -176,6 +176,15 @@ class ToolbarWindow(QWidget):
         self._edge_timer.setInterval(150)
         self._edge_timer.timeout.connect(self._check_edge_reveal)
 
+        # Coalescer de posição de drag: agrupa todas as posições recebidas num ciclo
+        # do event loop numa única move_to()+repaint() — evita enviar ao compositor
+        # dezenas de commits com buffer desatualizado por frame.
+        self._drag_commit_timer = QTimer(self)
+        self._drag_commit_timer.setInterval(0)
+        self._drag_commit_timer.setSingleShot(True)
+        self._drag_commit_timer.timeout.connect(self._flush_drag_pos)
+        self._drag_pending_pos: "QPoint | None" = None
+
         self._setup_window()
         self._build_ui()
         self._install_event_filters()
@@ -896,6 +905,23 @@ class ToolbarWindow(QWidget):
         self.show()
         layershell.move_to(self._lsw_ptr, rel.x(), rel.y())
 
+    def _flush_drag_pos(self):
+        """Aplica ao compositor a última posição acumulada durante o drag.
+
+        Chamado pelo _drag_commit_timer (interval=0): dispara uma vez por ciclo do
+        event loop após todas as MouseMove serem processadas. Envia uma única
+        layershell.move_to() + repaint() por frame em vez de uma por evento de rato.
+        """
+        if self._drag_pending_pos is None or not self._lsw_ptr:
+            return
+        pos = self._drag_pending_pos
+        self._drag_pending_pos = None
+        scr = self._current_screen
+        origin = scr.geometry().topLeft() if scr else QPoint(0, 0)
+        rel = pos - origin
+        layershell.move_to(self._lsw_ptr, rel.x(), rel.y())
+        self.repaint()  # imediato: commit buffer sincronizado com a posição
+
     # ── Drag + event filter ───────────────────────────────────────────────────
 
     def _install_event_filters(self):
@@ -979,11 +1005,12 @@ class ToolbarWindow(QWidget):
                 if self.parent() is not None:
                     self.move(new_pos)
                 else:
-                    scr = self._current_screen
-                    origin = scr.geometry().topLeft() if scr else QPoint(0, 0)
-                    rel = new_pos - origin
-                    layershell.move_to(self._lsw_ptr, rel.x(), rel.y())
-                    self.update()
+                    # Layer-shell: acumula posição; timer (interval=0) aplica uma vez
+                    # por ciclo do event loop com repaint() imediato — sincroniza
+                    # wl_surface.commit() da posição com o commit do buffer.
+                    self._drag_pending_pos = new_pos
+                    if not self._drag_commit_timer.isActive():
+                        self._drag_commit_timer.start()
                 self._lsw_pos = new_pos
                 return True
             if self._dragging:
@@ -995,9 +1022,17 @@ class ToolbarWindow(QWidget):
             self._drag_start  = None
             self._dragging    = False
             if was_dragging:
+                self._drag_commit_timer.stop()
                 if not self._collapsed:
                     self._container.setStyleSheet(_STYLE)
                 if self._lsw_ptr:
+                    # Aplica posição final pendente (se o timer não chegou a disparar)
+                    if self._drag_pending_pos is not None:
+                        _fp = self._drag_pending_pos
+                        self._drag_pending_pos = None
+                        scr = self._current_screen
+                        origin = scr.geometry().topLeft() if scr else QPoint(0, 0)
+                        layershell.move_to(self._lsw_ptr, (_fp - origin).x(), (_fp - origin).y())
                     cursor_abs = event.scenePosition().toPoint() + self._lsw_pos
                     new_screen = self._screen_at(cursor_abs)
                     if new_screen and new_screen != self._current_screen:
