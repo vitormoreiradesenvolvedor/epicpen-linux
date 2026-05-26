@@ -551,8 +551,9 @@ class ToolbarWindow(QWidget):
     def _pre_dialog(self) -> bool:
         """Prepara overlay para abrir diálogo. Retorna was_drawing.
 
-        Layer-shell: baixa overlay para LAYER_BOTTOM — diálogo (xdg_toplevel)
-        fica acima, mas os desenhos permanecem visíveis no fundo.
+        Layer-shell: baixa overlay para LAYER_BOTTOM (diálogo xdg_toplevel fica
+        visualmente acima dos desenhos) e esvazia o input region para que o
+        compositor entregue todos os eventos ao diálogo.
         Embed/X11: pausa o overlay normalmente via _toggle_drawing.
         """
         was_drawing = self._drawing_active
@@ -560,6 +561,7 @@ class ToolbarWindow(QWidget):
             ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
             if ov_lsw:
                 layershell.set_layer(ov_lsw, layershell.LAYER_BOTTOM)
+                self._overlay.set_passthrough(True)
             else:
                 self._btn_toggle.setChecked(True)
                 self._toggle_drawing(True)
@@ -573,6 +575,7 @@ class ToolbarWindow(QWidget):
                 restore = (layershell.LAYER_OVERLAY if self._presentation_mode
                            else layershell.LAYER_TOP)
                 layershell.set_layer(ov_lsw, restore)
+                self._overlay.set_passthrough(False)
             else:
                 self._btn_toggle.setChecked(False)
                 self._toggle_drawing(False)
