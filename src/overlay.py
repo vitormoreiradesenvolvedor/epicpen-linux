@@ -1,9 +1,9 @@
 import os
 from PyQt6.QtWidgets import QWidget, QApplication
-from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF
+from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, pyqtSignal
 from PyQt6.QtGui import (
     QPainter, QPen, QColor, QScreen, QPainterPath,
-    QRadialGradient, QBrush, QPixmap,
+    QRadialGradient, QBrush, QPixmap, QFont,
 )
 from cursors import make_pen_cursor, make_eraser_cursor, make_crosshair_cursor
 
@@ -18,6 +18,10 @@ IS_WAYLAND = (
 
 class OverlayWindow(QWidget):
     """Janela transparente que cobre toda a tela para desenho."""
+
+    # Emitido quando ferramenta texto activa e o utilizador clica na tela.
+    # A toolbar conecta-se para abrir o diálogo de configuração de texto.
+    text_placement_requested = pyqtSignal(QPoint)
 
     def __init__(self):
         super().__init__()
@@ -108,6 +112,8 @@ class OverlayWindow(QWidget):
             self.setCursor(make_eraser_cursor(self._size))
         elif self._tool in ("line", "rect", "circle"):
             self.setCursor(make_crosshair_cursor())
+        elif self._tool == "text":
+            self.setCursor(Qt.CursorShape.IBeamCursor)
         else:  # pen, highlighter
             self.setCursor(make_pen_cursor(self._color))
 
@@ -130,6 +136,24 @@ class OverlayWindow(QWidget):
         self._size = size
         if self._tool == "eraser":
             self.setCursor(make_eraser_cursor(size))
+
+    def place_text(self, pos: QPoint, text: str,
+                   font_family: str, font_size: int, color: QColor):
+        """Insere um item de texto na posição indicada (coords de ecrã)."""
+        if not text.strip():
+            return
+        stroke = [(pos, {
+            "tool": "text",
+            "color": QColor(color),
+            "size": font_size,
+            "font_family": font_family,
+            "text": text,
+        })]
+        self._strokes.append(stroke)
+        self._undo_stack.clear()
+        self._ensure_canvas()
+        self._commit_stroke(stroke)
+        self.update()
 
     def embed_toolbar(self, toolbar):
         """
@@ -398,6 +422,9 @@ class OverlayWindow(QWidget):
             return
         if self._tool == "laser":
             return
+        if self._tool == "text":
+            self.text_placement_requested.emit(event.pos())
+            return
         self._drawing = True
         self._current_stroke = [(event.pos(), self._brush_props())]
         self._undo_stack.clear()
@@ -519,7 +546,13 @@ class OverlayWindow(QWidget):
         raw   = [p for p, _ in stroke]
         pts_f = [QPointF(p) for p in raw]
 
-        if tool in ("pen", "highlighter", "eraser"):
+        if tool == "text":
+            font = QFont(props.get("font_family", "Sans Serif"), props.get("size", 16))
+            painter.setFont(font)
+            painter.setPen(QPen(color))
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            painter.drawText(raw[0], props.get("text", ""))
+        elif tool in ("pen", "highlighter", "eraser"):
             if len(pts_f) == 1:
                 painter.drawPoint(pts_f[0])
             else:

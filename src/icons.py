@@ -290,6 +290,39 @@ def drag_handle() -> QIcon:
     return _make(draw)
 
 
+def text_tool() -> QIcon:
+    def draw(p):
+        p.setPen(QPen(_W, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                      Qt.PenJoinStyle.RoundJoin))
+        p.drawLine(QPointF(5, 5), QPointF(17, 5))
+        p.drawLine(QPointF(11, 5), QPointF(11, 19))
+    return _make(draw)
+
+
+def drag_tool() -> QIcon:
+    def draw(p):
+        p.setPen(QPen(_W, 1.5, Qt.PenStyle.SolidLine,
+                      Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        for pts in [
+            [(11, 2), (9, 5), (13, 5)],
+            [(11, 20), (9, 17), (13, 17)],
+            [(2, 11), (5, 9), (5, 13)],
+            [(20, 11), (17, 9), (17, 13)],
+        ]:
+            path = QPainterPath()
+            path.moveTo(*pts[0])
+            path.lineTo(*pts[1])
+            path.lineTo(*pts[2])
+            path.closeSubpath()
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(_W))
+            p.drawPath(path)
+        p.setPen(QPen(_W, 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(QPointF(11, 4), QPointF(11, 18))
+        p.drawLine(QPointF(4, 11), QPointF(18, 11))
+    return _make(draw)
+
+
 def exit_btn(hover: bool = False) -> QIcon:
     c = _R if hover else _W
     def draw(p):
