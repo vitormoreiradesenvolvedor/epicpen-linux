@@ -262,8 +262,12 @@ class OverlayWindow(QWidget):
                 wh.setMask(offscreen)
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         else:
-            # clearMask() → QWidget.setMask(empty) → QWindow.setMask(empty)
-            # → wl_surface_set_input_region(NULL) = aceita tudo + restaura rendering.
+            from PyQt6.QtGui import QRegion
+            wh = self.windowHandle()
+            if wh:
+                # clearMask() faz early-return se widget mask já era vazia (não chama
+                # QWindow.setMask) — chamar explicitamente para enviar set_input_region(NULL).
+                wh.setMask(QRegion())
             self.clearMask()
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
             if not self._layer_shell_active:
