@@ -190,7 +190,7 @@ class ToolbarWindow(QWidget):
         self._tt_label.hide()
         self._tt_timer = QTimer(self)
         self._tt_timer.setSingleShot(True)
-        self._tt_timer.setInterval(1500)
+        self._tt_timer.setInterval(1000)
         self._tt_timer.timeout.connect(self._fire_tooltip)
         self._tt_widget: "QPushButton | None" = None
 
@@ -722,7 +722,10 @@ class ToolbarWindow(QWidget):
         """Exibe o label de tooltip à direita da coluna, expandindo a janela."""
         if not self._tt_widget or not self._tt_widget.toolTip():
             return
-        self._tt_label.setText(self._tt_widget.toolTip())
+        raw = self._tt_widget.toolTip()
+        # Remove a dica de tecla no final: "Marcador (H)" → "Marcador"
+        text = raw[:raw.rfind(" (")] if " (" in raw else raw
+        self._tt_label.setText(text)
         self._tt_label.adjustSize()
         lbl_w = self._tt_label.width()
         lbl_h = self._tt_label.height()
