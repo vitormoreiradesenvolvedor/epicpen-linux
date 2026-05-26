@@ -175,6 +175,11 @@ master (protegida)
 - Novas branches devem ser criadas **a partir de `development`**
 - Mensagens de commit seguem o formato [Conventional Commits](https://www.conventionalcommits.org/)
 
+## Landing Page
+
+https://vitormoreiradesenvolvedor.github.io/epicpen-linux
+
+
 ## Contribuindo
 
 Leia [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) antes de abrir PRs.
