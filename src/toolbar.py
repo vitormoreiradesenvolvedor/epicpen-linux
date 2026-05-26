@@ -729,14 +729,14 @@ class ToolbarWindow(QWidget):
             self._hide_timer.start()
 
     def enterEvent(self, event):
+        if self._dragging:
+            return
         if self._presentation_mode:
             self._hide_timer.stop()
             self.setWindowOpacity(1.0)
-        # Wayland: puxa foco de teclado ao entrar na toolbar (não durante drag)
-        if not self._dragging:
-            self.raise_()
-            self.activateWindow()
-            self.setFocus(Qt.FocusReason.MouseFocusReason)
+        self.raise_()
+        self.activateWindow()
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
         super().enterEvent(event)
 
     def wheelEvent(self, event):
@@ -745,7 +745,7 @@ class ToolbarWindow(QWidget):
         event.accept()
 
     def leaveEvent(self, event):
-        if self._presentation_mode:
+        if self._presentation_mode and not self._dragging:
             self._hide_timer.start()
         super().leaveEvent(event)
 
@@ -951,6 +951,9 @@ class ToolbarWindow(QWidget):
                 delta = event.scenePosition().toPoint() - self._drag_start
                 if abs(delta.x()) + abs(delta.y()) >= 6:
                     self._dragging = True
+                    # Congela repaint dos filhos: impede hover-state de causar flickering
+                    self._tt_timer.stop()
+                    self._container.setUpdatesEnabled(False)
                     if not self._lsw_ptr and self.parent() is None:
                         # GNOME/sem layer-shell: pede ao compositor para mover a janela.
                         # startSystemMove() envia xdg_toplevel_move; o compositor trata
@@ -983,6 +986,8 @@ class ToolbarWindow(QWidget):
             self._drag_start  = None
             self._dragging    = False
             if was_dragging:
+                self._container.setUpdatesEnabled(True)
+                self._container.update()
                 if self._lsw_ptr:
                     cursor_abs = event.scenePosition().toPoint() + self._lsw_pos
                     new_screen = self._screen_at(cursor_abs)
