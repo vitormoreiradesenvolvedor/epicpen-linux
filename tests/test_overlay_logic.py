@@ -112,6 +112,13 @@ def _make_qt_stubs():
     qtcore.QRect   = MagicMock
     qtcore.QRectF  = MagicMock
     qtcore.QTimer  = _QTimer
+    # pyqtSignal stub: classe que ignora o tipo e age como descritor no-op
+    class _Signal:
+        def __init__(self, *a): pass
+        def connect(self, *a): pass
+        def emit(self, *a): pass
+        def __get__(self, obj, cls): return self
+    qtcore.pyqtSignal = lambda *a: _Signal()
 
     # QtGui
     qtgui.QPainter        = _QPainter
@@ -122,6 +129,7 @@ def _make_qt_stubs():
     qtgui.QRadialGradient = MagicMock
     qtgui.QBrush          = MagicMock
     qtgui.QPixmap         = _QPixmap
+    qtgui.QFont           = MagicMock
 
 
 _make_qt_stubs()
