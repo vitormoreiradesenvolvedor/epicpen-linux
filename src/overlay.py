@@ -399,6 +399,7 @@ class OverlayWindow(QWidget):
             self._wb_pan = QPointF(0.0, 0.0)
             self._wb_zoom = 1.0
             self._wb_panning = False
+            self._canvas = None  # força rebuild com os strokes desenhados no whiteboard
         self._update_tracking()
         self.update()
 
