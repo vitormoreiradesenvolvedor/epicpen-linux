@@ -133,6 +133,7 @@ def main():
     toolbar._lsw_pos = _tb_abs  # coordenadas absolutas — referência interna
 
     overlay._layer_shell_active = bool(_lsw_o)
+    overlay._lsw_ptr = _lsw_o   # ponteiro para mudança dinâmica de layer
 
     # Wayland sem wlr-layer-shell (GNOME): embute a toolbar no overlay para evitar
     # z-ordering entre janelas separadas (apps aparecem entre toolbar e overlay).
@@ -142,7 +143,10 @@ def main():
         # Quando o overlay é remapeado (set_active True após estar escondido), ele fica
         # acima do toolbar na z-order de Layer::Top. Remapear o toolbar logo depois
         # devolve-o ao topo. O hide+show sincronos são processados no mesmo frame pelo KWin.
+        # Guarda durante drag: evita piscagem causada pelo hide+show enquanto a toolbar se move.
         def _reraise_toolbar():
+            if toolbar._dragging:
+                return
             toolbar.hide()
             toolbar.show()
         overlay._on_remapped = _reraise_toolbar

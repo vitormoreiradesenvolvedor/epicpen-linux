@@ -427,6 +427,11 @@ class ToolbarWindow(QWidget):
         # Colapso pausa o desenho (como no EpicPen original)
         self._btn_toggle.setChecked(True)
         self._toggle_drawing(True)
+        # Em modo apresentação o ícone colapsado deve permanecer visível
+        if self._presentation_mode:
+            self._hide_timer.stop()
+            self.setWindowOpacity(1.0)
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         QTimer.singleShot(0, self._sync_overlay_mask)
         QTimer.singleShot(0, self._update_input_region)
 
@@ -452,6 +457,9 @@ class ToolbarWindow(QWidget):
         self._toggle_drawing(False)
         QTimer.singleShot(0, self._sync_overlay_mask)
         QTimer.singleShot(0, self._update_input_region)
+        # Em modo apresentação retoma o timer de auto-esconder após expandir
+        if self._presentation_mode:
+            self._hide_timer.start()
 
     def _update_input_region(self):
         """Restringe input ao botão logo quando colapsado; sem máscara ao expandir."""
@@ -676,14 +684,27 @@ class ToolbarWindow(QWidget):
         if checked:
             self._edge_timer.start()
             self._hide_timer.start()
+            # Sobe para LAYER_OVERLAY para ficar acima de apps fullscreen
+            if self._lsw_ptr:
+                layershell.set_layer(self._lsw_ptr, layershell.LAYER_OVERLAY)
+            _ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
+            if _ov_lsw:
+                layershell.set_layer(_ov_lsw, layershell.LAYER_OVERLAY)
         else:
             self._edge_timer.stop()
             self._hide_timer.stop()
             self.show()
             self.setWindowOpacity(1.0)
+            # Volta a LAYER_TOP quando sai do modo apresentação
+            if self._lsw_ptr:
+                layershell.set_layer(self._lsw_ptr, layershell.LAYER_TOP)
+            _ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
+            if _ov_lsw:
+                layershell.set_layer(_ov_lsw, layershell.LAYER_TOP)
 
     def _presentation_auto_hide(self):
-        if self._presentation_mode:
+        # Colapsado = ícone mínimo já visível; não esconder
+        if self._presentation_mode and not self._collapsed:
             self.setWindowOpacity(0.0)
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
@@ -691,9 +712,20 @@ class ToolbarWindow(QWidget):
         if not self._presentation_mode:
             return
         cursor = QCursor.pos()
-        if abs(cursor.x() - self.pos().x()) <= 60:
+        # self.pos() retorna (0,0) em superfícies wlr-layer-shell — usa _lsw_pos
+        # No modo embed/X11 (sem layer-shell), self.pos() é confiável
+        ref = self._lsw_pos if self._lsw_ptr is not None else self.pos()
+        tx, ty = ref.x(), ref.y()
+        th = max(self.height(), 100)
+        near_x = abs(cursor.x() - tx) <= 60
+        near_y = ty - 20 <= cursor.y() <= ty + th + 20
+        if near_x and near_y:
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
             self.setWindowOpacity(1.0)
+            self.raise_()
+            if not self._lsw_ptr:
+                import keepabove
+                keepabove.set_keepabove()
             self._hide_timer.start()
 
     def enterEvent(self, event):
