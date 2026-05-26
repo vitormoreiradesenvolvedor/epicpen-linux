@@ -463,8 +463,11 @@ class OverlayWindow(QWidget):
 
     def _find_stroke_at(self, pos: QPoint) -> "int | None":
         """Retorna o índice do stroke cujo círculo de arrasto contém pos."""
-        px, py = pos.x(), pos.y()
-        r2 = self._DRAG_HANDLE_R ** 2
+        # Converte pos de ecrã para canvas; o raio também fica em unidades de canvas
+        cp = self._to_canvas(pos)
+        px, py = cp.x(), cp.y()
+        z = self._wb_zoom if (self._whiteboard and self._wb_zoom != 0) else 1.0
+        r2 = (self._DRAG_HANDLE_R / z) ** 2
         best_idx, best_dist2 = None, float("inf")
         for i, stroke in enumerate(self._strokes):
             if not stroke:
@@ -589,9 +592,12 @@ class OverlayWindow(QWidget):
 
         if self._tool == "drag":
             if self._drawing and self._drag_stroke_idx is not None:
-                delta = QPoint(pos.x() - self._drag_last_pos.x(),
-                               pos.y() - self._drag_last_pos.y())
-                self._translate_stroke(self._drag_stroke_idx, delta)
+                dx = pos.x() - self._drag_last_pos.x()
+                dy = pos.y() - self._drag_last_pos.y()
+                if self._whiteboard and self._wb_zoom != 0:
+                    dx /= self._wb_zoom
+                    dy /= self._wb_zoom
+                self._translate_stroke(self._drag_stroke_idx, QPointF(dx, dy))
                 self._drag_last_pos = pos
                 self._canvas = None
                 self.update()
@@ -718,6 +724,8 @@ class OverlayWindow(QWidget):
                 self._draw_stroke(wb_p, stroke)
             if self._current_stroke:
                 self._draw_stroke(wb_p, self._current_stroke)
+            if self._tool == "drag" and self._strokes:
+                self._draw_drag_handles(wb_p)
             wb_p.end()
             painter.drawPixmap(0, 0, wb_px)
         else:
@@ -729,9 +737,8 @@ class OverlayWindow(QWidget):
                 painter.drawPixmap(0, 0, self._canvas)
                 if self._current_stroke:
                     self._draw_stroke(painter, self._current_stroke)
-
-        if self._tool == "drag" and self._strokes:
-            self._draw_drag_handles(painter)
+            if self._tool == "drag" and self._strokes:
+                self._draw_drag_handles(painter)
 
         if self._tool == "laser" and self._laser_pos:
             self._draw_laser(painter)
