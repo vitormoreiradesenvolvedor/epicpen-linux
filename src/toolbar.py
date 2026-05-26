@@ -142,8 +142,9 @@ class ToolbarWindow(QWidget):
         self._drag_start_screen = None   # cursor em coords de ecrã no press
         self._drag_start_pos    = None   # _lsw_pos snapshot no início do drag
         self._dragging          = False  # True após exceder o threshold
-        self._lsw_ptr        = None   # LayerShellQt::Window* se layer-shell ativo
-        self._drawing_active = True
+        self._lsw_ptr           = None   # LayerShellQt::Window* se layer-shell ativo
+        self._drawing_active    = True
+        self._passthrough_active = False  # True quando no modo seta (visível + sem input)
         self._magnifier = MagnifierWindow()
         self._cfg       = config or {}
         self._tray      = None
@@ -370,11 +371,18 @@ class ToolbarWindow(QWidget):
         lay.addWidget(self._btn_present, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         self._btn_toggle = self._mk_btn(
-            "Pausar/retomar desenho\nClic esquerdo | Tab | Botão direito na toolbar"
+            "Modo seta: desenhos visíveis, interaja com apps abaixo"
         )
         self._btn_toggle.setIcon(icons.mouse_pause())
-        self._btn_toggle.clicked.connect(self._toggle_drawing)
+        self._btn_toggle.clicked.connect(self._toggle_passthrough)
         lay.addWidget(self._btn_toggle, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        self._add_sep(lay)
+
+        self._btn_exit = self._mk_btn("Sair", checkable=False)
+        self._btn_exit.setIcon(icons.exit_btn())
+        self._btn_exit.clicked.connect(self._quit_app)
+        lay.addWidget(self._btn_exit, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         return w
 
@@ -461,6 +469,9 @@ class ToolbarWindow(QWidget):
         """
         if self._collapsed:
             self._do_expand()
+        elif self._passthrough_active:
+            self._btn_toggle.setChecked(False)
+            self._toggle_passthrough(False)
         elif not self._drawing_active:
             self._btn_toggle.setChecked(False)
             self._toggle_drawing(False)
@@ -477,6 +488,15 @@ class ToolbarWindow(QWidget):
     # ── Tool selection ────────────────────────────────────────────────────────
 
     def _select_tool(self, tool: str):
+        # Ao selecionar ferramenta, sai de qualquer modo de pausa
+        if self._passthrough_active:
+            self._btn_toggle.setChecked(False)
+            self._toggle_passthrough(False)
+        elif self._btn_toggle.isChecked():
+            self._btn_toggle.setChecked(False)
+            self._drawing_active = True
+            self._overlay.set_active(True)
+            self._btn_toggle.setIcon(icons.mouse_pause())
         for b in self._tool_buttons:
             b.setChecked(False)
         btn_map = {
@@ -545,15 +565,66 @@ class ToolbarWindow(QWidget):
         self._zoom_slider.setVisible(checked)
         self.adjustSize()
 
+    def _toggle_passthrough(self, checked: bool):
+        """Botão seta: modo pass-through — desenhos visíveis, input vai para apps."""
+        self._passthrough_active = checked
+        self._drawing_active = not checked
+        if checked:
+            # Entra em pass-through: overlay visível, sem input
+            self._overlay.set_passthrough(True)
+            self._btn_toggle.setIcon(icons.mouse_active())
+            for b in self._tool_buttons:
+                b.setChecked(False)
+        else:
+            # Sai do pass-through: retoma desenho (garante overlay visível)
+            self._overlay.set_passthrough(False)
+            self._overlay.set_active(True)
+            self._btn_toggle.setIcon(icons.mouse_pause())
+            self._restore_tool_button()
+            QTimer.singleShot(100, self._reaffirm_top)
+
+    def _restore_tool_button(self):
+        """Remarca o botão da ferramenta activa."""
+        btn_map = {
+            "pen": self._btn_pen, "highlighter": self._btn_hl,
+            "line": self._btn_line, "rect": self._btn_rect,
+            "circle": self._btn_circle, "eraser": self._btn_eraser,
+            "laser": self._btn_laser,
+        }
+        tool = getattr(self._overlay, "_tool", "pen")
+        for b in self._tool_buttons:
+            b.setChecked(False)
+        if tool in btn_map:
+            btn_map[tool].setChecked(True)
+
     def _toggle_drawing(self, checked: bool):
+        """Pausa/retoma o overlay completamente (colapso, Tab, botão direito).
+
+        Quando checked=True, o overlay fica OCULTO (desenhos somem).
+        Diferente de _toggle_passthrough que mantém desenhos visíveis.
+        """
+        # Se estava em pass-through, sai dele antes de ocultar
+        if self._passthrough_active:
+            self._overlay.set_passthrough(False)
+            self._passthrough_active = False
+            self._btn_toggle.setChecked(checked)
+
         self._drawing_active = not checked
         self._overlay.set_active(self._drawing_active)
         self._btn_toggle.setIcon(icons.mouse_active() if checked else icons.mouse_pause())
-        if self._drawing_active:
-            # Ativa uma vez para que KWin/Wayland registre o estado "always on top"
-            QTimer.singleShot(100, self._reaffirm_top)
+        if checked:
+            for b in self._tool_buttons:
+                b.setChecked(False)
+        else:
+            self._restore_tool_button()
+            if self._drawing_active:
+                QTimer.singleShot(100, self._reaffirm_top)
 
     # ── Presentation mode ─────────────────────────────────────────────────────
+
+    def _quit_app(self):
+        from PyQt6.QtWidgets import QApplication
+        QApplication.instance().quit()
 
     def _toggle_presentation(self, checked: bool):
         self._presentation_mode = checked
@@ -715,6 +786,13 @@ class ToolbarWindow(QWidget):
 
     def eventFilter(self, obj, event):
         t = event.type()
+
+        # Botão de saída: ícone vermelho no hover
+        if obj is self._btn_exit and not self._dragging:
+            if t == QEvent.Type.Enter:
+                self._btn_exit.setIcon(icons.exit_btn(hover=True))
+            elif t == QEvent.Type.Leave:
+                self._btn_exit.setIcon(icons.exit_btn())
 
         # Suprime hover/enter/leave em filhos durante drag — evita piscar dos botões
         if self._dragging and t in (
