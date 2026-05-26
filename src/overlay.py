@@ -755,6 +755,17 @@ class OverlayWindow(QWidget):
         if self._tool == "drag":
             if self._drawing:
                 self._drawing = False
+                idx = self._drag_stroke_idx
+                if idx is not None:
+                    # Traz o stroke arrastado + erasers ancorados para o topo da z-order.
+                    # Sem isso, um eraser com índice maior apagaria o stroke durante
+                    # _rebuild_canvas mesmo que o stroke tenha sido movido para cima dele.
+                    indices = sorted(set([idx] + self._drag_linked_erasers))
+                    strokes_to_move = [self._strokes[i] for i in indices]
+                    for i in reversed(indices):
+                        del self._strokes[i]
+                    self._strokes.extend(strokes_to_move)
+                    self._canvas = None
                 self._drag_stroke_idx = None
                 self._drag_linked_erasers = []
                 self._drag_last_pos = None
