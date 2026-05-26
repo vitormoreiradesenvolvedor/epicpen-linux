@@ -15,6 +15,22 @@ class _QPoint:
         self.x_val, self.y_val = x, y
     def x(self): return self.x_val
     def y(self): return self.y_val
+    def __sub__(self, other):
+        return _QPoint(self.x_val - other.x_val, self.y_val - other.y_val)
+
+
+class _QPointF(_QPoint):
+    """Stub de QPointF com suporte a += (usado em _wb_pan)."""
+    def __init__(self, x=0.0, y=0.0):
+        if isinstance(x, (_QPoint, _QPointF)):
+            self.x_val, self.y_val = float(x.x_val), float(x.y_val)
+        else:
+            self.x_val, self.y_val = float(x), float(y)
+    def __iadd__(self, other):
+        if isinstance(other, (_QPoint, _QPointF)):
+            self.x_val += other.x_val
+            self.y_val += other.y_val
+        return self
 
 
 class _QColor:
@@ -22,7 +38,7 @@ class _QColor:
         if isinstance(s, _QColor):
             self._name = s._name
         else:
-            self._name = s.lower()
+            self._name = s.lower() if isinstance(s, str) else "#000000"
     def name(self): return self._name
 
 
@@ -92,10 +108,17 @@ def _make_qt_stubs():
     # QtCore
     qtcore.Qt      = MagicMock()
     qtcore.QPoint  = _QPoint
-    qtcore.QPointF = _QPoint   # mesmo stub; aceita QPoint como argumento
+    qtcore.QPointF = _QPointF
     qtcore.QRect   = MagicMock
     qtcore.QRectF  = MagicMock
     qtcore.QTimer  = _QTimer
+    # pyqtSignal stub: classe que ignora o tipo e age como descritor no-op
+    class _Signal:
+        def __init__(self, *a): pass
+        def connect(self, *a): pass
+        def emit(self, *a): pass
+        def __get__(self, obj, cls): return self
+    qtcore.pyqtSignal = lambda *a: _Signal()
 
     # QtGui
     qtgui.QPainter        = _QPainter
@@ -106,6 +129,7 @@ def _make_qt_stubs():
     qtgui.QRadialGradient = MagicMock
     qtgui.QBrush          = MagicMock
     qtgui.QPixmap         = _QPixmap
+    qtgui.QFont           = MagicMock
 
 
 _make_qt_stubs()
@@ -143,6 +167,12 @@ def overlay():
     ov._spotlight_radius = 150
     ov._canvas           = None
     ov._erase_scratch    = None
+    ov._wb_pan           = _QPointF(0.0, 0.0)
+    ov._wb_zoom          = 1.0
+    ov._wb_bg            = _QColor("#ffffff")
+    ov._wb_panning       = False
+    ov._wb_pan_start_mouse = None
+    ov._wb_pan_start_val   = None
     ov.update            = MagicMock()
     ov._update_tracking  = MagicMock()
     return ov
@@ -235,3 +265,44 @@ def test_brush_props_contains_tool_and_size(overlay):
     props = overlay._brush_props()
     assert props["tool"] == "highlighter"
     assert props["size"] == 7
+
+
+def test_set_whiteboard_resets_pan(overlay):
+    overlay._wb_pan = _QPointF(100.0, 200.0)
+    overlay.set_whiteboard(True)
+    overlay.set_whiteboard(False)
+    assert overlay._wb_pan.x_val == 0.0
+    assert overlay._wb_pan.y_val == 0.0
+
+
+def test_set_whiteboard_bg_updates_color(overlay):
+    overlay._wb_bg = _QColor("#ffffff")
+    overlay.set_whiteboard_bg(_QColor("#aabbcc"))
+    assert overlay._wb_bg.name() == "#aabbcc"
+
+
+def test_to_canvas_no_offset_when_pan_zero(overlay):
+    pos = _QPoint(100, 200)
+    result = overlay._to_canvas(pos)
+    assert result.x() == 100
+    assert result.y() == 200
+
+
+def test_to_canvas_subtracts_pan_in_whiteboard(overlay):
+    overlay._whiteboard = True
+    overlay._wb_pan = _QPointF(30.0, 50.0)
+    pos = _QPoint(130, 250)
+    result = overlay._to_canvas(pos)
+    assert result.x() == 100
+    assert result.y() == 200
+
+
+def test_redo_does_not_use_canvas_in_whiteboard(overlay):
+    stroke = [(_QPoint(0, 0), {"tool": "pen", "color": None, "size": 3})]
+    overlay._strokes.append(stroke)
+    overlay.undo()
+    overlay._whiteboard = True
+    overlay.redo()
+    assert len(overlay._strokes) == 1
+    # Em modo whiteboard, _canvas não deve ser criado pelo redo
+    assert overlay._canvas is None
