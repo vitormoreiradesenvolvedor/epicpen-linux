@@ -17,17 +17,9 @@ if ("gnome" in _xdg
     _os.environ["QT_QPA_PLATFORM"] = "xcb"
     print("[gnome] GNOME Wayland detectado — usando XWayland (QT_QPA_PLATFORM=xcb)")
 
-from PyQt6.QtWidgets import QApplication, QProxyStyle, QStyle, QMessageBox
+from PyQt6.QtWidgets import QApplication, QMessageBox
 from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QAction
-
-
-class _LongTooltipStyle(QProxyStyle):
-    """Atrasa a exibição de tooltips para 1500 ms (padrão do Qt é ~700 ms)."""
-    def styleHint(self, hint, option=None, widget=None, returnData=None):
-        if hint == QStyle.StyleHint.SH_ToolTip_WakeUpDelay:
-            return 1500
-        return super().styleHint(hint, option, widget, returnData)
 
 
 def _show_about(overlay):
@@ -63,16 +55,6 @@ def main():
     app.setApplicationName("EpicPen")
     app.setApplicationVersion("1.0.5")
     app.setQuitOnLastWindowClosed(False)
-    app.setStyle(_LongTooltipStyle())
-    app.setStyleSheet("""
-        QToolTip {
-            background-color: #1e1e1e;
-            color: #ffffff;
-            border: 1px solid rgba(255,255,255,50);
-            border-radius: 4px;
-            padding: 4px 8px;
-        }
-    """)
 
     settings = cfg.load()
 
