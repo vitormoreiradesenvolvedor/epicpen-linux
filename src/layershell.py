@@ -205,3 +205,442 @@ def _set_margins(lib, lsw_ptr: int, x: int, y: int) -> None:
     fn.argtypes = [ctypes.c_void_p, ctypes.POINTER(_QMargins)]
     m = _QMargins(m_left=x, m_top=y, m_right=0, m_bottom=0)
     fn(ctypes.c_void_p(lsw_ptr), ctypes.byref(m))
+
+
+# ── Wayland input-region direto ───────────────────────────────────────────────
+# Qt mapeia setMask(QRegion()) → set_input_region(NULL) = aceita tudo (errado).
+# A diferença protocolar:
+#   NULL          → aceita input em toda a superfície
+#   empty_region  → rejeita todo input (wl_region sem rectângulos)
+# Só o caminho direto via libwayland-client garante o comportamento correto.
+
+_wl_client      = None
+_wl_compositor  = None   # wl_compositor* cacheado em apply()
+_wl_display_ptr = None   # wl_display*    cacheado em apply()
+
+
+def _get_wl_client():
+    global _wl_client
+    if _wl_client is not None:
+        return _wl_client
+    for name in ("libwayland-client.so.0", "libwayland-client.so"):
+        try:
+            _wl_client = ctypes.CDLL(name)
+            return _wl_client
+        except OSError:
+            pass
+    print("[layershell] libwayland-client não encontrada")
+    return None
+
+
+# ── Helpers de baixo nível (wl_proxy_marshal_array_flags) ─────────────────────
+# No libwayland moderno as funções geradas do protocolo (wl_display_get_registry,
+# wl_compositor_create_region, wl_surface_set_input_region, etc.) são static inline
+# no header — não existem como símbolos na .so. Usamos wl_proxy_marshal_array_flags
+# (não variádica, sempre exportada) em substituição.
+
+_wl_iface_addrs: dict = {}
+
+
+def _wl_iface_addr(wl, sym: str) -> int:
+    """Endereço do wl_interface* com o símbolo dado (data section de libwayland-client)."""
+    if sym not in _wl_iface_addrs:
+        class _I(ctypes.Structure):
+            _fields_ = [("_", ctypes.c_byte)]
+        _wl_iface_addrs[sym] = ctypes.addressof(_I.in_dll(wl, sym))
+    return _wl_iface_addrs[sym]
+
+
+def _wl_iface_name_ptr(wl, sym: str) -> int:
+    """Endereço da string name dentro de wl_interface (primeiro campo: const char*)."""
+    class _I(ctypes.Structure):
+        _fields_ = [("name", ctypes.c_void_p)]
+    return _I.in_dll(wl, sym).name  # int = endereço estático da string de nome
+
+
+def _wl_ver(wl, proxy: int) -> int:
+    fn = wl.wl_proxy_get_version
+    fn.restype  = ctypes.c_uint32
+    fn.argtypes = [ctypes.c_void_p]
+    return int(fn(ctypes.c_void_p(proxy)))
+
+
+def _wl_marshal(wl, proxy: int, opcode: int,
+                iface_addr: "int | None", version: int, flags: int,
+                args: list) -> "int | None":
+    """Envolve wl_proxy_marshal_array_flags.
+
+    args: lista de int/ptr a passar como union wl_argument (8 bytes por entrada).
+    Devolve novo proxy (int) quando iface_addr != None; None caso contrário.
+    WL_MARSHAL_FLAG_DESTROY = 1: flags=1 destrói o proxy depois de enviar.
+    """
+    fn = wl.wl_proxy_marshal_array_flags
+    fn.restype  = ctypes.c_void_p
+    fn.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p,
+                   ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+    a_ptr = None
+    if args:
+        arr   = (ctypes.c_uint64 * len(args))(*args)
+        a_ptr = ctypes.byref(arr)
+    return fn(ctypes.c_void_p(proxy),
+              ctypes.c_uint32(opcode),
+              ctypes.c_void_p(iface_addr) if iface_addr is not None else None,
+              ctypes.c_uint32(version),
+              ctypes.c_uint32(flags),
+              a_ptr)
+
+
+def _get_nif():
+    """Devolve QPlatformNativeInterface ou None.
+
+    PyQt6 expõe como método de instância — não funciona como classmethod.
+    """
+    try:
+        from PyQt6.QtGui import QGuiApplication
+        app = QGuiApplication.instance()
+        if app is None:
+            return None
+        # Instância first; fallback para classmethod (alguns builds antigos)
+        for name in ("platformNativeInterface",):
+            fn = getattr(app, name, None) or getattr(QGuiApplication, name, None)
+            if callable(fn):
+                try:
+                    nif = fn()
+                    if nif is not None:
+                        return nif
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return None
+
+
+def _load_qt_wayland_client():
+    """Carrega libQt6WaylandClient.so.6 (ou variante) via ctypes."""
+    for name in ("libQt6WaylandClient.so.6", "libQt6WaylandClient.so"):
+        try:
+            return ctypes.CDLL(name)
+        except OSError:
+            pass
+    return None
+
+
+def _cache_wl_globals(widget) -> None:
+    """Cacheia wl_compositor* e wl_display*.
+
+    Caminho 1: QPlatformNativeInterface via instância QGuiApplication (builds que o expõem).
+    Caminho 2: QNativeInterface.QWaylandApplication.display() (API pública PyQt6) +
+               wl_registry roundtrip numa fila privada para obter wl_compositor* sem
+               interferir com a fila principal do Qt.
+               Necessário porque Qt6WaylandClient do pip tem símbolos internos com
+               visibility=hidden (QWaylandIntegration::instance() não exportado).
+    """
+    global _wl_compositor, _wl_display_ptr
+    if _wl_compositor is not None:
+        return
+
+    # ── Caminho 1: NIF ────────────────────────────────────────────────────────
+    try:
+        nif = _get_nif()
+        if nif is not None:
+            comp = (nif.nativeResourceForIntegration(b"compositor") or
+                    nif.nativeResourceForIntegration(b"wl_compositor"))
+            disp = (nif.nativeResourceForIntegration(b"wl_display") or
+                    nif.nativeResourceForIntegration(b"display"))
+            if comp:
+                _wl_compositor  = comp
+                _wl_display_ptr = disp
+                print(f"[layershell] wl globals via NIF: compositor={hex(comp)}")
+                return
+    except Exception as e:
+        print(f"[layershell] _cache_wl_globals NIF: {e}")
+
+    # ── Caminho 2: QNativeInterface.QWaylandApplication + wl_registry ────────
+    try:
+        from PyQt6.QtCore import QNativeInterface
+        from PyQt6.QtGui import QGuiApplication
+
+        app = QGuiApplication.instance()
+        if app is None:
+            return
+
+        wa = app.nativeInterface(QNativeInterface.QWaylandApplication)
+        if wa is None:
+            print("[layershell] QNativeInterface.QWaylandApplication indisponível")
+            return
+
+        disp_ptr = int(wa.display())
+        if not disp_ptr:
+            print("[layershell] display() NULL")
+            return
+
+        wl = _get_wl_client()
+        if wl is None:
+            return
+
+        # Fila privada: roundtrip só despacha eventos desta fila, não toca na
+        # fila principal do Qt.
+        wl.wl_display_create_queue.restype  = ctypes.c_void_p
+        wl.wl_display_create_queue.argtypes = [ctypes.c_void_p]
+        queue = wl.wl_display_create_queue(ctypes.c_void_p(disp_ptr))
+        if not queue:
+            print("[layershell] wl_display_create_queue NULL")
+            return
+
+        # wl_display.get_registry: opcode=1, sig='n' (typed new_id → wl_registry_interface)
+        # arg: NULL placeholder (wl_object*) para o new_id — libwayland cria o proxy.
+        reg_iface  = _wl_iface_addr(wl, "wl_registry_interface")
+        disp_ver   = _wl_ver(wl, disp_ptr)
+        registry   = _wl_marshal(wl, disp_ptr, 1, reg_iface, disp_ver, 0, [0])
+        if not registry:
+            print("[layershell] wl_display.get_registry NULL")
+            wl.wl_event_queue_destroy.restype  = None
+            wl.wl_event_queue_destroy.argtypes = [ctypes.c_void_p]
+            wl.wl_event_queue_destroy(ctypes.c_void_p(queue))
+            return
+
+        wl.wl_proxy_set_queue.restype  = None
+        wl.wl_proxy_set_queue.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        wl.wl_proxy_set_queue(ctypes.c_void_p(registry), ctypes.c_void_p(queue))
+
+        compositor_result = [None]
+
+        GLOBAL_CB = ctypes.CFUNCTYPE(
+            None,
+            ctypes.c_void_p,   # data
+            ctypes.c_void_p,   # registry
+            ctypes.c_uint32,   # name (global id)
+            ctypes.c_char_p,   # interface name
+            ctypes.c_uint32,   # version
+        )
+        GLOBAL_REMOVE_CB = ctypes.CFUNCTYPE(
+            None,
+            ctypes.c_void_p,   # data
+            ctypes.c_void_p,   # registry
+            ctypes.c_uint32,   # name
+        )
+
+        @GLOBAL_CB
+        def _on_global(data, reg, name, iface, ver):
+            if iface == b"wl_compositor" and compositor_result[0] is None:
+                try:
+                    # wl_registry.bind: opcode=0, sig='usun'
+                    # args: u=name, s=comp_name_ptr(char*), u=bound_ver, n=NULL(new_id)
+                    comp_iface = _wl_iface_addr(wl, "wl_compositor_interface")
+                    comp_name  = _wl_iface_name_ptr(wl, "wl_compositor_interface")
+                    bound_ver  = min(ver, 4)
+                    comp = _wl_marshal(wl, reg, 0, comp_iface, bound_ver, 0,
+                                       [name, comp_name, bound_ver, 0])
+                    if comp:
+                        # Mover compositor para a fila principal (NULL = default queue)
+                        wl.wl_proxy_set_queue(ctypes.c_void_p(comp), None)
+                        compositor_result[0] = comp
+                        print(f"[layershell] wl_compositor bound: name={name} ptr={hex(comp)}")
+                except Exception as ex:
+                    print(f"[layershell] registry bind erro: {ex}")
+
+        @GLOBAL_REMOVE_CB
+        def _on_global_remove(data, reg, name):
+            pass
+
+        class _RegistryListener(ctypes.Structure):
+            _fields_ = [
+                ("cb_global", ctypes.c_void_p),
+                ("cb_remove", ctypes.c_void_p),
+            ]
+
+        listener = _RegistryListener(
+            cb_global = ctypes.cast(_on_global,        ctypes.c_void_p).value,
+            cb_remove = ctypes.cast(_on_global_remove, ctypes.c_void_p).value,
+        )
+
+        wl.wl_proxy_add_listener.restype  = ctypes.c_int
+        wl.wl_proxy_add_listener.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+        wl.wl_proxy_add_listener(
+            ctypes.c_void_p(registry), ctypes.byref(listener), None
+        )
+
+        wl.wl_display_roundtrip_queue.restype  = ctypes.c_int
+        wl.wl_display_roundtrip_queue.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        wl.wl_display_roundtrip_queue(ctypes.c_void_p(disp_ptr), ctypes.c_void_p(queue))
+
+        # Limpar registry e fila privada (compositor já está na fila principal)
+        wl.wl_proxy_destroy.restype  = None
+        wl.wl_proxy_destroy.argtypes = [ctypes.c_void_p]
+        wl.wl_proxy_destroy(ctypes.c_void_p(registry))
+
+        wl.wl_event_queue_destroy.restype  = None
+        wl.wl_event_queue_destroy.argtypes = [ctypes.c_void_p]
+        wl.wl_event_queue_destroy(ctypes.c_void_p(queue))
+
+        if compositor_result[0]:
+            _wl_compositor  = compositor_result[0]
+            _wl_display_ptr = disp_ptr
+            print(f"[layershell] wl globals via registry: "
+                  f"compositor={hex(_wl_compositor)} display={hex(_wl_display_ptr)}")
+        else:
+            print("[layershell] wl_compositor não encontrado no registry")
+
+    except Exception as e:
+        print(f"[layershell] _cache_wl_globals registry erro: {e}")
+
+
+def _get_wl_surface(widget) -> "int | None":
+    """Devolve wl_surface* do widget.
+
+    Caminho 1: NIF nativeResourceForWindow(b"surface", wh).
+    Caminho 2: QWindow::handle() → QPlatformWindow* → QWaylandWindow* (offset -16)
+               → vtable[2] = surface() const.
+               QPlatformWindow está em +16 no QWaylandWindow, provado pelo thunk
+               _ZThn16_NK15QtWaylandClient14QWaylandWindow6formatEv no backtrace.
+               NUNCA tentar outros offsets: offset incorreto chama format() em vez de
+               surface(), corrompendo a pilha com QSurfaceFormat copy ctor → SIGSEGV.
+    """
+    try:
+        wh = widget.windowHandle()
+        if wh is None:
+            return None
+
+        # Caminho 1: NIF
+        nif = _get_nif()
+        if nif is not None:
+            sf = nif.nativeResourceForWindow(b"surface", wh)
+            if sf:
+                return sf
+
+        # Caminho 2: QWindow::handle() + vtable de QWaylandWindow
+        import PyQt6.sip as sip
+        qwin_ptr = sip.unwrapinstance(wh)
+        if not qwin_ptr:
+            return None
+
+        qtgui = None
+        for name in ("libQt6Gui.so.6", "libQt6Gui.so"):
+            try:
+                qtgui = ctypes.CDLL(name)
+                break
+            except OSError:
+                pass
+        if qtgui is None:
+            return None
+
+        handle_fn = qtgui["_ZNK7QWindow6handleEv"]
+        handle_fn.restype  = ctypes.c_void_p
+        handle_fn.argtypes = [ctypes.c_void_p]
+        platform_win = handle_fn(ctypes.c_void_p(qwin_ptr))
+        if not platform_win:
+            return None
+
+        wl = _get_wl_client()
+        if wl is None:
+            return None
+
+        wl.wl_proxy_get_class.restype  = ctypes.c_char_p
+        wl.wl_proxy_get_class.argtypes = [ctypes.c_void_p]
+
+        # QPlatformWindow* = QWaylandWindow* + 16; só usamos offset 16.
+        # Se surface() retorna NULL, a superfície ainda não foi mapeada — retorna None.
+        qwayland_win = platform_win - 16
+        if qwayland_win <= 0:
+            return None
+        vtable_ptr = ctypes.cast(qwayland_win, ctypes.POINTER(ctypes.c_uint64))[0]
+        if not vtable_ptr:
+            return None
+        fn_ptr = ctypes.cast(vtable_ptr + 16, ctypes.POINTER(ctypes.c_uint64))[0]
+        if not fn_ptr:
+            return None
+        SURFACE_FN = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p)
+        sf = SURFACE_FN(fn_ptr)(ctypes.c_void_p(qwayland_win))
+        if sf and sf > 0x1000:
+            cls = wl.wl_proxy_get_class(ctypes.c_void_p(sf))
+            if cls == b"wl_surface":
+                print(f"[layershell] wl_surface via vtable: {hex(sf)}")
+                return sf
+        return None
+    except Exception as e:
+        print(f"[layershell] _get_wl_surface erro: {e}")
+        return None
+
+
+def _wl_flush(wl, display_ptr) -> None:
+    if not display_ptr:
+        return
+    try:
+        wl.wl_display_flush.restype  = ctypes.c_int
+        wl.wl_display_flush.argtypes = [ctypes.c_void_p]
+        wl.wl_display_flush(ctypes.c_void_p(display_ptr))
+    except Exception:
+        pass
+
+
+def set_empty_input_region(widget) -> bool:
+    """Define a input region do wl_surface como vazia → rejeita todo input.
+
+    Wayland: set_input_region(empty_region) ≠ set_input_region(NULL).
+    NULL = aceita tudo; empty_region (0 rectângulos) = rejeita tudo.
+    Retorna True se bem-sucedido.
+    """
+    if not IS_WAYLAND:
+        return False
+    wl = _get_wl_client()
+    if wl is None:
+        return False
+    if _wl_compositor is None:
+        _cache_wl_globals(widget)
+    surface    = _get_wl_surface(widget)
+    compositor = _wl_compositor
+    display    = _wl_display_ptr
+    if not surface or not compositor:
+        print(f"[layershell] set_empty_input_region: surface={surface!r} "
+              f"compositor={compositor!r} — passthrough indisponível")
+        return False
+    try:
+        # wl_compositor.create_region: opcode=1, sig='n' → wl_region_interface
+        region_iface = _wl_iface_addr(wl, "wl_region_interface")
+        empty_region = _wl_marshal(wl, compositor, 1, region_iface,
+                                   _wl_ver(wl, compositor), 0, [0])
+        if not empty_region:
+            print("[layershell] set_empty_input_region: create_region NULL")
+            return False
+
+        surf_ver = _wl_ver(wl, surface)
+        # wl_surface.set_input_region: opcode=5, sig='?o', args=[empty_region]
+        _wl_marshal(wl, surface, 5, None, surf_ver, 0, [empty_region])
+        # wl_surface.commit: opcode=6, sig=''
+        _wl_marshal(wl, surface, 6, None, surf_ver, 0, [])
+        # wl_region.destroy: opcode=0, WL_MARSHAL_FLAG_DESTROY=1 (destrói o proxy)
+        _wl_marshal(wl, empty_region, 0, None, _wl_ver(wl, empty_region), 1, [])
+        _wl_flush(wl, display)
+        print("[layershell] set_empty_input_region OK")
+        return True
+    except Exception as e:
+        print(f"[layershell] set_empty_input_region erro: {e}")
+        return False
+
+
+def clear_input_region(widget) -> bool:
+    """Restaura a input region do wl_surface para NULL → aceita todo input.
+
+    Retorna True se bem-sucedido.
+    """
+    if not IS_WAYLAND:
+        return False
+    wl = _get_wl_client()
+    if wl is None:
+        return False
+    surface = _get_wl_surface(widget)
+    display = _wl_display_ptr
+    if not surface:
+        return False
+    try:
+        surf_ver = _wl_ver(wl, surface)
+        # wl_surface.set_input_region(NULL): opcode=5, sig='?o', args=[0=NULL]
+        _wl_marshal(wl, surface, 5, None, surf_ver, 0, [0])
+        # wl_surface.commit: opcode=6, sig=''
+        _wl_marshal(wl, surface, 6, None, surf_ver, 0, [])
+        _wl_flush(wl, display)
+        print("[layershell] clear_input_region OK")
+        return True
+    except Exception as e:
+        print(f"[layershell] clear_input_region erro: {e}")
+        return False

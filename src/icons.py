@@ -290,8 +290,19 @@ def drag_handle() -> QIcon:
     return _make(draw)
 
 
+def text_tool() -> QIcon:
+    def draw(p):
+        p.setPen(QPen(_W, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                      Qt.PenJoinStyle.RoundJoin))
+        p.drawLine(QPointF(5, 5), QPointF(17, 5))
+        p.drawLine(QPointF(11, 5), QPointF(11, 19))
+    return _make(draw)
+
+
 def drag_tool() -> QIcon:
     def draw(p):
+        p.setPen(QPen(_W, 1.5, Qt.PenStyle.SolidLine,
+                      Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         for pts in [
             [(11, 2), (9, 5), (13, 5)],
             [(11, 20), (9, 17), (13, 17)],
@@ -310,6 +321,19 @@ def drag_tool() -> QIcon:
         p.drawLine(QPointF(11, 4), QPointF(11, 18))
         p.drawLine(QPointF(4, 11), QPointF(18, 11))
     return _make(draw)
+
+
+def exit_btn(hover: bool = False) -> QIcon:
+    c = _R if hover else _W
+    def draw(p):
+        p.setPen(QPen(c, 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        # Arco 280° com abertura de 80° centrada no topo (90°): de 130° a 50° CCW
+        p.drawArc(QRectF(3, 4, 16, 16), 130 * 16, 280 * 16)
+        # Linha vertical pelo centro da abertura
+        p.drawLine(QPointF(11, 2), QPointF(11, 11))
+    return _make(draw)
+
 
 
 def logo() -> QIcon:

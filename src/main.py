@@ -2,6 +2,11 @@
 import os as _os
 import sys
 
+import instance_guard
+if not instance_guard.acquire():
+    print("[epicpen] Já existe uma instância em execução.", file=sys.stderr)
+    sys.exit(0)
+
 # GNOME Wayland não suporta wlr-layer-shell nem honra WindowStaysOnTopHint
 # para xdg_toplevel nativo. QT_QPA_PLATFORM=xcb força XWayland; o Mutter
 # honra _NET_WM_STATE_ABOVE (mapeado de WindowStaysOnTopHint) para clientes XWayland.
@@ -42,23 +47,11 @@ def main():
         toolbar._btn_whiteboard.setChecked(True)
 
     from PyQt6.QtWidgets import QApplication as _App
+    from PyQt6.QtCore import QPoint as _QPoint
     _primary = _App.primaryScreen()
 
-    # overlay → Layer::Top, 4-anchor + ExclusiveZone=0:
-    # compositor dimensiona a janela para a área disponível (exclui painel KDE).
-    _lsw_o = layershell.apply(
-        overlay,
-        layer=layershell.LAYER_TOP,
-        anchors=(layershell.ANCHOR_TOP | layershell.ANCHOR_BOTTOM |
-                 layershell.ANCHOR_LEFT | layershell.ANCHOR_RIGHT),
-        exclusive_zone=0,
-        initial_pos=(0, 0),
-        screen=_primary,
-    )
-
-    # toolbar → Layer::Top (mesmo layer do overlay), posição explícita do config.
-    # Layer::Overlay é bloqueado pelo KWin para apps regulares; Layer::Top funciona.
-    # adjustSize() força o layout a calcular a altura antes da superfície ser criada.
+    # Determina o monitor da toolbar ANTES de criar a superfície layer-shell do overlay,
+    # para que overlay e toolbar sempre abram no mesmo output (monitor).
     toolbar.adjustSize()
     print(f"[toolbar] size antes de apply(): {toolbar.size().width()}×{toolbar.size().height()}")
     _tb_pos = settings.get("toolbar_pos", {"x": 20, "y": 150})
@@ -66,7 +59,6 @@ def main():
 
     # Encontra o monitor ao qual a posição salva pertence E onde o toolbar inteiro cabe.
     # Verifica top-left E bottom-right — evita toolbar parcialmente fora do ecrã.
-    from PyQt6.QtCore import QPoint as _QPoint
     _tb_abs = _QPoint(_tb_x, _tb_y)
     _tb_w = toolbar.width() or 56
     _tb_h = toolbar.height() or 400
@@ -82,6 +74,18 @@ def main():
         _tb_x, _tb_y = 20, 150
         _tb_screen = _primary
         _tb_abs = _QPoint(_tb_x, _tb_y)
+
+    # overlay → Layer::Top, 4-anchor + ExclusiveZone=0, no mesmo monitor que a toolbar.
+    # compositor dimensiona a janela para a área disponível (exclui painel KDE).
+    _lsw_o = layershell.apply(
+        overlay,
+        layer=layershell.LAYER_TOP,
+        anchors=(layershell.ANCHOR_TOP | layershell.ANCHOR_BOTTOM |
+                 layershell.ANCHOR_LEFT | layershell.ANCHOR_RIGHT),
+        exclusive_zone=0,
+        initial_pos=(0, 0),
+        screen=_tb_screen,
+    )
 
     # Margens layer-shell são relativas ao output (monitor), não absolutas.
     _tb_origin = _tb_screen.geometry().topLeft()
