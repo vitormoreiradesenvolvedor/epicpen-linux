@@ -336,6 +336,13 @@ class ToolbarWindow(QWidget):
         self._btn_whiteboard.clicked.connect(self._toggle_whiteboard)
         lay.addWidget(self._btn_whiteboard, alignment=Qt.AlignmentFlag.AlignHCenter)
 
+        self._wb_bg_color = QColor(255, 255, 255)
+        self._btn_wb_bg = self._mk_btn("Cor do fundo do quadro", checkable=False)
+        self._btn_wb_bg.setIcon(icons.color_dot(self._wb_bg_color))
+        self._btn_wb_bg.setVisible(False)
+        self._btn_wb_bg.clicked.connect(self._pick_whiteboard_bg)
+        lay.addWidget(self._btn_wb_bg, alignment=Qt.AlignmentFlag.AlignHCenter)
+
         self._btn_spotlight = self._mk_btn("Spotlight (O)")
         self._btn_spotlight.setIcon(icons.spotlight())
         self._btn_spotlight.clicked.connect(self._toggle_spotlight)
@@ -557,6 +564,22 @@ class ToolbarWindow(QWidget):
 
     def _toggle_whiteboard(self, checked: bool):
         self._overlay.set_whiteboard(checked)
+        self._btn_wb_bg.setVisible(checked)
+        self.adjustSize()
+
+    def _pick_whiteboard_bg(self):
+        was_drawing = self._drawing_active
+        if was_drawing:
+            self._btn_toggle.setChecked(True)
+            self._toggle_drawing(True)
+        color = QColorDialog.getColor(self._wb_bg_color, self, "Cor do fundo do quadro")
+        if color.isValid():
+            self._wb_bg_color = color
+            self._overlay.set_whiteboard_bg(color)
+            self._btn_wb_bg.setIcon(icons.color_dot(color))
+        if was_drawing:
+            self._btn_toggle.setChecked(False)
+            self._toggle_drawing(False)
 
     def _toggle_spotlight(self, checked: bool):
         self._overlay.set_spotlight(checked)
