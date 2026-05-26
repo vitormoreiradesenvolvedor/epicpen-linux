@@ -426,22 +426,42 @@ class OverlayWindow(QWidget):
 
     # ── Drag tool helpers ─────────────────────────────────────────────────────
 
-    _DRAG_THRESHOLD = 20  # pixels
+    _DRAG_HANDLE_R = 12.0  # raio do círculo visual E da área de clique
+
+    @staticmethod
+    def _stroke_anchor(stroke) -> QPointF:
+        """Retorna o ponto âncora do stroke (posição p/ texto, centroide p/ demais)."""
+        if stroke[0][1].get("tool") == "text":
+            p = stroke[0][0]
+            return QPointF(p.x(), p.y())
+        pts = [pt for pt, _ in stroke]
+        return QPointF(
+            sum(p.x() for p in pts) / len(pts),
+            sum(p.y() for p in pts) / len(pts),
+        )
 
     def _find_stroke_at(self, pos: QPoint) -> "int | None":
-        best_idx, best_dist = None, float("inf")
+        """Retorna o índice do stroke cujo círculo de arrasto contém pos."""
+        px, py = pos.x(), pos.y()
+        r2 = self._DRAG_HANDLE_R ** 2
+        best_idx, best_dist2 = None, float("inf")
         for i, stroke in enumerate(self._strokes):
-            for pt, _ in stroke:
-                d = abs(pt.x() - pos.x()) + abs(pt.y() - pos.y())
-                if d < best_dist:
-                    best_dist, best_idx = d, i
-        return best_idx if best_idx is not None and best_dist <= self._DRAG_THRESHOLD else None
+            if not stroke:
+                continue
+            a = self._stroke_anchor(stroke)
+            d2 = (a.x() - px) ** 2 + (a.y() - py) ** 2
+            if d2 < best_dist2:
+                best_dist2, best_idx = d2, i
+        return best_idx if best_idx is not None and best_dist2 <= r2 else None
 
     def _translate_stroke(self, idx: int, delta: QPoint):
         self._strokes[idx] = [
-            (QPoint(pt.x() + delta.x(), pt.y() + delta.y()), props)
+            (QPointF(pt.x() + delta.x(), pt.y() + delta.y()), props)
             for pt, props in self._strokes[idx]
         ]
+
+    # Tamanho mínimo (px) do bounding box para escalar para baixo
+    _SCALE_MIN_SIZE = 8.0
 
     def _scale_stroke(self, idx: int, factor: float):
         stroke = self._strokes[idx]
@@ -449,14 +469,29 @@ class OverlayWindow(QWidget):
             return
         if stroke[0][1].get("tool") == "text":
             pt, props = stroke[0]
-            self._strokes[idx] = [(pt, {**props, "size": max(6, int(props["size"] * factor))})]
+            new_size = props["size"] * factor
+            if new_size < 6:
+                return  # tamanho mínimo
+            self._strokes[idx] = [(pt, {**props, "size": new_size})]
         else:
             pts = [pt for pt, _ in stroke]
             cx = sum(p.x() for p in pts) / len(pts)
             cy = sum(p.y() for p in pts) / len(pts)
+            new_pts = [
+                QPointF(cx + (pt.x() - cx) * factor,
+                        cy + (pt.y() - cy) * factor)
+                for pt in pts
+            ]
+            # Recusa escalar para baixo se ficaria menor que o mínimo
+            if factor < 1.0:
+                xs = [p.x() for p in new_pts]
+                ys = [p.y() for p in new_pts]
+                if (max(xs) - min(xs)) < self._SCALE_MIN_SIZE and \
+                   (max(ys) - min(ys)) < self._SCALE_MIN_SIZE:
+                    return
             self._strokes[idx] = [
-                (QPoint(int(cx + (pt.x() - cx) * factor),
-                        int(cy + (pt.y() - cy) * factor)), props)
+                (QPointF(cx + (pt.x() - cx) * factor,
+                         cy + (pt.y() - cy) * factor), props)
                 for pt, props in stroke
             ]
         self._canvas = None
@@ -659,28 +694,19 @@ class OverlayWindow(QWidget):
         elif tool == "line" and len(raw) >= 2:
             painter.drawLine(pts_f[0], pts_f[-1])
         elif tool == "rect" and len(raw) >= 2:
-            painter.drawRect(QRect(raw[0], raw[-1]).normalized())
+            painter.drawRect(QRectF(pts_f[0], pts_f[-1]).normalized())
         elif tool == "circle" and len(raw) >= 2:
-            painter.drawEllipse(QRect(raw[0], raw[-1]).normalized())
+            painter.drawEllipse(QRectF(pts_f[0], pts_f[-1]).normalized())
 
     def _draw_drag_handles(self, painter: QPainter):
         """Desenha ícones de arrasto (4 setas) em cada stroke quando drag tool ativo."""
-        from PyQt6.QtGui import QBrush
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
 
         for i, stroke in enumerate(self._strokes):
             if not stroke:
                 continue
 
-            # Âncora: posição do texto ou centroide dos pontos do stroke
-            if stroke[0][1].get("tool") == "text":
-                anchor = stroke[0][0]
-            else:
-                pts = [pt for pt, _ in stroke]
-                anchor = QPoint(
-                    sum(p.x() for p in pts) // len(pts),
-                    sum(p.y() for p in pts) // len(pts),
-                )
+            anchor = self._stroke_anchor(stroke)
 
             is_active = (self._drawing and i == self._drag_stroke_idx)
             is_hover  = (not self._drawing and i == self._drag_hover_idx)
@@ -692,10 +718,10 @@ class OverlayWindow(QWidget):
             else:
                 c = QColor(255, 255, 255, 150)  # branco: normal
 
-            cx, cy = float(anchor.x()), float(anchor.y())
-            R  = 10.0   # raio do círculo
-            AL = 7.0    # comprimento do braço da seta (do centro à ponta)
-            AW = 3.0    # semi-largura da cabeça da seta
+            cx, cy = anchor.x(), anchor.y()
+            R  = self._DRAG_HANDLE_R   # raio do círculo = área de clique
+            AL = R * 0.65              # comprimento do braço da seta
+            AW = R * 0.28              # semi-largura da cabeça da seta
 
             # Círculo de fundo (sombra)
             painter.setPen(Qt.PenStyle.NoPen)
