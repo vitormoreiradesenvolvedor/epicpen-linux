@@ -335,6 +335,7 @@ def exit_btn(hover: bool = False) -> QIcon:
     return _make(draw)
 
 
+
 def logo() -> QIcon:
     """Ícone para o botão colapsado — mesmo PNG usado pela tray."""
     from pathlib import Path
