@@ -589,7 +589,7 @@ class ToolbarWindow(QWidget):
             "pen": self._btn_pen, "highlighter": self._btn_hl,
             "line": self._btn_line, "rect": self._btn_rect,
             "circle": self._btn_circle, "eraser": self._btn_eraser,
-            "laser": self._btn_laser,
+            "laser": self._btn_laser, "text": self._btn_text,
         }
         tool = getattr(self._overlay, "_tool", "pen")
         for b in self._tool_buttons:
