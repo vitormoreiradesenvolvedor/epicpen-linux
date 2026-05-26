@@ -199,6 +199,20 @@ def move_to(lsw_ptr: int, x: int, y: int) -> None:
         pass
 
 
+def set_layer(lsw_ptr: int, layer: int) -> None:
+    """Change the layer of an existing layer-shell surface (effective immediately)."""
+    lib = _get_lib()
+    if lib is None:
+        return
+    try:
+        fn = lib["_ZN12LayerShellQt6Window8setLayerENS0_5LayerE"]
+        fn.restype = None
+        fn.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        fn(ctypes.c_void_p(lsw_ptr), ctypes.c_int(layer))
+    except Exception as e:
+        print(f"[layershell] set_layer erro: {e}")
+
+
 def _set_margins(lib, lsw_ptr: int, x: int, y: int) -> None:
     fn = lib["_ZN12LayerShellQt6Window10setMarginsERK8QMargins"]
     fn.restype = None
