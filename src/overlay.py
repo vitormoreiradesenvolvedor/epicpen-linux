@@ -530,6 +530,36 @@ class OverlayWindow(QWidget):
                 linked.append(j)
         return linked
 
+    def _is_fully_erased(self, idx: int) -> bool:
+        """True se todos os pontos amostrados do stroke estão cobertos por erasers posteriores."""
+        stroke = self._strokes[idx]
+        if not stroke:
+            return True
+        later_erasers: list[tuple[float, list[tuple[float, float]]]] = []
+        for j in range(idx + 1, len(self._strokes)):
+            s = self._strokes[j]
+            if not s or s[0][1].get("tool") != "eraser":
+                continue
+            r = s[0][1].get("size", 3) * 2
+            later_erasers.append((r * r, [(pt.x(), pt.y()) for pt, _ in s]))
+        if not later_erasers:
+            return False
+        all_pts = [pt for pt, _ in stroke]
+        step = max(1, len(all_pts) // 10)
+        for spt in all_pts[::step]:
+            sx, sy = spt.x(), spt.y()
+            covered = False
+            for r2, epts in later_erasers:
+                for ex, ey in epts:
+                    if (ex - sx) ** 2 + (ey - sy) ** 2 <= r2:
+                        covered = True
+                        break
+                if covered:
+                    break
+            if not covered:
+                return False
+        return True
+
     def _find_stroke_at(self, pos: QPoint) -> "int | None":
         """Retorna o índice do stroke cujo círculo de arrasto contém pos."""
         # Converte pos de ecrã para canvas; o raio também fica em unidades de canvas
@@ -543,6 +573,8 @@ class OverlayWindow(QWidget):
                 continue
             if stroke[0][1].get("tool") == "eraser":
                 continue  # erasers movem-se com o stroke a que pertencem, não são arrastáveis por si
+            if self._is_fully_erased(i):
+                continue
             a = self._stroke_anchor(stroke)
             d2 = (a.x() - px) ** 2 + (a.y() - py) ** 2
             if d2 < best_dist2:
@@ -893,6 +925,8 @@ class OverlayWindow(QWidget):
                 continue
             if stroke[0][1].get("tool") == "eraser":
                 continue  # sem handle para borracha — move junto com o stroke ancorado
+            if self._is_fully_erased(i):
+                continue
 
             anchor = self._stroke_anchor(stroke)
 
