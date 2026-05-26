@@ -1,47 +1,47 @@
-# Python
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
 .Python
 *.egg-info/
-dist/
-build/
 .eggs/
 venv/
 .venv/
 env/
 .env/
 
-# Qt / PyQt
+# ── Qt / PyQt ─────────────────────────────────────────────────────────────────
 *.ui.py
 *.qrc.py
 
-# AppImage build artifacts
-*.AppImage
+# ── Build / AppImage ──────────────────────────────────────────────────────────
+AppDir/
 squashfs-root/
-AppDir/usr/bin/epicpen
-AppDir/usr/lib/*.so*
+dist/
+build/
+*.AppImage
 
-# IDEs
+# ── Ferramentas e libs binárias (geradas pelo build, não versionadas) ─────────
+tools/
+lib/
+
+# ── IDEs ──────────────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# OS
+# ── SO ────────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 
-# Logs
+# ── Logs ──────────────────────────────────────────────────────────────────────
 *.log
 logs/
 
-# Tests
+# ── Testes / cobertura ────────────────────────────────────────────────────────
 .pytest_cache/
 .coverage
 htmlcov/
-
-# Distribution
-dist/
