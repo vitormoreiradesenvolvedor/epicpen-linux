@@ -53,7 +53,7 @@ import layershell
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("EpicPen")
-    app.setApplicationVersion("1.0.6")
+    app.setApplicationVersion("1.0.8")
     app.setQuitOnLastWindowClosed(False)
 
     settings = cfg.load()
@@ -64,16 +64,11 @@ def main():
     toolbar.set_tray(tray)
 
     # Insere "Sobre" antes de "Sair" no menu da tray (sem modificar tray.py)
-    _tray_menu = tray.contextMenu()
+    _tray_menu = tray._menu
     _quit_act  = _tray_menu.actions()[-1]          # "Sair" é sempre o último
     _act_about = QAction("ℹ️  Sobre", _tray_menu)
     _act_about.triggered.connect(lambda: _show_about(overlay))
     _tray_menu.insertAction(_quit_act, _act_about)
-
-    # Restaura modo quadro branco salvo
-    if settings.get("whiteboard"):
-        overlay.set_whiteboard(True)
-        toolbar._btn_whiteboard.setChecked(True)
 
     from PyQt6.QtWidgets import QApplication as _App
     from PyQt6.QtCore import QPoint as _QPoint

@@ -1,6 +1,6 @@
 from pathlib import Path
 from PyQt6.QtWidgets import QSystemTrayIcon, QMenu, QApplication
-from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QBrush, QPen, QFont
+from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QBrush, QPen, QFont, QCursor
 from PyQt6.QtCore import Qt, QRect
 
 _ICON_FILE = Path(__file__).parent.parent / "resources" / "icons" / "epicpen.png"
@@ -70,13 +70,21 @@ class TrayIcon(QSystemTrayIcon):
         act_quit = menu.addAction("Sair")
         act_quit.triggered.connect(QApplication.instance().quit)
 
+        # setContextMenu é necessário no Wayland para que o KDE/SNI gerencie o
+        # popup nativamente (sem parent surface o QMenu.popup() falha em Wayland).
+        self._menu = menu
         self.setContextMenu(menu)
 
     # ── Slots ─────────────────────────────────────────────────────────────
 
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason):
-        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
-            self._toggle_visibility()
+        # O KDE/SNI abre o menu para qualquer clique quando setContextMenu está
+        # registado. Para cliques que não devem abrir o menu (esquerdo,
+        # duplo-clique, scroll), fechamos imediatamente.
+        if reason != QSystemTrayIcon.ActivationReason.Context:
+            m = self.contextMenu()
+            if m is not None:
+                m.hide()
 
     def _toggle_visibility(self):
         self._visible = not self._visible
