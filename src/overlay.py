@@ -79,6 +79,16 @@ class OverlayWindow(QWidget):
         # normais (laser, spotlight, pan sem strokes novos).
         self._wb_canvas: QPixmap | None = None
 
+        # Base pré-renderizada para drag activo: todos os strokes EXCEPTO o arrastado.
+        # Criado uma vez no press; durante o move faz-se blit base + draw stroke → O(1).
+        # Elimina o _rebuild_canvas / _wb_canvas rebuild por frame durante o drag.
+        self._drag_base: QPixmap | None = None
+
+        # Cache de _is_fully_erased: dict[stroke_idx → bool].
+        # Invalidado (limpo) sempre que a estrutura de _strokes muda.
+        # Evita O(n²) por frame em _draw_drag_handles e _find_stroke_at.
+        self._erased_cache: dict[int, bool] = {}
+
         # rect global da toolbar — usado no modo dois-janelas (legado)
         self._toolbar_global_rect = None
         # widget da toolbar embutida — usado no modo janela-única
@@ -156,6 +166,7 @@ class OverlayWindow(QWidget):
         self._drag_stroke_idx = None
         self._erase_scratch = None   # descarta scratch se ferramenta mudar a meio
         self._pen_scratch = None     # idem
+        self._drag_base = None       # idem
         self._update_tracking()
         self._refresh_cursor()
         self.update()
@@ -471,12 +482,14 @@ class OverlayWindow(QWidget):
             self._pen_scratch = None
             self._canvas = None
             self._wb_canvas = None
+            self._invalidate_erased_cache()
             self.update()
 
     def redo(self):
         if self._undo_stack:
             stroke = self._undo_stack.pop()
             self._strokes.append(stroke)
+            self._invalidate_erased_cache()
             if self._whiteboard:
                 self._wb_canvas = None
             else:
@@ -490,6 +503,7 @@ class OverlayWindow(QWidget):
         self._erase_scratch = None
         self._pen_scratch = None
         self._wb_canvas = None
+        self._invalidate_erased_cache()
         if self._canvas is not None:
             self._canvas.fill(Qt.GlobalColor.transparent)
         self.update()
@@ -619,9 +633,24 @@ class OverlayWindow(QWidget):
             del self._strokes[j]
         self._canvas = None
         self._wb_canvas = None
+        self._invalidate_erased_cache()
+
+    def _invalidate_erased_cache(self) -> None:
+        """Limpa o cache de _is_fully_erased. Chamar sempre que _strokes muda estruturalmente."""
+        self._erased_cache.clear()
 
     def _is_fully_erased(self, idx: int) -> bool:
-        """True se todos os pontos amostrados do stroke estão cobertos por erasers posteriores."""
+        """True se todos os pontos amostrados do stroke estão cobertos por erasers posteriores.
+        Resultado cacheado por índice; válido até à próxima chamada a _invalidate_erased_cache."""
+        cached = self._erased_cache.get(idx)
+        if cached is not None:
+            return cached
+        result = self._compute_is_fully_erased(idx)
+        self._erased_cache[idx] = result
+        return result
+
+    def _compute_is_fully_erased(self, idx: int) -> bool:
+        """Cálculo real de _is_fully_erased, sem cache — O(pontos × erasers)."""
         stroke = self._strokes[idx]
         if not stroke:
             return True
@@ -749,7 +778,7 @@ class OverlayWindow(QWidget):
                     linked = self._find_linked_erasers(idx)
                     if linked:
                         self._bake_stroke_with_erasers(idx, linked)
-                        # _bake_stroke_with_erasers remove linked da lista; idx mantém-se
+                        # _bake_stroke_with_erasers já invalida cache e canvas
                 # Traz o stroke para o topo da z-order (fica acima de erasers globais)
                 if idx < len(self._strokes) - 1:
                     stroke_item = self._strokes[idx]
@@ -758,6 +787,26 @@ class OverlayWindow(QWidget):
                     idx = len(self._strokes) - 1
                     self._canvas = None
                     self._wb_canvas = None
+                    self._invalidate_erased_cache()  # índices mudaram com reorder
+                # Constrói _drag_base: snapshot de todos os strokes EXCEPTO o arrastado.
+                # Elimina _rebuild_canvas por frame durante o drag → O(1) por frame.
+                drag_idx = idx
+                self._drag_base = QPixmap(self.size())
+                if self._whiteboard:
+                    self._drag_base.fill(self._wb_bg)
+                    p = QPainter(self._drag_base)
+                    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                    p.translate(self._wb_pan)
+                    p.scale(self._wb_zoom, self._wb_zoom)
+                else:
+                    self._ensure_canvas()
+                    self._drag_base.fill(Qt.GlobalColor.transparent)
+                    p = QPainter(self._drag_base)
+                    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                for i, s in enumerate(self._strokes):
+                    if i != drag_idx:
+                        self._draw_stroke(p, s)
+                p.end()
                 self._drag_stroke_idx = idx
                 self._drag_linked_erasers = []
                 self._drag_last_pos = event.pos()
@@ -825,8 +874,8 @@ class OverlayWindow(QWidget):
                     if j < len(self._strokes):
                         self._translate_stroke(j, delta)
                 self._drag_last_pos = pos
-                self._canvas = None
-                self._wb_canvas = None  # stroke moveu — WB precisa rebuild
+                # _drag_base não inclui o stroke arrastado: sem rebuild de canvas por frame.
+                # _canvas/_wb_canvas serão invalidados uma única vez no mouseRelease.
                 self.update()
             else:
                 new_hover = self._find_stroke_at(pos)
@@ -892,6 +941,11 @@ class OverlayWindow(QWidget):
                 self._drag_stroke_idx = None
                 self._drag_linked_erasers = []
                 self._drag_last_pos = None
+                self._drag_base = None
+                # Rebuild de canvas uma vez no final do drag (não por frame)
+                self._canvas = None
+                self._wb_canvas = None
+                self._invalidate_erased_cache()  # posições mudaram durante o drag
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
             return
         if self._tool == "laser" or not self._drawing:
@@ -900,6 +954,7 @@ class OverlayWindow(QWidget):
         if self._current_stroke:
             stroke = list(self._current_stroke)
             self._strokes.append(stroke)
+            self._invalidate_erased_cache()  # novo stroke pode cobrir strokes existentes
             if self._whiteboard:
                 self._wb_canvas = None  # força rebuild WB com o novo stroke
             elif self._erase_scratch is not None:
@@ -956,14 +1011,32 @@ class OverlayWindow(QWidget):
         super().resizeEvent(event)
         self._erase_scratch = None
         self._pen_scratch = None
+        self._drag_base = None
         self._canvas = None
         self._wb_canvas = None
+        self._invalidate_erased_cache()
 
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        if self._whiteboard:
+        # ── Drag activo: usa _drag_base + stroke arrastado — O(1) por frame ──────
+        if self._drag_base is not None and self._drawing and self._drag_stroke_idx is not None:
+            painter.drawPixmap(0, 0, self._drag_base)
+            drag_s = self._strokes[self._drag_stroke_idx]
+            if self._whiteboard:
+                painter.save()
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                painter.translate(self._wb_pan)
+                painter.scale(self._wb_zoom, self._wb_zoom)
+                self._draw_stroke(painter, drag_s)
+                self._draw_drag_handles(painter)
+                painter.restore()
+            else:
+                self._draw_stroke(painter, drag_s)
+                self._draw_drag_handles(painter)
+        # ── Restante (não drag activo) ────────────────────────────────────────────
+        elif self._whiteboard:
             # Cache WB: rebuild apenas quando strokes/pan/zoom/tamanho mudam.
             # Frames normais (laser, spotlight, hover) são um drawPixmap O(1).
             if self._wb_canvas is None or self._wb_canvas.size() != self.size():
