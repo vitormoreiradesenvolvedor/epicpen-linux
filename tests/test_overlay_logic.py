@@ -167,6 +167,11 @@ def overlay():
     ov._spotlight_radius = 150
     ov._canvas           = None
     ov._erase_scratch    = None
+    ov._erase_base       = None
+    ov._pen_scratch      = None
+    ov._wb_canvas        = None
+    ov._erased_cache     = {}
+    ov._undo_ops         = []
     ov._wb_pan           = _QPointF(0.0, 0.0)
     ov._wb_zoom          = 1.0
     ov._wb_bg            = _QColor("#ffffff")
@@ -196,6 +201,7 @@ def test_undo_redo_on_empty_does_not_raise(overlay):
 def test_undo_moves_stroke_to_undo_stack(overlay):
     stroke = [(_QPoint(0, 0), {"tool": "pen", "color": None, "size": 3})]
     overlay._strokes.append(stroke)
+    overlay._undo_ops.append(("add",))   # simula o que mouseReleaseEvent faz
     overlay.undo()
     assert overlay._strokes == []
     assert len(overlay._undo_stack) == 1
@@ -204,6 +210,7 @@ def test_undo_moves_stroke_to_undo_stack(overlay):
 def test_redo_restores_stroke(overlay):
     stroke = [(_QPoint(0, 0), {"tool": "pen", "color": None, "size": 3})]
     overlay._strokes.append(stroke)
+    overlay._undo_ops.append(("add",))   # simula o que mouseReleaseEvent faz
     overlay.undo()
     overlay.redo()
     assert len(overlay._strokes) == 1
@@ -214,6 +221,7 @@ def test_undo_clears_undo_stack_on_new_draw(overlay):
     """Após um novo traço, redo não deve repor traços anteriores (stack limpo)."""
     stroke = [(_QPoint(0, 0), {"tool": "pen", "color": None, "size": 3})]
     overlay._strokes.append(stroke)
+    overlay._undo_ops.append(("add",))   # simula o que mouseReleaseEvent faz
     overlay.undo()
     assert len(overlay._undo_stack) == 1
     # Simula novo traço (mousePressEvent limpa undo_stack)
@@ -300,6 +308,7 @@ def test_to_canvas_subtracts_pan_in_whiteboard(overlay):
 def test_redo_does_not_use_canvas_in_whiteboard(overlay):
     stroke = [(_QPoint(0, 0), {"tool": "pen", "color": None, "size": 3})]
     overlay._strokes.append(stroke)
+    overlay._undo_ops.append(("add",))   # simula o que mouseReleaseEvent faz
     overlay.undo()
     overlay._whiteboard = True
     overlay.redo()
