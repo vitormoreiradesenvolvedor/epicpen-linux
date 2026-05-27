@@ -1126,15 +1126,15 @@ class OverlayWindow(QWidget):
         self._drawing = True
         self._current_stroke = [(self._to_canvas(event.pos()), self._brush_props())]
         self._undo_stack.clear()
-        if not self._whiteboard:
+        if self._tool == "eraser":
+            # Apagamento destrutivo ao vivo (WB e não-WB).
+            # Salva snapshot para undo e aplica o ponto de press imediatamente.
+            self._erase_base = list(self._strokes)
+            self._apply_destructive_erase(self._current_stroke)
+            # _apply_destructive_erase já invalida _canvas e _wb_canvas
+        elif not self._whiteboard:
             self._ensure_canvas()
-            if self._tool == "eraser":
-                # Apagamento destrutivo ao vivo: salva snapshot para undo
-                # e aplica o ponto de press imediatamente.
-                self._erase_base = list(self._strokes)
-                self._apply_destructive_erase(self._current_stroke)
-                self._canvas = None
-            elif self._tool in ("pen", "highlighter"):
+            if self._tool in ("pen", "highlighter"):
                 # Layer transparente separado do canvas — evita GPU COW deep-copy por stroke.
                 # paintEvent blit canvas + pen_scratch; release usa _commit_stroke O(pts).
                 self._pen_scratch = QPixmap(self.size())
@@ -1219,11 +1219,10 @@ class OverlayWindow(QWidget):
 
         self._current_stroke.append((new_pt, self._brush_props()))
 
-        if self._tool == "eraser" and not self._whiteboard:
-            # Apagamento ao vivo: aplica apenas o novo ponto sobre _strokes atual.
-            # Sem CompositionMode_Clear — os strokes desaparecem em tempo real.
+        if self._tool == "eraser":
+            # Apagamento ao vivo (WB e não-WB): aplica apenas o novo ponto.
             self._apply_destructive_erase(self._current_stroke[-1:])
-            self._canvas = None
+            # _apply_destructive_erase já invalida _canvas e _wb_canvas
         else:
             # pen/highlighter: aplica só o novo segmento no pen_scratch — O(1) por frame
             pts = self._current_stroke
@@ -1263,13 +1262,11 @@ class OverlayWindow(QWidget):
         if self._tool == "laser" or not self._drawing:
             return
         self._drawing = False
-        if self._tool == "eraser" and not self._whiteboard:
-            # Erase já aplicado ao vivo em mouseMoveEvent/mousePressEvent.
-            # Só precisa de gravar o undo (snapshot salvo no press).
+        if self._tool == "eraser":
+            # Erase ao vivo já aplicado (WB e não-WB). Só grava o undo.
             if self._erase_base is not None:
                 self._undo_ops.append(("erase", self._erase_base))
                 self._erase_base = None
-            # _canvas já é None (invalidado em cada ponto de erase)
         elif self._current_stroke:
             stroke = list(self._current_stroke)
             # ── Stroke normal (pen, highlighter, line, rect, circle, eraser WB) ──
@@ -1381,9 +1378,9 @@ class OverlayWindow(QWidget):
                     self._draw_stroke(wb_p, stroke)
                 wb_p.end()
             painter.drawPixmap(0, 0, self._wb_canvas)
-            # Stroke activo desenhado directamente sobre o painter já com WB blit —
-            # evita alocar um pixmap temporário por frame.
-            if self._current_stroke:
+            # Stroke activo desenhado directamente sobre o painter já com WB blit.
+            # Eraser não é desenhado: _wb_canvas já reflecte os strokes modificados.
+            if self._current_stroke and self._tool != "eraser":
                 painter.save()
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
                 painter.translate(self._wb_pan)
