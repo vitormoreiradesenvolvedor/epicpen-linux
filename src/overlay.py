@@ -70,10 +70,12 @@ class OverlayWindow(QWidget):
         # Invalida (None) quando o widget é redimensionado ou undo/clear ocorre.
         self._canvas: QPixmap | None = None
 
-        # Scratch canvas para a borracha activa: cópia do canvas principal onde
-        # cada novo segmento apagado é aplicado incrementalmente durante o drag.
-        # paintEvent faz blit deste em vez de canvas+stroke enquanto está activo.
+        # [OBSOLETO — mantido apenas para compatibilidade; nunca mais criado]
         self._erase_scratch: QPixmap | None = None
+
+        # Snapshot de _strokes no início de um traço de borracha (não-WB).
+        # Usado para undo: registado em _undo_ops ao soltar o botão.
+        self._erase_base: list | None = None
 
         # Scratch incremental para pen/highlighter activos (fora do whiteboard).
         # Cópia de _canvas; cada novo segmento é pintado aqui em O(1).
@@ -170,9 +172,10 @@ class OverlayWindow(QWidget):
         self._laser_trail.clear()
         self._drag_hover_idx = None
         self._drag_stroke_idx = None
-        self._erase_scratch = None   # descarta scratch se ferramenta mudar a meio
-        self._pen_scratch = None     # idem
-        self._drag_base = None       # idem
+        self._erase_scratch = None
+        self._erase_base = None
+        self._pen_scratch = None
+        self._drag_base = None
         self._update_tracking()
         self._refresh_cursor()
         self.update()
@@ -1126,12 +1129,11 @@ class OverlayWindow(QWidget):
         if not self._whiteboard:
             self._ensure_canvas()
             if self._tool == "eraser":
-                # Borracha: scratch com CompositionMode_Clear — não pode usar canvas directo
-                self._erase_scratch = QPixmap(self._canvas)
-                p = QPainter(self._erase_scratch)
-                p.setRenderHint(QPainter.RenderHint.Antialiasing)
-                self._draw_stroke(p, self._current_stroke)
-                p.end()
+                # Apagamento destrutivo ao vivo: salva snapshot para undo
+                # e aplica o ponto de press imediatamente.
+                self._erase_base = list(self._strokes)
+                self._apply_destructive_erase(self._current_stroke)
+                self._canvas = None
             elif self._tool in ("pen", "highlighter"):
                 # Layer transparente separado do canvas — evita GPU COW deep-copy por stroke.
                 # paintEvent blit canvas + pen_scratch; release usa _commit_stroke O(pts).
@@ -1217,12 +1219,16 @@ class OverlayWindow(QWidget):
 
         self._current_stroke.append((new_pt, self._brush_props()))
 
-        # Borracha e pen/highlighter: aplica só o novo segmento no scratch — O(1) por frame
-        pts = self._current_stroke
-        if len(pts) >= 2:
-            scratch = self._erase_scratch if self._tool == "eraser" else self._pen_scratch
-            if scratch is not None:
-                p = QPainter(scratch)
+        if self._tool == "eraser" and not self._whiteboard:
+            # Apagamento ao vivo: aplica apenas o novo ponto sobre _strokes atual.
+            # Sem CompositionMode_Clear — os strokes desaparecem em tempo real.
+            self._apply_destructive_erase(self._current_stroke[-1:])
+            self._canvas = None
+        else:
+            # pen/highlighter: aplica só o novo segmento no pen_scratch — O(1) por frame
+            pts = self._current_stroke
+            if len(pts) >= 2 and self._pen_scratch is not None:
+                p = QPainter(self._pen_scratch)
                 p.setRenderHint(QPainter.RenderHint.Antialiasing)
                 self._draw_stroke(p, pts[-2:])
                 p.end()
@@ -1257,43 +1263,34 @@ class OverlayWindow(QWidget):
         if self._tool == "laser" or not self._drawing:
             return
         self._drawing = False
-        if self._current_stroke:
+        if self._tool == "eraser" and not self._whiteboard:
+            # Erase já aplicado ao vivo em mouseMoveEvent/mousePressEvent.
+            # Só precisa de gravar o undo (snapshot salvo no press).
+            if self._erase_base is not None:
+                self._undo_ops.append(("erase", self._erase_base))
+                self._erase_base = None
+            # _canvas já é None (invalidado em cada ponto de erase)
+        elif self._current_stroke:
             stroke = list(self._current_stroke)
-
-            if self._tool == "eraser" and not self._whiteboard:
-                # ── Apagamento destrutivo ─────────────────────────────────────────
-                # Remove/divide strokes geometricamente em _strokes.
-                # Não adiciona stroke de borracha — sem fantasmas invisíveis.
-                before_snap = list(self._strokes)
-                self._apply_destructive_erase(stroke)
-                self._undo_ops.append(("erase", before_snap))
-                # _undo_stack foi limpo em mousePressEvent (nova acção cancela redo)
-                self._erase_scratch = None
-                # _canvas e _wb_canvas já invalidados em _apply_destructive_erase
+            # ── Stroke normal (pen, highlighter, line, rect, circle, eraser WB) ──
+            self._strokes.append(stroke)
+            self._undo_ops.append(("add",))
+            self._invalidate_erased_cache()
+            if self._whiteboard:
+                if self._wb_canvas is not None:
+                    wb_p = QPainter(self._wb_canvas)
+                    wb_p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                    wb_p.translate(self._wb_pan)
+                    wb_p.scale(self._wb_zoom, self._wb_zoom)
+                    self._draw_stroke(wb_p, stroke)
+                    wb_p.end()
+            elif self._pen_scratch is not None:
+                self._pen_scratch = None
+                self._ensure_canvas()
+                self._commit_stroke(stroke)
             else:
-                # ── Stroke normal (pen, highlighter, line, rect, circle,
-                #                   eraser em WB, text — embora text não passe aqui) ──
-                self._strokes.append(stroke)
-                self._undo_ops.append(("add",))
-                self._invalidate_erased_cache()
-                if self._whiteboard:
-                    # Commit incremental no _wb_canvas (O(stroke_pts))
-                    if self._wb_canvas is not None:
-                        wb_p = QPainter(self._wb_canvas)
-                        wb_p.setRenderHint(QPainter.RenderHint.Antialiasing)
-                        wb_p.translate(self._wb_pan)
-                        wb_p.scale(self._wb_zoom, self._wb_zoom)
-                        self._draw_stroke(wb_p, stroke)
-                        wb_p.end()
-                    # se _wb_canvas é None, paintEvent recria do zero na próxima frame
-                elif self._pen_scratch is not None:
-                    # Pen/highlighter: descarta layer; commita só o traço
-                    self._pen_scratch = None
-                    self._ensure_canvas()
-                    self._commit_stroke(stroke)
-                else:
-                    self._ensure_canvas()
-                    self._commit_stroke(stroke)
+                self._ensure_canvas()
+                self._commit_stroke(stroke)
         self._current_stroke = []
         self.update()
 
@@ -1402,16 +1399,15 @@ class OverlayWindow(QWidget):
                 painter.restore()
         else:
             self._ensure_canvas()
-            # Prioridade: erase_scratch > pen_scratch (layer) > canvas + stroke ao vivo
-            if self._erase_scratch is not None:
-                painter.drawPixmap(0, 0, self._erase_scratch)
-            elif self._pen_scratch is not None:
+            if self._pen_scratch is not None:
                 # pen_scratch é layer transparente — blit canvas base primeiro
                 painter.drawPixmap(0, 0, self._canvas)
                 painter.drawPixmap(0, 0, self._pen_scratch)
             else:
                 painter.drawPixmap(0, 0, self._canvas)
-                if self._current_stroke:
+                # Eraser ao vivo: _current_stroke não deve ser desenhado —
+                # _canvas já reflecte os strokes modificados.
+                if self._current_stroke and self._tool != "eraser":
                     self._draw_stroke(painter, self._current_stroke)
             if self._tool == "drag" and self._strokes:
                 self._draw_drag_handles(painter)
