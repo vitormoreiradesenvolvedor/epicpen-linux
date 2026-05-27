@@ -497,7 +497,6 @@ class ToolbarWindow(QWidget):
             "size": self._size_slider.value(),
             "toolbar_pos": {"x": self._lsw_pos.x(), "y": self._lsw_pos.y()},
             "magnifier_zoom": self._zoom_slider.value(),
-            "whiteboard": self._btn_whiteboard.isChecked(),
         }
 
     def set_tray(self, tray):

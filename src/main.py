@@ -70,11 +70,6 @@ def main():
     _act_about.triggered.connect(lambda: _show_about(overlay))
     _tray_menu.insertAction(_quit_act, _act_about)
 
-    # Restaura modo quadro branco salvo
-    if settings.get("whiteboard"):
-        overlay.set_whiteboard(True)
-        toolbar._btn_whiteboard.setChecked(True)
-
     from PyQt6.QtWidgets import QApplication as _App
     from PyQt6.QtCore import QPoint as _QPoint
     _primary = _App.primaryScreen()
