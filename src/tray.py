@@ -70,18 +70,21 @@ class TrayIcon(QSystemTrayIcon):
         act_quit = menu.addAction("Sair")
         act_quit.triggered.connect(QApplication.instance().quit)
 
-        # Não chamar setContextMenu — evita que KDE/SNI registe o menu via DBus
-        # e mostre animação/popup automático em cliques esquerdo e scroll.
+        # setContextMenu é necessário no Wayland para que o KDE/SNI gerencie o
+        # popup nativamente (sem parent surface o QMenu.popup() falha em Wayland).
         self._menu = menu
+        self.setContextMenu(menu)
 
     # ── Slots ─────────────────────────────────────────────────────────────
 
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason):
-        # Apenas o botão direito abre o menu. Esquerdo, duplo-clique e scroll
-        # não têm função — não chamar setContextMenu garante que o KDE/SNI
-        # não exibe animação nesses eventos.
-        if reason == QSystemTrayIcon.ActivationReason.Context:
-            self._menu.popup(QCursor.pos())
+        # O KDE/SNI abre o menu para qualquer clique quando setContextMenu está
+        # registado. Para cliques que não devem abrir o menu (esquerdo,
+        # duplo-clique, scroll), fechamos imediatamente.
+        if reason != QSystemTrayIcon.ActivationReason.Context:
+            m = self.contextMenu()
+            if m is not None:
+                m.hide()
 
     def _toggle_visibility(self):
         self._visible = not self._visible
