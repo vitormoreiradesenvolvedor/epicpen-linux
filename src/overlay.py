@@ -741,9 +741,11 @@ class OverlayWindow(QWidget):
     def _apply_destructive_erase(self, eraser_stroke: list) -> None:
         """Aplica apagamento destrutivo: remove/divide strokes com base no traço da borracha.
 
-        pen/highlighter  → divide em segmentos não cobertos pela borracha.
-        line/rect/circle/text/bitmap → remove inteiramente se houver sobreposição.
-        eraser (legado WB) → preservado sem alteração.
+        pen/highlighter      → divide em segmentos não cobertos pela borracha.
+        line/rect/circle     → discretiza em pontos e divide da mesma forma;
+                               resultado são segmentos pen com a mesma cor/size.
+        text/bitmap          → remove inteiramente se tocado.
+        eraser (legado WB)   → preservado sem alteração.
 
         Não adiciona a borracha a _strokes; atualiza diretamente a lista.
         """
@@ -765,8 +767,19 @@ class OverlayWindow(QWidget):
             elif tool in ("pen", "highlighter"):
                 segs = self._split_stroke_destructive(stroke, eraser_pts, eraser_r2)
                 new_strokes.extend(segs)
+            elif tool in ("line", "rect", "circle"):
+                # Forma geométrica: discretiza em pontos e aplica o mesmo split.
+                # Se o eraser não tocar, mantém a forma original intacta.
+                if self._eraser_hits_stroke(stroke, eraser_pts, eraser_r2):
+                    disc = self._discretize_shape(stroke)
+                    if disc:
+                        segs = self._split_stroke_destructive(disc, eraser_pts, eraser_r2)
+                        new_strokes.extend(segs)
+                    # se disc vazio → forma removida totalmente (correto)
+                else:
+                    new_strokes.append(stroke)
             else:
-                # line, rect, circle, text, bitmap: remove se tocado pelo eraser
+                # text, bitmap: remove se tocado; mantém caso contrário
                 if not self._eraser_hits_stroke(stroke, eraser_pts, eraser_r2):
                     new_strokes.append(stroke)
 
@@ -801,6 +814,81 @@ class OverlayWindow(QWidget):
         if current:
             segments.append(current)
         return segments
+
+    def _discretize_shape(self, stroke: list) -> list:
+        """Converte um stroke line/rect/circle em pontos amostrados com props 'pen'.
+
+        Retorna uma lista de (QPointF, props_dict) que pode ser passada directamente
+        a _split_stroke_destructive. O tool é mapeado para 'pen' para que o resultado
+        seja renderizável como traço contínuo. Cor e size são preservados.
+
+        N de pontos: proporcional ao perímetro estimado da forma (≥ 1 pt / 2 px).
+        """
+        if not stroke:
+            return []
+        tool  = stroke[0][1].get("tool")
+        props = stroke[0][1]
+        color = props.get("color", QColor("#FF0000"))
+        size  = props.get("size", 3)
+        pen_props = {"tool": "pen", "color": QColor(color), "size": size}
+
+        pts = [pt for pt, _ in stroke]
+        if len(pts) < 2:
+            return [(QPointF(pts[0]), pen_props)]
+        p0, p1 = pts[0], pts[-1]
+        x0, y0 = p0.x(), p0.y()
+        x1, y1 = p1.x(), p1.y()
+
+        result: list[tuple] = []
+
+        if tool == "line":
+            length = math.hypot(x1 - x0, y1 - y0)
+            N = max(2, int(length / 2))
+            for i in range(N + 1):
+                t = i / N
+                result.append((QPointF(x0 + t * (x1 - x0),
+                                       y0 + t * (y1 - y0)), pen_props))
+
+        elif tool == "rect":
+            # Normaliza para garantir x0 < x1, y0 < y1
+            lx, rx = min(x0, x1), max(x0, x1)
+            ty, by = min(y0, y1), max(y0, y1)
+            w, h = rx - lx, by - ty
+            perimeter = 2 * (w + h)
+            N = max(4, int(perimeter / 2))
+            # Distribui pontos proporcionalmente por cada lado
+            sides = [
+                (lx, ty, rx, ty),   # topo (esq→dir)
+                (rx, ty, rx, by),   # direita (cima→baixo)
+                (rx, by, lx, by),   # fundo (dir→esq)
+                (lx, by, lx, ty),   # esquerda (baixo→cima)
+            ]
+            for sx0, sy0, sx1, sy1 in sides:
+                side_len = math.hypot(sx1 - sx0, sy1 - sy0)
+                n_side = max(1, int(N * side_len / perimeter))
+                for i in range(n_side):
+                    t = i / n_side
+                    result.append((QPointF(sx0 + t * (sx1 - sx0),
+                                           sy0 + t * (sy1 - sy0)), pen_props))
+            # Fecha o rectângulo (último ponto = primeiro)
+            result.append((QPointF(lx, ty), pen_props))
+
+        elif tool == "circle":
+            cx_e = (x0 + x1) / 2.0
+            cy_e = (y0 + y1) / 2.0
+            rx   = abs(x1 - x0) / 2.0
+            ry   = abs(y1 - y0) / 2.0
+            # Aproximação do perímetro pela fórmula de Ramanujan
+            a, b = max(rx, ry), min(rx, ry)
+            h_ram = ((a - b) / (a + b)) ** 2 if (a + b) > 0 else 0
+            perimeter = math.pi * (a + b) * (1 + 3 * h_ram / (10 + math.sqrt(4 - 3 * h_ram)))
+            N = max(12, int(perimeter / 2))
+            for i in range(N + 1):
+                angle = 2.0 * math.pi * i / N
+                result.append((QPointF(cx_e + rx * math.cos(angle),
+                                       cy_e + ry * math.sin(angle)), pen_props))
+
+        return result
 
     def _eraser_hits_stroke(self, stroke: list,
                              eraser_pts: list,
