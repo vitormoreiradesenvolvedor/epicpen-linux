@@ -28,6 +28,34 @@ chmod +x EpicPen-v*.AppImage
 
 Não é necessário instalar nada. O AppImage inclui Python 3.12, PyQt6 e todas as bibliotecas nativas.
 
+## Gear Lever — gestão de AppImages com atualizações automáticas
+
+[Gear Lever](https://flathub.org/apps/it.mijorus.gearlever) é uma aplicação para GNOME/Linux que facilita a instalação e gestão de AppImages: integra o AppImage no sistema (adiciona ao lançador de aplicações, cria atalhos) e verifica automaticamente se existe uma versão mais recente disponível.
+
+### Instalar o Gear Lever
+
+```bash
+flatpak install flathub it.mijorus.gearlever
+```
+
+Ou procure **"Gear Lever"** na GNOME Software / Discover.
+
+### Instalar o EpicPen via Gear Lever
+
+1. Descarregue o `EpicPen-v*.AppImage` na página de [Releases](../../releases)
+2. Abra o Gear Lever e arraste o ficheiro `.AppImage` para a janela, ou clique em **"Open"** e selecione o ficheiro
+3. Clique em **"Integrate"** — o EpicPen aparecerá no lançador de aplicações como qualquer outra app
+
+### Verificar atualizações automaticamente
+
+O EpicPen Linux distribui AppImages via GitHub Releases. Para que o Gear Lever detete novas versões:
+
+1. Nas definições do Gear Lever (**☰ → Preferences**), ative **"Check for updates on launch"**
+2. O Gear Lever consulta os metadados do AppImage e compara com a release mais recente no GitHub
+3. Quando existir uma versão nova, o Gear Lever notifica-o e permite atualizar com um clique — sem linha de comandos
+
+> **Nota:** A deteção automática requer que o Gear Lever tenha acesso à internet e que o AppImage tenha sido integrado através do Gear Lever (não apenas executado diretamente).
+
 ## Requisitos do sistema
 
 | Componente | Mínimo |
