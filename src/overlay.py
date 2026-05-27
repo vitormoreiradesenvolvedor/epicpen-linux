@@ -195,8 +195,20 @@ class OverlayWindow(QWidget):
         })]
         self._strokes.append(stroke)
         self._undo_stack.clear()
-        self._ensure_canvas()
-        self._commit_stroke(stroke)
+        self._invalidate_erased_cache()
+        if self._whiteboard:
+            # Commit incremental no _wb_canvas (mesmo padrão de mouseReleaseEvent)
+            if self._wb_canvas is not None:
+                wb_p = QPainter(self._wb_canvas)
+                wb_p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                wb_p.translate(self._wb_pan)
+                wb_p.scale(self._wb_zoom, self._wb_zoom)
+                self._draw_stroke(wb_p, stroke)
+                wb_p.end()
+            # se _wb_canvas é None, paintEvent recria do zero incluindo o texto
+        else:
+            self._ensure_canvas()
+            self._commit_stroke(stroke)
         self.update()
 
     def embed_toolbar(self, toolbar):
