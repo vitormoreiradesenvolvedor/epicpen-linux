@@ -491,7 +491,13 @@ class OverlayWindow(QWidget):
             self._strokes.append(stroke)
             self._invalidate_erased_cache()
             if self._whiteboard:
-                self._wb_canvas = None
+                if self._wb_canvas is not None:
+                    wb_p = QPainter(self._wb_canvas)
+                    wb_p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                    wb_p.translate(self._wb_pan)
+                    wb_p.scale(self._wb_zoom, self._wb_zoom)
+                    self._draw_stroke(wb_p, stroke)
+                    wb_p.end()
             else:
                 self._ensure_canvas()
                 self._commit_stroke(stroke)
@@ -773,24 +779,31 @@ class OverlayWindow(QWidget):
         if self._tool == "drag":
             idx = self._find_stroke_at(event.pos())
             if idx is not None:
-                # Bake linked erasers → bitmap (só modo normal; wb usa outra render path)
+                # Encontra erasers ligados ao stroke (antes de qualquer modificação)
+                linked = self._find_linked_erasers(idx)
                 if not self._whiteboard:
-                    linked = self._find_linked_erasers(idx)
+                    # Não-WB: bake → erasers removidos e stroke vira bitmap
                     if linked:
                         self._bake_stroke_with_erasers(idx, linked)
-                        # _bake_stroke_with_erasers já invalida cache e canvas
+                    linked = []  # erasers já baked in bitmap, não precisamos deles
+                # else (WB): linked mantém-se para movimento coordenado e exclusão da base
+
                 # Traz o stroke para o topo da z-order (fica acima de erasers globais)
                 if idx < len(self._strokes) - 1:
                     stroke_item = self._strokes[idx]
                     del self._strokes[idx]
+                    # Ajusta índices dos erasers ligados: deleção de idx desloca j>idx em -1
+                    linked = [j - 1 if j > idx else j for j in linked]
                     self._strokes.append(stroke_item)
                     idx = len(self._strokes) - 1
                     self._canvas = None
                     self._wb_canvas = None
-                    self._invalidate_erased_cache()  # índices mudaram com reorder
-                # Constrói _drag_base: snapshot de todos os strokes EXCEPTO o arrastado.
-                # Elimina _rebuild_canvas por frame durante o drag → O(1) por frame.
+                    self._invalidate_erased_cache()
+
+                # Constrói _drag_base: todos os strokes EXCEPTO arrastado E erasers ligados.
+                # Elimina _rebuild_canvas por frame → O(1) por frame durante o drag.
                 drag_idx = idx
+                linked_set = set(linked)
                 self._drag_base = QPixmap(self.size())
                 if self._whiteboard:
                     self._drag_base.fill(self._wb_bg)
@@ -804,11 +817,11 @@ class OverlayWindow(QWidget):
                     p = QPainter(self._drag_base)
                     p.setRenderHint(QPainter.RenderHint.Antialiasing)
                 for i, s in enumerate(self._strokes):
-                    if i != drag_idx:
+                    if i != drag_idx and i not in linked_set:
                         self._draw_stroke(p, s)
                 p.end()
                 self._drag_stroke_idx = idx
-                self._drag_linked_erasers = []
+                self._drag_linked_erasers = linked  # WB: move junto; não-WB: []
                 self._drag_last_pos = event.pos()
                 self._drawing = True
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
@@ -829,8 +842,10 @@ class OverlayWindow(QWidget):
                 self._draw_stroke(p, self._current_stroke)
                 p.end()
             elif self._tool in ("pen", "highlighter"):
-                # Pen/highlighter: scratch incremental — evita rebuild do path completo por frame
-                self._pen_scratch = QPixmap(self._canvas)
+                # Layer transparente separado do canvas — evita GPU COW deep-copy por stroke.
+                # paintEvent blit canvas + pen_scratch; release usa _commit_stroke O(pts).
+                self._pen_scratch = QPixmap(self.size())
+                self._pen_scratch.fill(Qt.GlobalColor.transparent)
                 p = QPainter(self._pen_scratch)
                 p.setRenderHint(QPainter.RenderHint.Antialiasing)
                 self._draw_stroke(p, self._current_stroke)
@@ -956,15 +971,24 @@ class OverlayWindow(QWidget):
             self._strokes.append(stroke)
             self._invalidate_erased_cache()  # novo stroke pode cobrir strokes existentes
             if self._whiteboard:
-                self._wb_canvas = None  # força rebuild WB com o novo stroke
+                # Commit incremental no _wb_canvas (sem rebuild completo — O(stroke_pts))
+                if self._wb_canvas is not None:
+                    wb_p = QPainter(self._wb_canvas)
+                    wb_p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                    wb_p.translate(self._wb_pan)
+                    wb_p.scale(self._wb_zoom, self._wb_zoom)
+                    self._draw_stroke(wb_p, stroke)
+                    wb_p.end()
+                # se _wb_canvas é None, paintEvent recria do zero na próxima frame
             elif self._erase_scratch is not None:
                 # Borracha: scratch já tem o resultado final — promove a canvas
                 self._canvas = self._erase_scratch
                 self._erase_scratch = None
             elif self._pen_scratch is not None:
-                # Pen/highlighter: scratch já tem o stroke pintado — promove a canvas
-                self._canvas = self._pen_scratch
+                # Pen/highlighter: descarta layer; commita só o traço — evita blit de tela
                 self._pen_scratch = None
+                self._ensure_canvas()
+                self._commit_stroke(stroke)
             else:
                 self._ensure_canvas()
                 self._commit_stroke(stroke)
@@ -1030,10 +1054,18 @@ class OverlayWindow(QWidget):
                 painter.translate(self._wb_pan)
                 painter.scale(self._wb_zoom, self._wb_zoom)
                 self._draw_stroke(painter, drag_s)
+                # WB: erasers ligados viajam com o stroke (pintam cor de fundo)
+                for j in self._drag_linked_erasers:
+                    if j < len(self._strokes):
+                        self._draw_stroke(painter, self._strokes[j])
                 self._draw_drag_handles(painter)
                 painter.restore()
             else:
                 self._draw_stroke(painter, drag_s)
+                # Não-WB: após bake os linked erasers são []; esta linha é no-op
+                for j in self._drag_linked_erasers:
+                    if j < len(self._strokes):
+                        self._draw_stroke(painter, self._strokes[j])
                 self._draw_drag_handles(painter)
         # ── Restante (não drag activo) ────────────────────────────────────────────
         elif self._whiteboard:
@@ -1068,10 +1100,12 @@ class OverlayWindow(QWidget):
                 painter.restore()
         else:
             self._ensure_canvas()
-            # Prioridade: erase_scratch > pen_scratch > canvas + stroke ao vivo
+            # Prioridade: erase_scratch > pen_scratch (layer) > canvas + stroke ao vivo
             if self._erase_scratch is not None:
                 painter.drawPixmap(0, 0, self._erase_scratch)
             elif self._pen_scratch is not None:
+                # pen_scratch é layer transparente — blit canvas base primeiro
+                painter.drawPixmap(0, 0, self._canvas)
                 painter.drawPixmap(0, 0, self._pen_scratch)
             else:
                 painter.drawPixmap(0, 0, self._canvas)
