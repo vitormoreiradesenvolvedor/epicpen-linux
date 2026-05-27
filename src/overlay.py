@@ -1,4 +1,5 @@
 import os
+import math
 from PyQt6.QtWidgets import QWidget, QApplication
 from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, pyqtSignal
 from PyQt6.QtGui import (
@@ -27,7 +28,12 @@ class OverlayWindow(QWidget):
         super().__init__()
         self._strokes: list[list[tuple[QPoint, dict]]] = []
         self._current_stroke: list[tuple[QPoint, dict]] = []
-        self._undo_stack: list[list[tuple[QPoint, dict]]] = []
+        # Buffer de redo: cada entrada é ("add", stroke) ou ("erase", after_snap).
+        # Limpo a cada nova acção; preenchido por undo().
+        self._undo_stack: list = []
+        # Histórico de acções desfeitas: lista de ("add",) ou ("erase", before_snap).
+        # Não é limpo por novas acções — só cresce (release) e encolhe (undo).
+        self._undo_ops: list = []
 
         self._tool = "pen"
         self._color = QColor("#FF0000")
@@ -194,6 +200,7 @@ class OverlayWindow(QWidget):
             "text": text,
         })]
         self._strokes.append(stroke)
+        self._undo_ops.append(("add",))
         self._undo_stack.clear()
         self._invalidate_erased_cache()
         if self._whiteboard:
@@ -488,19 +495,38 @@ class OverlayWindow(QWidget):
     # ── Undo / redo / clear ───────────────────────────────────────────────
 
     def undo(self):
-        if self._strokes:
-            self._undo_stack.append(self._strokes.pop())
-            self._erase_scratch = None
-            self._pen_scratch = None
-            self._canvas = None
-            self._wb_canvas = None
-            self._invalidate_erased_cache()
-            self.update()
+        if not self._undo_ops:
+            return
+        op = self._undo_ops.pop()
+        self._erase_scratch = None
+        self._pen_scratch = None
+        self._canvas = None
+        self._wb_canvas = None
+        self._invalidate_erased_cache()
+        if op[0] == "add":
+            if self._strokes:
+                undone = self._strokes.pop()
+                self._undo_stack.append(("add", undone))
+        elif op[0] == "erase":
+            _, before_snap = op
+            after_snap = list(self._strokes)   # estado atual (pós-erase) para redo
+            self._undo_stack.append(("erase", after_snap))
+            self._strokes = list(before_snap)  # restaura estado pré-erase
+        self.update()
 
     def redo(self):
-        if self._undo_stack:
-            stroke = self._undo_stack.pop()
+        if not self._undo_stack:
+            return
+        entry = self._undo_stack[-1]
+        if not (isinstance(entry, tuple) and len(entry) >= 2):
+            self._undo_stack.pop()
+            return
+        kind = entry[0]
+        if kind == "add":
+            self._undo_stack.pop()
+            _, stroke = entry
             self._strokes.append(stroke)
+            self._undo_ops.append(("add",))
             self._invalidate_erased_cache()
             if self._whiteboard:
                 if self._wb_canvas is not None:
@@ -514,10 +540,21 @@ class OverlayWindow(QWidget):
                 self._ensure_canvas()
                 self._commit_stroke(stroke)
             self.update()
+        elif kind == "erase":
+            self._undo_stack.pop()
+            _, after_snap = entry
+            before_snap = list(self._strokes)  # estado atual = pré-erase para undo
+            self._strokes = list(after_snap)   # reaplicar erase
+            self._undo_ops.append(("erase", before_snap))
+            self._canvas = None
+            self._wb_canvas = None
+            self._invalidate_erased_cache()
+            self.update()
 
     def clear(self):
         self._strokes.clear()
         self._undo_stack.clear()
+        self._undo_ops.clear()
         self._erase_scratch = None
         self._pen_scratch = None
         self._wb_canvas = None
@@ -698,6 +735,160 @@ class OverlayWindow(QWidget):
             if not covered:
                 return False
         return True
+
+    # ── Apagamento destrutivo ─────────────────────────────────────────────────
+
+    def _apply_destructive_erase(self, eraser_stroke: list) -> None:
+        """Aplica apagamento destrutivo: remove/divide strokes com base no traço da borracha.
+
+        pen/highlighter  → divide em segmentos não cobertos pela borracha.
+        line/rect/circle/text/bitmap → remove inteiramente se houver sobreposição.
+        eraser (legado WB) → preservado sem alteração.
+
+        Não adiciona a borracha a _strokes; atualiza diretamente a lista.
+        """
+        if not eraser_stroke:
+            return
+        eraser_size = eraser_stroke[0][1].get("size", 3)
+        eraser_r    = eraser_size * 2          # raio = metade da largura do traço (size*4)
+        eraser_r2   = eraser_r * eraser_r
+        eraser_pts  = [(pt.x(), pt.y()) for pt, _ in eraser_stroke]
+
+        new_strokes: list = []
+        for stroke in self._strokes:
+            if not stroke:
+                continue
+            tool = stroke[0][1].get("tool")
+            if tool == "eraser":
+                # Strokes de borracha legados (do WB) — preserva sem modificar
+                new_strokes.append(stroke)
+            elif tool in ("pen", "highlighter"):
+                segs = self._split_stroke_destructive(stroke, eraser_pts, eraser_r2)
+                new_strokes.extend(segs)
+            else:
+                # line, rect, circle, text, bitmap: remove se tocado pelo eraser
+                if not self._eraser_hits_stroke(stroke, eraser_pts, eraser_r2):
+                    new_strokes.append(stroke)
+
+        self._strokes = new_strokes
+        self._canvas = None
+        self._wb_canvas = None
+        self._invalidate_erased_cache()
+
+    def _split_stroke_destructive(self, stroke: list,
+                                   eraser_pts: list,
+                                   eraser_r2: float) -> list:
+        """Divide um stroke pen/highlighter nos segmentos não cobertos pela borracha.
+
+        Pontos cujo centro está dentro de qualquer círculo da borracha são removidos.
+        Segmentos contíguos de pontos não cobertos são retornados como strokes separados.
+        Segmentos com 0 pontos são descartados; com 1+ pontos são mantidos (dot válido).
+        """
+        segments: list = []
+        current: list  = []
+
+        for pt, props in stroke:
+            px, py = pt.x(), pt.y()
+            covered = any((px - ex) ** 2 + (py - ey) ** 2 <= eraser_r2
+                          for ex, ey in eraser_pts)
+            if covered:
+                if current:
+                    segments.append(current)
+                    current = []
+            else:
+                current.append((pt, props))
+
+        if current:
+            segments.append(current)
+        return segments
+
+    def _eraser_hits_stroke(self, stroke: list,
+                             eraser_pts: list,
+                             eraser_r2: float) -> bool:
+        """Retorna True se o eraser toca em qualquer parte do stroke.
+
+        Para pen/highlighter verifica os pontos armazenados.
+        Para line/rect/circle amostra a geometria — necessário porque só há 2 pontos
+        gravados (início e fim) e o eraser pode cruzar o meio sem cobrir as extremidades.
+        Para text usa o ponto âncora.
+        Para bitmap verifica a bounding box.
+        """
+        if not stroke:
+            return False
+        tool = stroke[0][1].get("tool")
+
+        # ── text: único ponto âncora ──────────────────────────────────────────
+        if tool == "text":
+            pt = stroke[0][0]
+            return any((pt.x() - ex) ** 2 + (pt.y() - ey) ** 2 <= eraser_r2
+                       for ex, ey in eraser_pts)
+
+        # ── bitmap: verifica bounding box ────────────────────────────────────
+        if tool == "bitmap":
+            origin = stroke[0][0]
+            px_obj = stroke[0][1].get("pixmap")
+            if px_obj is None:
+                return False
+            bx, by = origin.x(), origin.y()
+            bw, bh = px_obj.width(), px_obj.height()
+            # Ponto do eraser dentro do retângulo do bitmap?
+            for ex, ey in eraser_pts:
+                if bx <= ex <= bx + bw and by <= ey <= by + bh:
+                    return True
+            # Círculo do eraser toca a borda (aproximação pelos 4 cantos)?
+            er = math.sqrt(eraser_r2)
+            if any(bx - er <= ex <= bx + bw + er and by - er <= ey <= by + bh + er
+                   for ex, ey in eraser_pts):
+                return True
+            return False
+
+        # ── line/rect/circle: amostra a geometria ────────────────────────────
+        if tool in ("line", "rect", "circle"):
+            pts = [pt for pt, _ in stroke]
+            if len(pts) < 2:
+                pt = pts[0]
+                return any((pt.x() - ex) ** 2 + (pt.y() - ey) ** 2 <= eraser_r2
+                           for ex, ey in eraser_pts)
+            p0, p1 = pts[0], pts[-1]
+            x0, y0 = p0.x(), p0.y()
+            x1, y1 = p1.x(), p1.y()
+
+            samples: list[tuple[float, float]] = []
+            N = 24
+            if tool == "line":
+                for i in range(N + 1):
+                    t = i / N
+                    samples.append((x0 + t * (x1 - x0), y0 + t * (y1 - y0)))
+            elif tool == "rect":
+                for i in range(N + 1):
+                    t = i / N
+                    samples.append((x0 + t * (x1 - x0), y0))           # topo
+                    samples.append((x0 + t * (x1 - x0), y1))           # fundo
+                    samples.append((x0,                  y0 + t * (y1 - y0)))  # esquerda
+                    samples.append((x1,                  y0 + t * (y1 - y0)))  # direita
+            elif tool == "circle":
+                cx_e = (x0 + x1) / 2.0
+                cy_e = (y0 + y1) / 2.0
+                rx = abs(x1 - x0) / 2.0
+                ry = abs(y1 - y0) / 2.0
+                for i in range(N + 1):
+                    angle = 2.0 * math.pi * i / N
+                    samples.append((cx_e + rx * math.cos(angle),
+                                    cy_e + ry * math.sin(angle)))
+
+            for sx, sy in samples:
+                for ex, ey in eraser_pts:
+                    if (sx - ex) ** 2 + (sy - ey) ** 2 <= eraser_r2:
+                        return True
+            return False
+
+        # ── pen/highlighter: verifica pontos armazenados ─────────────────────
+        for pt, _ in stroke:
+            px, py = pt.x(), pt.y()
+            for ex, ey in eraser_pts:
+                if (px - ex) ** 2 + (py - ey) ** 2 <= eraser_r2:
+                    return True
+        return False
 
     def _find_stroke_at(self, pos: QPoint) -> "int | None":
         """Retorna o índice do stroke cujo círculo de arrasto contém pos."""
@@ -980,30 +1171,41 @@ class OverlayWindow(QWidget):
         self._drawing = False
         if self._current_stroke:
             stroke = list(self._current_stroke)
-            self._strokes.append(stroke)
-            self._invalidate_erased_cache()  # novo stroke pode cobrir strokes existentes
-            if self._whiteboard:
-                # Commit incremental no _wb_canvas (sem rebuild completo — O(stroke_pts))
-                if self._wb_canvas is not None:
-                    wb_p = QPainter(self._wb_canvas)
-                    wb_p.setRenderHint(QPainter.RenderHint.Antialiasing)
-                    wb_p.translate(self._wb_pan)
-                    wb_p.scale(self._wb_zoom, self._wb_zoom)
-                    self._draw_stroke(wb_p, stroke)
-                    wb_p.end()
-                # se _wb_canvas é None, paintEvent recria do zero na próxima frame
-            elif self._erase_scratch is not None:
-                # Borracha: scratch já tem o resultado final — promove a canvas
-                self._canvas = self._erase_scratch
+
+            if self._tool == "eraser" and not self._whiteboard:
+                # ── Apagamento destrutivo ─────────────────────────────────────────
+                # Remove/divide strokes geometricamente em _strokes.
+                # Não adiciona stroke de borracha — sem fantasmas invisíveis.
+                before_snap = list(self._strokes)
+                self._apply_destructive_erase(stroke)
+                self._undo_ops.append(("erase", before_snap))
+                # _undo_stack foi limpo em mousePressEvent (nova acção cancela redo)
                 self._erase_scratch = None
-            elif self._pen_scratch is not None:
-                # Pen/highlighter: descarta layer; commita só o traço — evita blit de tela
-                self._pen_scratch = None
-                self._ensure_canvas()
-                self._commit_stroke(stroke)
+                # _canvas e _wb_canvas já invalidados em _apply_destructive_erase
             else:
-                self._ensure_canvas()
-                self._commit_stroke(stroke)
+                # ── Stroke normal (pen, highlighter, line, rect, circle,
+                #                   eraser em WB, text — embora text não passe aqui) ──
+                self._strokes.append(stroke)
+                self._undo_ops.append(("add",))
+                self._invalidate_erased_cache()
+                if self._whiteboard:
+                    # Commit incremental no _wb_canvas (O(stroke_pts))
+                    if self._wb_canvas is not None:
+                        wb_p = QPainter(self._wb_canvas)
+                        wb_p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                        wb_p.translate(self._wb_pan)
+                        wb_p.scale(self._wb_zoom, self._wb_zoom)
+                        self._draw_stroke(wb_p, stroke)
+                        wb_p.end()
+                    # se _wb_canvas é None, paintEvent recria do zero na próxima frame
+                elif self._pen_scratch is not None:
+                    # Pen/highlighter: descarta layer; commita só o traço
+                    self._pen_scratch = None
+                    self._ensure_canvas()
+                    self._commit_stroke(stroke)
+                else:
+                    self._ensure_canvas()
+                    self._commit_stroke(stroke)
         self._current_stroke = []
         self.update()
 
