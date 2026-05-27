@@ -484,6 +484,12 @@ class OverlayWindow(QWidget):
         if stroke[0][1].get("tool") == "text":
             p = stroke[0][0]
             return QPointF(p.x(), p.y())
+        if stroke[0][1].get("tool") == "bitmap":
+            p = stroke[0][0]
+            px = stroke[0][1].get("pixmap")
+            if px:
+                return QPointF(p.x() + px.width() / 2.0, p.y() + px.height() / 2.0)
+            return QPointF(p.x(), p.y())
         pts = [pt for pt, _ in stroke]
         return QPointF(
             sum(p.x() for p in pts) / len(pts),
@@ -500,6 +506,8 @@ class OverlayWindow(QWidget):
         stroke = self._strokes[stroke_idx]
         if not stroke:
             return []
+        if stroke[0][1].get("tool") == "bitmap":
+            return []  # bitmap já tem erasers baked in
         pen_pts = [(pt.x(), pt.y()) for pt, _ in stroke]
         if not pen_pts:
             return []
@@ -531,11 +539,73 @@ class OverlayWindow(QWidget):
                 linked.append(j)
         return linked
 
+    def _bake_stroke_with_erasers(self, stroke_idx: int, eraser_indices: list[int]) -> None:
+        """Converte stroke + erasers ancorados num bitmap stroke independente.
+
+        Renderiza stroke e erasers num QPixmap local (com SourceOver + Clear internos).
+        O bitmap é depois composited com SourceOver no canvas principal — os buracos do
+        eraser ficam transparentes no bitmap mas NÃO apagam pixels de outros strokes.
+        """
+        stroke = self._strokes[stroke_idx]
+        if not stroke:
+            return
+
+        def _half_w(s: list) -> float:
+            t = s[0][1].get("tool", "pen")
+            sz = s[0][1].get("size", 3)
+            if t == "eraser":     return sz * 2       # largura total = size*4
+            if t == "highlighter": return sz * 3      # largura total = size*6
+            return sz / 2.0
+
+        all_pts = [(pt.x(), pt.y()) for pt, _ in stroke]
+        pad = _half_w(stroke)
+        for j in eraser_indices:
+            s = self._strokes[j]
+            all_pts.extend((pt.x(), pt.y()) for pt, _ in s)
+            pad = max(pad, _half_w(s))
+        pad += 2  # margem anti-aliasing
+
+        min_x = max(0, int(min(p[0] for p in all_pts) - pad))
+        min_y = max(0, int(min(p[1] for p in all_pts) - pad))
+        max_x = min(self.width(),  int(max(p[0] for p in all_pts) + pad + 1))
+        max_y = min(self.height(), int(max(p[1] for p in all_pts) + pad + 1))
+        w, h = max_x - min_x, max_y - min_y
+        if w <= 0 or h <= 0:
+            return
+
+        pixmap = QPixmap(w, h)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        gp = QPainter(pixmap)
+        gp.setRenderHint(QPainter.RenderHint.Antialiasing)
+        ox, oy = -min_x, -min_y
+
+        def shifted(s: list) -> list:
+            return [(QPointF(pt.x() + ox, pt.y() + oy), props) for pt, props in s]
+
+        self._draw_stroke(gp, shifted(stroke))
+        for j in eraser_indices:
+            self._draw_stroke(gp, shifted(self._strokes[j]))
+        gp.end()
+
+        # Substitui o stroke pelo bitmap
+        self._strokes[stroke_idx] = [(QPointF(min_x, min_y), {
+            "tool":    "bitmap",
+            "pixmap":  pixmap,
+            "color":   QColor(0, 0, 0, 0),
+            "size":    0,
+        })]
+        # Remove erasers do maior para o menor para não deslocar índices
+        for j in sorted(eraser_indices, reverse=True):
+            del self._strokes[j]
+        self._canvas = None
+
     def _is_fully_erased(self, idx: int) -> bool:
         """True se todos os pontos amostrados do stroke estão cobertos por erasers posteriores."""
         stroke = self._strokes[idx]
         if not stroke:
             return True
+        if stroke[0][1].get("tool") == "bitmap":
+            return False  # bitmap: erasers já baked in, não rastreamos por pontos
         later_erasers: list[tuple[float, list[tuple[float, float]]]] = []
         for j in range(idx + 1, len(self._strokes)):
             s = self._strokes[j]
@@ -595,6 +665,9 @@ class OverlayWindow(QWidget):
         stroke = self._strokes[idx]
         if not stroke:
             return
+        if stroke[0][1].get("tool") == "bitmap":
+            return  # bitmap não é escalável (renderização pré-fixada)
+            return
         if stroke[0][1].get("tool") == "text":
             pt, props = stroke[0]
             new_size = props["size"] * factor
@@ -649,8 +722,21 @@ class OverlayWindow(QWidget):
         if self._tool == "drag":
             idx = self._find_stroke_at(event.pos())
             if idx is not None:
+                # Bake linked erasers → bitmap (só modo normal; wb usa outra render path)
+                if not self._whiteboard:
+                    linked = self._find_linked_erasers(idx)
+                    if linked:
+                        self._bake_stroke_with_erasers(idx, linked)
+                        # _bake_stroke_with_erasers remove linked da lista; idx mantém-se
+                # Traz o stroke para o topo da z-order (fica acima de erasers globais)
+                if idx < len(self._strokes) - 1:
+                    stroke_item = self._strokes[idx]
+                    del self._strokes[idx]
+                    self._strokes.append(stroke_item)
+                    idx = len(self._strokes) - 1
+                    self._canvas = None
                 self._drag_stroke_idx = idx
-                self._drag_linked_erasers = self._find_linked_erasers(idx)
+                self._drag_linked_erasers = []
                 self._drag_last_pos = event.pos()
                 self._drawing = True
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
@@ -755,17 +841,6 @@ class OverlayWindow(QWidget):
         if self._tool == "drag":
             if self._drawing:
                 self._drawing = False
-                idx = self._drag_stroke_idx
-                if idx is not None:
-                    # Traz o stroke arrastado + erasers ancorados para o topo da z-order.
-                    # Sem isso, um eraser com índice maior apagaria o stroke durante
-                    # _rebuild_canvas mesmo que o stroke tenha sido movido para cima dele.
-                    indices = sorted(set([idx] + self._drag_linked_erasers))
-                    strokes_to_move = [self._strokes[i] for i in indices]
-                    for i in reversed(indices):
-                        del self._strokes[i]
-                    self._strokes.extend(strokes_to_move)
-                    self._canvas = None
                 self._drag_stroke_idx = None
                 self._drag_linked_erasers = []
                 self._drag_last_pos = None
@@ -875,6 +950,16 @@ class OverlayWindow(QWidget):
 
         props = stroke[0][1]
         tool, color, size = props["tool"], props["color"], props["size"]
+
+        # Bitmap stroke: QPixmap pré-renderizado, composited com SourceOver
+        if tool == "bitmap":
+            px = props.get("pixmap")
+            if px is not None:
+                painter.setCompositionMode(
+                    QPainter.CompositionMode.CompositionMode_SourceOver)
+                anchor = stroke[0][0]
+                painter.drawPixmap(int(anchor.x()), int(anchor.y()), px)
+            return
 
         if tool == "eraser":
             if self._whiteboard:
