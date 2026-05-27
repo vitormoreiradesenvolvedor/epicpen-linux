@@ -1,6 +1,6 @@
 from pathlib import Path
 from PyQt6.QtWidgets import QSystemTrayIcon, QMenu, QApplication
-from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QBrush, QPen, QFont
+from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QBrush, QPen, QFont, QCursor
 from PyQt6.QtCore import Qt, QRect
 
 _ICON_FILE = Path(__file__).parent.parent / "resources" / "icons" / "epicpen.png"
@@ -70,15 +70,18 @@ class TrayIcon(QSystemTrayIcon):
         act_quit = menu.addAction("Sair")
         act_quit.triggered.connect(QApplication.instance().quit)
 
-        self.setContextMenu(menu)
+        # Não chamar setContextMenu — evita que KDE/SNI registe o menu via DBus
+        # e mostre animação/popup automático em cliques esquerdo e scroll.
+        self._menu = menu
 
     # ── Slots ─────────────────────────────────────────────────────────────
 
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason):
-        # Apenas o botão direito tem função: abre o menu de contexto (comportamento
-        # automático do Qt ao chamar setContextMenu). Clique esquerdo, duplo-clique
-        # e scroll não executam nenhuma ação.
-        pass
+        # Apenas o botão direito abre o menu. Esquerdo, duplo-clique e scroll
+        # não têm função — não chamar setContextMenu garante que o KDE/SNI
+        # não exibe animação nesses eventos.
+        if reason == QSystemTrayIcon.ActivationReason.Context:
+            self._menu.popup(QCursor.pos())
 
     def _toggle_visibility(self):
         self._visible = not self._visible

@@ -64,7 +64,7 @@ def main():
     toolbar.set_tray(tray)
 
     # Insere "Sobre" antes de "Sair" no menu da tray (sem modificar tray.py)
-    _tray_menu = tray.contextMenu()
+    _tray_menu = tray._menu
     _quit_act  = _tray_menu.actions()[-1]          # "Sair" é sempre o último
     _act_about = QAction("ℹ️  Sobre", _tray_menu)
     _act_about.triggered.connect(lambda: _show_about(overlay))
