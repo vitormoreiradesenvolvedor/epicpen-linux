@@ -813,7 +813,22 @@ class OverlayWindow(QWidget):
 
         if not self._drawing:
             return
-        self._current_stroke.append((self._to_canvas(pos), self._brush_props()))
+        new_pt = self._to_canvas(pos)
+
+        # Decimação de pontos: ignora movimentos menores que o limiar mínimo.
+        # Evita strokes com milhares de pontos (lentidão em _rebuild_canvas,
+        # _is_fully_erased e _find_linked_erasers) e reduz chamadas QPainter.
+        if self._current_stroke:
+            last_pt = self._current_stroke[-1][0]
+            dx = new_pt.x() - last_pt.x()
+            dy = new_pt.y() - last_pt.y()
+            # Borracha: mínimo = tamanho do raio (eraser já é largo, pontos densos desnecessários)
+            # Demais ferramentas: 2px — suavidade visual suficiente
+            min_d2 = float(self._size) ** 2 if self._tool == "eraser" else 4.0
+            if dx * dx + dy * dy < min_d2:
+                return  # ponto desnecessário → sem update
+
+        self._current_stroke.append((new_pt, self._brush_props()))
 
         # Borracha: aplica apenas o novo segmento no scratch — O(1) por frame (só fora do wb)
         if self._tool == "eraser" and self._erase_scratch is not None:
