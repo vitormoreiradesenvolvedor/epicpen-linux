@@ -75,8 +75,10 @@ class TrayIcon(QSystemTrayIcon):
     # ── Slots ─────────────────────────────────────────────────────────────
 
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason):
-        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
-            self._toggle_visibility()
+        # Apenas o botão direito tem função: abre o menu de contexto (comportamento
+        # automático do Qt ao chamar setContextMenu). Clique esquerdo, duplo-clique
+        # e scroll não executam nenhuma ação.
+        pass
 
     def _toggle_visibility(self):
         self._visible = not self._visible
