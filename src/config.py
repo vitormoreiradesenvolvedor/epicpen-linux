@@ -11,6 +11,7 @@ DEFAULTS: dict = {
     "toolbar_pos": {"x": 20, "y": 150},
     "magnifier_zoom": 3,
     "whiteboard": False,
+    "start_hidden": False,
 }
 
 
