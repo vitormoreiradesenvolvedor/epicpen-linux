@@ -889,6 +889,19 @@ class ToolbarWindow(QWidget):
                 return screen
         return None
 
+    def _nearest_screen(self, pos: QPoint):
+        """Devolve o QScreen mais próximo de pos (útil para gaps entre monitores)."""
+        from PyQt6.QtWidgets import QApplication
+        best, best_d = None, float('inf')
+        for scr in QApplication.screens():
+            g = scr.geometry()
+            cx = max(g.left(), min(pos.x(), g.right()))
+            cy = max(g.top(),  min(pos.y(), g.bottom()))
+            d  = (pos.x() - cx) ** 2 + (pos.y() - cy) ** 2
+            if d < best_d:
+                best_d, best = d, scr
+        return best
+
     def _clamp_pos(self, pos: QPoint) -> QPoint:
         """Clipa pos para que a toolbar não saia da área disponível de nenhum monitor."""
         from PyQt6.QtWidgets import QApplication
@@ -929,19 +942,21 @@ class ToolbarWindow(QWidget):
         """Move a superfície layer-shell da toolbar para outro monitor.
 
         hide+show força a recriação da wl_layer_surface no novo output.
-        Overlay é mostrado primeiro; toolbar (último mapeado) fica acima na z-order.
+        move_to é chamado ANTES de hide+show: o LayerShellQt::Window guarda as
+        margens e aplica-as na criação da nova superfície, evitando o frame
+        inicial em (0,0) que fazia a toolbar aparecer no canto do monitor.
         """
         if not self._lsw_ptr:
             return
         origin = screen.geometry().topLeft()
         rel = self._lsw_pos - origin
+        layershell.move_to(self._lsw_ptr, rel.x(), rel.y())
         self._overlay.change_screen(screen)
         wh = self.windowHandle()
         if wh:
             wh.setScreen(screen)
         self.hide()
         self.show()
-        layershell.move_to(self._lsw_ptr, rel.x(), rel.y())
 
     # ── Drag + event filter ───────────────────────────────────────────────────
 
@@ -1043,10 +1058,15 @@ class ToolbarWindow(QWidget):
             self._dragging    = False
             if was_dragging:
                 if self._lsw_ptr:
-                    cursor_abs = event.scenePosition().toPoint() + self._lsw_pos
-                    new_screen = self._screen_at(cursor_abs)
-                    if new_screen and new_screen != self._current_screen:
-                        self._lsw_pos = self._clamp_pos(cursor_abs)
+                    cursor_abs   = event.scenePosition().toPoint() + self._lsw_pos
+                    # desired_pos mantém o offset cursor-toolbar do início do drag,
+                    # evitando que a toolbar apareça com o topo no cursor.
+                    cursor_delta = cursor_abs - self._drag_start_screen
+                    desired_pos  = self._drag_start_pos + cursor_delta
+                    new_screen   = (self._screen_at(cursor_abs)
+                                    or self._nearest_screen(cursor_abs))
+                    if new_screen and new_screen is not self._current_screen:
+                        self._lsw_pos = self._clamp_to_screen(desired_pos, new_screen)
                         self._current_screen = new_screen
                         self._change_toolbar_screen(new_screen)
                 elif self.parent() is None:

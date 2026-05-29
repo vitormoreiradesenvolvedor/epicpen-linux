@@ -96,8 +96,14 @@ def main():
     if _tb_screen is None:
         print(f"[toolbar] posição salva ({_tb_x},{_tb_y}+{_tb_w}×{_tb_h}) não cabe em nenhum monitor — resetando para (20,150)")
         _tb_x, _tb_y = 20, 150
-        _tb_screen = _primary
         _tb_abs = _QPoint(_tb_x, _tb_y)
+        # Re-procura o ecrã correcto para a posição de reset.
+        # Não usar _primary cegamente: se _primary for o ecrã secundário,
+        # a superfície ficaria no output errado com margens negativas.
+        _tb_screen = next(
+            (s for s in QApplication.screens() if s.geometry().contains(_tb_abs)),
+            _primary,
+        )
 
     # overlay → Layer::Top, 4-anchor + ExclusiveZone=0, no mesmo monitor que a toolbar.
     # compositor dimensiona a janela para a área disponível (exclui painel KDE).
