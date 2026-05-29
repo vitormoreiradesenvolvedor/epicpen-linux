@@ -312,15 +312,15 @@ class ToolbarWindow(QWidget):
         for b in self._tool_buttons:
             lay.addWidget(b, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        self._btn_pen.clicked.connect(lambda: self._select_tool("pen"))
-        self._btn_hl.clicked.connect(lambda: self._select_tool("highlighter"))
-        self._btn_line.clicked.connect(lambda: self._select_tool("line"))
-        self._btn_rect.clicked.connect(lambda: self._select_tool("rect"))
-        self._btn_circle.clicked.connect(lambda: self._select_tool("circle"))
-        self._btn_eraser.clicked.connect(lambda: self._select_tool("eraser"))
-        self._btn_laser.clicked.connect(lambda: self._select_tool("laser"))
-        self._btn_drag.clicked.connect(lambda: self._select_tool("drag"))
-        self._btn_text.clicked.connect(lambda: self._select_tool("text"))
+        self._btn_pen.clicked.connect(lambda c: self._select_tool("pen") if c else self._activate_arrow_mode())
+        self._btn_hl.clicked.connect(lambda c: self._select_tool("highlighter") if c else self._activate_arrow_mode())
+        self._btn_line.clicked.connect(lambda c: self._select_tool("line") if c else self._activate_arrow_mode())
+        self._btn_rect.clicked.connect(lambda c: self._select_tool("rect") if c else self._activate_arrow_mode())
+        self._btn_circle.clicked.connect(lambda c: self._select_tool("circle") if c else self._activate_arrow_mode())
+        self._btn_eraser.clicked.connect(lambda c: self._select_tool("eraser") if c else self._activate_arrow_mode())
+        self._btn_laser.clicked.connect(lambda c: self._select_tool("laser") if c else self._activate_arrow_mode())
+        self._btn_drag.clicked.connect(lambda c: self._select_tool("drag") if c else self._activate_arrow_mode())
+        self._btn_text.clicked.connect(lambda c: self._select_tool("text") if c else self._activate_arrow_mode())
 
         self._add_sep(lay)
 
@@ -532,6 +532,11 @@ class ToolbarWindow(QWidget):
             self._overlay.raise_()
 
     # ── Tool selection ────────────────────────────────────────────────────────
+
+    def _activate_arrow_mode(self):
+        """Clique num item já ativo: desmarca tudo e entra em modo seta (passthrough)."""
+        self._btn_toggle.setChecked(True)
+        self._toggle_passthrough(True)
 
     def _select_tool(self, tool: str):
         # Ao selecionar ferramenta, sai de qualquer modo de pausa
