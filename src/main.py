@@ -60,7 +60,7 @@ def main():
 
     overlay = OverlayWindow()
     toolbar = ToolbarWindow(overlay, config=settings)
-    tray    = TrayIcon(overlay, toolbar, app)
+    tray    = TrayIcon(overlay, toolbar, app, config=settings)
     toolbar.set_tray(tray)
 
     # Insere "Sobre" antes de "Sair" no menu da tray (sem modificar tray.py)
@@ -173,11 +173,18 @@ def main():
             lambda _: _ka_timer.start()
         )
 
+    # Iniciar oculto se a opção estiver activa
+    if settings.get("start_hidden", False):
+        tray._toggle_visibility()
+
+    def _full_state() -> dict:
+        return {**toolbar.get_state(), **tray.get_state()}
+
     # Autosave com debounce de 500 ms para não escrever em disco a cada evento
     _save_timer = QTimer()
     _save_timer.setSingleShot(True)
     _save_timer.setInterval(500)
-    _save_timer.timeout.connect(lambda: cfg.save(toolbar.get_state()))
+    _save_timer.timeout.connect(lambda: cfg.save(_full_state()))
 
     def schedule_save():
         _save_timer.start()
@@ -189,12 +196,13 @@ def main():
     toolbar._color_btn.clicked.connect(lambda: schedule_save())
     for b in toolbar._tool_buttons:
         b.clicked.connect(lambda _: schedule_save())
+    tray._act_start_hidden.triggered.connect(lambda _: schedule_save())
 
     # Salva posição da toolbar ao mover
     _move_timer = QTimer()
     _move_timer.setSingleShot(True)
     _move_timer.setInterval(800)
-    _move_timer.timeout.connect(lambda: cfg.save(toolbar.get_state()))
+    _move_timer.timeout.connect(lambda: cfg.save(_full_state()))
 
     original_release = toolbar.mouseReleaseEvent
 
@@ -205,7 +213,7 @@ def main():
     toolbar.mouseReleaseEvent = _on_release
 
     # Salva ao fechar
-    app.aboutToQuit.connect(lambda: cfg.save(toolbar.get_state()))
+    app.aboutToQuit.connect(lambda: cfg.save(_full_state()))
 
     sys.exit(app.exec())
 
