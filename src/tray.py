@@ -1,9 +1,13 @@
+import os
+import sys
 from pathlib import Path
 from PyQt6.QtWidgets import QSystemTrayIcon, QMenu, QApplication
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QBrush, QPen, QFont, QCursor
 from PyQt6.QtCore import Qt, QRect
 
-_ICON_FILE = Path(__file__).parent.parent / "resources" / "icons" / "epicpen.png"
+_ICON_FILE      = Path(__file__).parent.parent / "resources" / "icons" / "epicpen.png"
+_AUTOSTART_DIR  = Path.home() / ".config" / "autostart"
+_AUTOSTART_FILE = _AUTOSTART_DIR / "epicpen-linux.desktop"
 
 
 def _make_icon() -> QIcon:
@@ -31,11 +35,12 @@ def _make_icon() -> QIcon:
 
 
 class TrayIcon(QSystemTrayIcon):
-    def __init__(self, overlay, toolbar, app: QApplication):
+    def __init__(self, overlay, toolbar, app: QApplication, config: dict | None = None):
         super().__init__(_make_icon(), app)
         self._overlay = overlay
         self._toolbar = toolbar
         self._visible = True
+        self._cfg = config or {}
 
         self.setToolTip("EpicPen Linux")
         self._build_menu()
@@ -67,6 +72,20 @@ class TrayIcon(QSystemTrayIcon):
 
         menu.addSeparator()
 
+        act_autostart = menu.addAction("🔄  Iniciar no arranque do sistema")
+        act_autostart.setCheckable(True)
+        act_autostart.setChecked(_AUTOSTART_FILE.exists())
+        act_autostart.triggered.connect(self._toggle_autostart)
+        self._act_autostart = act_autostart
+
+        act_start_hidden = menu.addAction("👁  Iniciar oculto")
+        act_start_hidden.setCheckable(True)
+        act_start_hidden.setChecked(self._cfg.get("start_hidden", False))
+        act_start_hidden.triggered.connect(self._toggle_start_hidden)
+        self._act_start_hidden = act_start_hidden
+
+        menu.addSeparator()
+
         act_quit = menu.addAction("Sair")
         act_quit.triggered.connect(QApplication.instance().quit)
 
@@ -74,6 +93,11 @@ class TrayIcon(QSystemTrayIcon):
         # popup nativamente (sem parent surface o QMenu.popup() falha em Wayland).
         self._menu = menu
         self.setContextMenu(menu)
+
+    # ── State ──────────────────────────────────────────────────────────────
+
+    def get_state(self) -> dict:
+        return {"start_hidden": self._act_start_hidden.isChecked()}
 
     # ── Slots ─────────────────────────────────────────────────────────────
 
@@ -100,6 +124,38 @@ class TrayIcon(QSystemTrayIcon):
     def _toggle_whiteboard(self, checked: bool):
         self._overlay.set_whiteboard(checked)
         self._toolbar._btn_whiteboard.setChecked(checked)
+
+    def _toggle_start_hidden(self, checked: bool):
+        # Persistido pelo save centralizado em main.py via get_state()
+        pass
+
+    def _toggle_autostart(self, checked: bool):
+        if checked:
+            exec_path = self._resolve_exec_path()
+            _AUTOSTART_DIR.mkdir(parents=True, exist_ok=True)
+            _AUTOSTART_FILE.write_text(
+                "[Desktop Entry]\n"
+                "Type=Application\n"
+                "Name=EpicPen Linux\n"
+                f"Exec={exec_path}\n"
+                "Hidden=false\n"
+                "X-GNOME-Autostart-enabled=true\n"
+                "NoDisplay=false\n",
+                encoding="utf-8",
+            )
+        else:
+            if _AUTOSTART_FILE.exists():
+                _AUTOSTART_FILE.unlink()
+
+    @staticmethod
+    def _resolve_exec_path() -> str:
+        """Devolve o caminho correcto para o Exec= do ficheiro .desktop."""
+        appimage = os.environ.get("APPIMAGE")
+        if appimage:
+            return appimage
+        # Execução a partir do código-fonte
+        script = Path(sys.argv[0]).resolve()
+        return f"python3 {script}"
 
     def _take_screenshot(self):
         import screenshot as sc
