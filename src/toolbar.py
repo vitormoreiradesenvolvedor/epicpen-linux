@@ -982,8 +982,13 @@ class ToolbarWindow(QWidget):
             self._toggle_drawing(self._btn_toggle.isChecked())
             return True
 
-        # Botão direito em qualquer filho → toggle
+        # Botão direito em qualquer filho → toggle; mas em ferramenta já ativa → modo seta
         if t == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.RightButton:
+            if (isinstance(obj, QPushButton)
+                    and obj in self._tool_buttons
+                    and obj.isChecked()):
+                self._activate_arrow_mode()
+                return True
             self._btn_toggle.toggle()
             self._toggle_drawing(self._btn_toggle.isChecked())
             return True
