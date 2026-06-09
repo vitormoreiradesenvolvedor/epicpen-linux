@@ -16,6 +16,29 @@ _IS_WAYLAND = (
     and os.environ.get("QT_QPA_PLATFORM", "wayland") != "xcb"
 )
 
+# Caminhos extras buscados quando o AppImage tem PATH restrito
+_EXTRA_PATHS = [
+    "/usr/bin", "/usr/local/bin", "/bin",
+    "/usr/sbin", "/sbin",
+    str(Path.home() / ".local" / "bin"),
+    "/snap/bin",
+    "/usr/games",
+    "/usr/local/games",
+    "/opt/bin",
+]
+
+
+def _which(tool: str) -> str | None:
+    """Localiza o executável no PATH e em diretórios fixos do sistema."""
+    found = shutil.which(tool)
+    if found:
+        return found
+    for p in _EXTRA_PATHS:
+        candidate = os.path.join(p, tool)
+        if os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
 
 # ── Ferramentas disponíveis ───────────────────────────────────────────────────
 
@@ -26,7 +49,7 @@ def _available_tools() -> list[str]:
         "mate-screenshot", "xfce4-screenshooter",
         "maim", "scrot",
     ]
-    return [t for t in known if shutil.which(t)]
+    return [t for t in known if _which(t)]
 
 
 # ── Execução de ferramentas ───────────────────────────────────────────────────
@@ -62,8 +85,10 @@ def _grab_wayland_fullscreen(path: str) -> bool:
         ["scrot", path],
     ]
     for cmd in candidates:
-        if not shutil.which(cmd[0]):
+        tool_bin = _which(cmd[0])
+        if not tool_bin:
             continue
+        cmd[0] = tool_bin
         if _try_tool(cmd, path):
             return True
     return False
@@ -79,8 +104,10 @@ def _grab_wayland_region(x: int, y: int, w: int, h: int, path: str) -> bool:
         ["scrot", "-a", f"{x},{y},{w},{h}", path],
     ]
     for cmd in candidates:
-        if not shutil.which(cmd[0]):
+        tool_bin = _which(cmd[0])
+        if not tool_bin:
             continue
+        cmd[0] = tool_bin
         if _try_tool(cmd, path):
             return True
     return False
@@ -188,8 +215,19 @@ def _capture_to_file(dest: Path, screen=None) -> QPixmap | None:
             return None
         if screen is not None:
             px = _crop_to_screen(px, screen)
-            if not px.save(str(dest)):
-                return None
+            # QPixmap.save() pode falhar silenciosamente no Wayland;
+            # salvar em tmp2 e copiar binário garante escrita real.
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f2:
+                tmp2 = f2.name
+            try:
+                if not px.save(tmp2):
+                    return None
+                shutil.copy2(tmp2, dest)
+            finally:
+                try:
+                    os.unlink(tmp2)
+                except OSError:
+                    pass
         else:
             # Cópia binária direta: evita recompressão e QPixmap.save() silencioso
             shutil.copy2(tmp, dest)
