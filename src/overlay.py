@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import QWidget, QApplication
 from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, pyqtSignal
 from PyQt6.QtGui import (
     QPainter, QPen, QColor, QScreen, QPainterPath,
-    QRadialGradient, QBrush, QPixmap, QFont,
+    QRadialGradient, QBrush, QPixmap, QFont, QFontMetrics,
 )
 from cursors import make_pen_cursor, make_eraser_cursor, make_crosshair_cursor
 
@@ -568,6 +568,21 @@ class OverlayWindow(QWidget):
             self._canvas.fill(Qt.GlobalColor.transparent)
         self.update()
 
+    def delete_stroke(self, idx: int):
+        """Remove um stroke específico por índice. Suporta undo via Ctrl+Z."""
+        if idx < 0 or idx >= len(self._strokes):
+            return
+        before = list(self._strokes)
+        self._strokes.pop(idx)
+        self._undo_ops.append(("erase", before))
+        self._undo_stack.clear()
+        self._canvas = None
+        self._wb_canvas = None
+        self._invalidate_erased_cache()
+        self._drag_hover_idx = None
+        self._drag_stroke_idx = None
+        self.update()
+
     # ── Drag tool helpers ─────────────────────────────────────────────────────
 
     _DRAG_HANDLE_R = 12.0  # raio do círculo visual E da área de clique
@@ -910,11 +925,25 @@ class OverlayWindow(QWidget):
             return False
         tool = stroke[0][1].get("tool")
 
-        # ── text: único ponto âncora ──────────────────────────────────────────
+        # ── text: bounding box calculada via QFontMetrics ────────────────────
         if tool == "text":
+            props = stroke[0][1]
             pt = stroke[0][0]
-            return any((pt.x() - ex) ** 2 + (pt.y() - ey) ** 2 <= eraser_r2
-                       for ex, ey in eraser_pts)
+            font = QFont(props.get("font_family", "Sans Serif"))
+            font.setPointSizeF(max(1.0, float(props.get("size", 16))))
+            fm = QFontMetrics(font)
+            lines = props.get("text", "").split("\n")
+            bw = max((fm.horizontalAdvance(l) for l in lines), default=fm.horizontalAdvance(" "))
+            bh = fm.height() * len(lines)
+            # drawText usa baseline como Y: topo real = pt.y() - ascent
+            bx = pt.x()
+            by = pt.y() - fm.ascent()
+            eraser_r = eraser_r2 ** 0.5
+            return any(
+                bx - eraser_r <= ex <= bx + bw + eraser_r and
+                by - eraser_r <= ey <= by + bh + eraser_r
+                for ex, ey in eraser_pts
+            )
 
         # ── bitmap: verifica bounding box ────────────────────────────────────
         if tool == "bitmap":

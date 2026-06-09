@@ -1157,7 +1157,11 @@ class ToolbarWindow(QWidget):
         elif key == Qt.Key.Key_C:
             self._pick_color()
         elif key == Qt.Key.Key_Delete:
-            self._overlay.clear()
+            if (self._overlay._tool == "drag"
+                    and self._overlay._drag_hover_idx is not None):
+                self._overlay.delete_stroke(self._overlay._drag_hover_idx)
+            else:
+                self._overlay.clear()
         elif key == Qt.Key.Key_W:
             self._btn_whiteboard.toggle()
             self._toggle_whiteboard(self._btn_whiteboard.isChecked())
