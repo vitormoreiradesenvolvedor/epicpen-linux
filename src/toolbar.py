@@ -688,7 +688,8 @@ class ToolbarWindow(QWidget):
 
     def _do_screenshot(self, clipboard: bool = False):
         import screenshot as sc
-        sc.capture(self, tray_icon=self._tray, copy_to_clipboard=clipboard)
+        sc.capture(self, tray_icon=self._tray, copy_to_clipboard=clipboard,
+                   screen=self._current_screen)
 
     # ── Mode toggles ──────────────────────────────────────────────────────────
 
