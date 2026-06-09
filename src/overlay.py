@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import QWidget, QApplication
 from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, pyqtSignal
 from PyQt6.QtGui import (
     QPainter, QPen, QColor, QScreen, QPainterPath,
-    QRadialGradient, QBrush, QPixmap, QFont,
+    QRadialGradient, QBrush, QPixmap, QFont, QFontMetrics,
 )
 from cursors import make_pen_cursor, make_eraser_cursor, make_crosshair_cursor
 
