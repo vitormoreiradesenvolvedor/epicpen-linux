@@ -130,6 +130,7 @@ def _make_qt_stubs():
     qtgui.QBrush          = MagicMock
     qtgui.QPixmap         = _QPixmap
     qtgui.QFont           = MagicMock
+    qtgui.QFontMetrics    = MagicMock
 
 
 _make_qt_stubs()
