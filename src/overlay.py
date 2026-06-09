@@ -23,6 +23,8 @@ class OverlayWindow(QWidget):
     # Emitido quando ferramenta texto activa e o utilizador clica na tela.
     # A toolbar conecta-se para abrir o diálogo de configuração de texto.
     text_placement_requested = pyqtSignal(QPoint)
+    # Emitido quando duplo-clique num texto existente em drag mode (int = índice do stroke).
+    text_edit_requested = pyqtSignal(int)
 
     def __init__(self):
         super().__init__()
@@ -1290,6 +1292,16 @@ class OverlayWindow(QWidget):
                 self._commit_stroke(stroke)
         self._current_stroke = []
         self.update()
+
+    def mouseDoubleClickEvent(self, event):
+        if (self._tool == "drag"
+                and event.button() == Qt.MouseButton.LeftButton):
+            idx = self._find_stroke_at(event.pos())
+            if idx is not None and self._strokes[idx][0][1].get("tool") == "text":
+                self.text_edit_requested.emit(idx)
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
 
     def wheelEvent(self, event):
         if self._whiteboard and not (self._tool == "drag"):
