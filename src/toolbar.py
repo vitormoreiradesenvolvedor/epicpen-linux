@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QSlider, QColorDialog, QFrame, QLayout,
-    QDialog, QLabel, QLineEdit, QSpinBox, QFontComboBox, QDialogButtonBox,
+    QDialog, QLabel, QLineEdit, QPlainTextEdit, QSpinBox, QFontComboBox, QDialogButtonBox,
 )
 from PyQt6.QtCore import Qt, QPoint, QTimer, QSize, QEvent
 from PyQt6.QtGui import QColor, QCursor
@@ -73,11 +73,12 @@ class TextDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.setSpacing(6)
 
-        lay.addWidget(QLabel("Texto:"))
-        self._text_edit = QLineEdit()
+        lay.addWidget(QLabel("Texto: (Ctrl+Enter para confirmar)"))
+        self._text_edit = QPlainTextEdit()
         self._text_edit.setMinimumWidth(250)
+        self._text_edit.setMinimumHeight(80)
         if initial_text:
-            self._text_edit.setText(initial_text)
+            self._text_edit.setPlainText(initial_text)
         lay.addWidget(self._text_edit)
 
         row_font = QHBoxLayout()
@@ -115,6 +116,7 @@ class TextDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)
+        self._text_edit.installEventFilter(self)
 
     def _pick_color(self):
         if self.windowFlags() & Qt.WindowType.Popup:
@@ -132,13 +134,22 @@ class TextDialog(QDialog):
                 self._color = c
                 self._update_color_preview()
 
+    def eventFilter(self, obj, event):
+        if (obj is self._text_edit
+                and event.type() == QEvent.Type.KeyPress
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self.accept()
+            return True
+        return super().eventFilter(obj, event)
+
     def _update_color_preview(self):
         self._color_btn.setStyleSheet(
             f"background:{self._color.name()}; border:1px solid #888;"
         )
 
     def text(self) -> str:
-        return self._text_edit.text()
+        return self._text_edit.toPlainText()
 
     def font_family(self) -> str:
         return self._font_combo.currentFont().family()
