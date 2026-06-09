@@ -1481,7 +1481,12 @@ class OverlayWindow(QWidget):
             painter.setFont(font)
             painter.setPen(QPen(color))
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
-            painter.drawText(raw[0], props.get("text", ""))
+            lines = props.get("text", "").split("\n")
+            fm = painter.fontMetrics()
+            line_h = fm.height()
+            origin = raw[0]
+            for i, line in enumerate(lines):
+                painter.drawText(QPointF(origin.x(), origin.y() + i * line_h), line)
         elif tool in ("pen", "highlighter", "eraser"):
             if len(pts_f) == 1:
                 painter.drawPoint(pts_f[0])
