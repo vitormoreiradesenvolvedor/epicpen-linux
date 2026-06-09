@@ -22,6 +22,7 @@ def _install_qt_stubs():
 
     qtw.QApplication = MagicMock()
     qtc.QTimer       = MagicMock()
+    qtc.QRect        = MagicMock()
     qtg.QClipboard   = MagicMock()
     qtg.QPixmap      = MagicMock()
 
@@ -58,41 +59,39 @@ def test_capture_schedules_80ms_delay():
     assert delay == 80
 
 
+def _mock_capture_to_file(dest: Path, screen=None):
+    """Substituto de _capture_to_file que cria o arquivo e retorna um pixmap mock."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(b"\x89PNG\r\n\x1a\n")  # cabeçalho PNG mínimo
+    px = MagicMock()
+    px.isNull.return_value = False
+    return px
+
+
 def test_do_capture_saves_to_save_dir(tmp_path):
     """O closure _do_capture deve salvar em _SAVE_DIR com nome correto."""
-    saved_paths = []
-
-    mock_pixmap = MagicMock()
-    mock_pixmap.isNull.return_value = False
-    mock_pixmap.save.side_effect = lambda p: saved_paths.append(Path(p))
-
     toolbar = MagicMock()
-
     original_dir = sc._SAVE_DIR
     sc._SAVE_DIR = tmp_path / "EpicPen"
 
     try:
         captured = {}
-
         with patch.object(sc, "QTimer") as mock_timer:
             mock_timer.singleShot.side_effect = lambda ms, fn: captured.update({"fn": fn})
-            with patch.object(sc, "grab_screen", return_value=mock_pixmap):
+            with patch.object(sc, "_capture_to_file", side_effect=_mock_capture_to_file):
                 sc.capture(toolbar)
                 captured["fn"]()
     finally:
         sc._SAVE_DIR = original_dir
 
-    assert len(saved_paths) == 1
-    assert re.match(r"epicpen_\d{8}_\d{6}\.png", saved_paths[0].name)
+    files = list((tmp_path / "EpicPen").glob("epicpen_*.png"))
+    assert len(files) == 1
+    assert re.match(r"epicpen_\d{8}_\d{6}\.png", files[0].name)
 
 
 def test_do_capture_restores_toolbar(tmp_path):
     """Após capturar, toolbar.show() deve ser chamado."""
-    mock_pixmap = MagicMock()
-    mock_pixmap.isNull.return_value = False
-    mock_pixmap.save = MagicMock()
     toolbar = MagicMock()
-
     original_dir = sc._SAVE_DIR
     sc._SAVE_DIR = tmp_path / "EpicPen"
 
@@ -100,7 +99,7 @@ def test_do_capture_restores_toolbar(tmp_path):
         captured = {}
         with patch.object(sc, "QTimer") as mock_timer:
             mock_timer.singleShot.side_effect = lambda ms, fn: captured.update({"fn": fn})
-            with patch.object(sc, "grab_screen", return_value=mock_pixmap):
+            with patch.object(sc, "_capture_to_file", side_effect=_mock_capture_to_file):
                 sc.capture(toolbar)
                 captured["fn"]()
     finally:
@@ -111,12 +110,8 @@ def test_do_capture_restores_toolbar(tmp_path):
 
 def test_do_capture_notifies_tray(tmp_path):
     """Se tray_icon fornecido, showMessage deve ser chamado após captura."""
-    mock_pixmap = MagicMock()
-    mock_pixmap.isNull.return_value = False
-    mock_pixmap.save = MagicMock()
     toolbar = MagicMock()
     tray = MagicMock()
-
     original_dir = sc._SAVE_DIR
     sc._SAVE_DIR = tmp_path / "EpicPen"
 
@@ -124,7 +119,7 @@ def test_do_capture_notifies_tray(tmp_path):
         captured = {}
         with patch.object(sc, "QTimer") as mock_timer:
             mock_timer.singleShot.side_effect = lambda ms, fn: captured.update({"fn": fn})
-            with patch.object(sc, "grab_screen", return_value=mock_pixmap):
+            with patch.object(sc, "_capture_to_file", side_effect=_mock_capture_to_file):
                 sc.capture(toolbar, tray_icon=tray)
                 captured["fn"]()
     finally:

@@ -6,7 +6,7 @@ from pathlib import Path
 from datetime import datetime
 
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QTimer, QRect
 from PyQt6.QtGui import QClipboard, QPixmap
 
 _SAVE_DIR = Path.home() / "Imagens" / "EpicPen"
@@ -17,75 +17,93 @@ _IS_WAYLAND = (
 )
 
 
-# ── Captura de tela ───────────────────────────────────────────────────────────
+# ── Ferramentas disponíveis ───────────────────────────────────────────────────
 
-def _grab_fullscreen_x11() -> QPixmap | None:
-    screen = QApplication.primaryScreen()
-    px = screen.grabWindow(0)
-    return px if not px.isNull() else None
-
-
-def _grab_fullscreen_wayland(path: str) -> bool:
-    """
-    Tenta capturar toda a tela no Wayland usando ferramentas do sistema.
-    Retorna True se salvou o arquivo com sucesso.
-    """
-    candidates = [
-        # grim — wlroots (Hyprland, Sway, etc.)
-        lambda p: (["grim", p], {}),
-        # gnome-screenshot — GNOME Wayland
-        lambda p: (["gnome-screenshot", f"--file={p}"], {}),
-        # spectacle — KDE Plasma
-        lambda p: (["spectacle", "--background", "--fullscreen", f"--output={p}"], {}),
-        # scrot — X11 / XWayland fallback
-        lambda p: (["scrot", p], {}),
+def _available_tools() -> list[str]:
+    known = [
+        "grim", "wayshot", "hyprshot",
+        "gnome-screenshot", "spectacle", "flameshot",
+        "mate-screenshot", "xfce4-screenshooter",
+        "maim", "scrot",
     ]
-    for make_cmd in candidates:
-        cmd, kwargs = make_cmd(path)
-        if not shutil.which(cmd[0]):
-            continue
-        try:
-            r = subprocess.run(cmd, capture_output=True, timeout=8, **kwargs)
-            if r.returncode == 0 and Path(path).exists() and Path(path).stat().st_size > 0:
-                return True
-        except Exception:
-            continue
-    return False
+    return [t for t in known if shutil.which(t)]
 
 
-def _grab_region_wayland(x: int, y: int, w: int, h: int, path: str) -> bool:
-    """Captura uma região com grim (wlroots) ou retorna False."""
-    if not shutil.which("grim"):
-        return False
+# ── Execução de ferramentas ───────────────────────────────────────────────────
+
+def _try_tool(cmd: list[str], path: str, timeout: int = 10) -> bool:
+    """Executa a ferramenta e verifica se produziu um arquivo válido."""
     try:
-        cmd = ["grim", "-g", f"{x},{y} {w}x{h}", path]
-        r = subprocess.run(cmd, capture_output=True, timeout=2)
-        return r.returncode == 0 and Path(path).exists()
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        return r.returncode == 0 and Path(path).exists() and Path(path).stat().st_size > 0
     except Exception:
         return False
 
 
-def grab_screen() -> QPixmap | None:
-    """Captura toda a tela. Funciona em X11 e Wayland."""
-    if not _IS_WAYLAND:
-        return _grab_fullscreen_x11()
+def _grab_wayland_fullscreen(path: str) -> bool:
+    """Tenta capturar toda a tela no Wayland. Salva em `path`. Retorna True se ok."""
+    candidates: list[list[str]] = [
+        # grim — wlroots (Hyprland, Sway, etc.)
+        ["grim", path],
+        # wayshot — alternativa wlroots
+        ["wayshot", "--file", path],
+        # gnome-screenshot — GNOME Wayland / Ubuntu
+        ["gnome-screenshot", f"--file={path}"],
+        # spectacle — KDE Plasma (-b background, -f fullscreen, -n sem notificação)
+        ["spectacle", "-b", "-f", "-n", "-o", path],
+        # flameshot — multi-DE
+        ["flameshot", "full", "--path", path],
+        # mate-screenshot — MATE
+        ["mate-screenshot", "--file", path],
+        # xfce4-screenshooter — XFCE
+        ["xfce4-screenshooter", "--fullscreen", "--save", path],
+        # maim / scrot — XWayland fallback
+        ["maim", path],
+        ["scrot", path],
+    ]
+    for cmd in candidates:
+        if not shutil.which(cmd[0]):
+            continue
+        if _try_tool(cmd, path):
+            return True
+    return False
 
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-        tmp = f.name
-    try:
-        if _grab_fullscreen_wayland(tmp):
-            px = QPixmap(tmp)
-            return px if not px.isNull() else None
-    finally:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-    return None
 
+def _grab_wayland_region(x: int, y: int, w: int, h: int, path: str) -> bool:
+    """Tenta capturar uma região no Wayland. Salva em `path`. Retorna True se ok."""
+    candidates: list[list[str]] = [
+        ["grim", "-g", f"{x},{y} {w}x{h}", path],
+        ["wayshot", "--slurp", f"{x},{y} {w}x{h}", "--file", path],
+        ["flameshot", "full", "--path", path],
+        ["maim", "-g", f"{w}x{h}+{x}+{y}", path],
+        ["scrot", "-a", f"{x},{y},{w},{h}", path],
+    ]
+    for cmd in candidates:
+        if not shutil.which(cmd[0]):
+            continue
+        if _try_tool(cmd, path):
+            return True
+    return False
+
+
+# ── Recorte de monitor específico ────────────────────────────────────────────
+
+def _crop_to_screen(pixmap: QPixmap, screen) -> QPixmap:
+    """Recorta o pixmap para a geometria física de um monitor específico."""
+    if screen is None:
+        return pixmap
+    geo: QRect = screen.geometry()
+    virtual_origin = QApplication.primaryScreen().virtualGeometry().topLeft()
+    rel_x = geo.x() - virtual_origin.x()
+    rel_y = geo.y() - virtual_origin.y()
+    cropped = pixmap.copy(rel_x, rel_y, geo.width(), geo.height())
+    return cropped if not cropped.isNull() else pixmap
+
+
+# ── Captura de região ─────────────────────────────────────────────────────────
 
 def grab_region(x: int, y: int, w: int, h: int) -> QPixmap | None:
-    """Captura uma região. Wayland usa grim -g; X11 usa grabWindow."""
+    """Captura uma região. Wayland tenta várias ferramentas; X11 usa grabWindow."""
     if not _IS_WAYLAND:
         screen = QApplication.primaryScreen()
         px = screen.grabWindow(0, x, y, w, h)
@@ -94,51 +112,93 @@ def grab_region(x: int, y: int, w: int, h: int) -> QPixmap | None:
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
         tmp = f.name
     try:
-        if _grab_region_wayland(x, y, w, h, tmp):
-            px = QPixmap(tmp)
-            return px if not px.isNull() else None
+        if not _grab_wayland_region(x, y, w, h, tmp):
+            return None
+        px = QPixmap(tmp)
+        return px if not px.isNull() else None
     finally:
         try:
             os.unlink(tmp)
         except OSError:
             pass
-    return None
 
 
-# ── API pública ───────────────────────────────────────────────────────────────
+# ── API pública de captura ────────────────────────────────────────────────────
 
-def capture(toolbar_window, tray_icon=None, copy_to_clipboard: bool = False) -> None:
-    """
-    Captura toda a tela (incluindo anotações do overlay).
-    Oculta a toolbar antes de capturar e a restaura depois.
+def capture(toolbar_window, tray_icon=None,
+            copy_to_clipboard: bool = False,
+            screen=None) -> None:
+    """Captura a tela ocultando a toolbar.
+    `screen` (QScreen opcional): limita a captura ao monitor especificado.
     """
     toolbar_window.hide()
 
     def _do_capture():
-        pixmap = grab_screen()
-        toolbar_window.show()
-
-        if pixmap is None or pixmap.isNull():
-            _notify(tray_icon,
-                    "EpicPen — Screenshot falhou",
-                    "Nenhuma ferramenta de captura disponível.\n"
-                    "Instale 'grim' (wlroots) ou 'gnome-screenshot'.")
-            return
-
         _SAVE_DIR.mkdir(parents=True, exist_ok=True)
         ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = _SAVE_DIR / f"epicpen_{ts}.png"
-        pixmap.save(str(path))
+        dest = _SAVE_DIR / f"epicpen_{ts}.png"
+
+        pixmap = _capture_to_file(dest, screen)
+        toolbar_window.show()
+
+        if pixmap is None:
+            tools = _available_tools()
+            hint = (
+                f"Ferramentas encontradas: {', '.join(tools)}\nNenhuma retornou imagem válida."
+                if tools else
+                "Nenhuma ferramenta de captura encontrada.\n"
+                "Instale uma das opções compatíveis:\n"
+                "  Wayland: grim, wayshot, gnome-screenshot, spectacle, flameshot\n"
+                "  X11: maim, scrot, flameshot"
+            )
+            _notify(tray_icon, "EpicPen — Screenshot falhou", hint)
+            return
 
         if copy_to_clipboard:
             QApplication.clipboard().setPixmap(pixmap, QClipboard.Mode.Clipboard)
 
-        msg = f"Salva em:\n~/Imagens/EpicPen/{path.name}"
+        msg = f"Salva em:\n~/Imagens/EpicPen/{dest.name}"
         if copy_to_clipboard:
             msg += "\n(copiada para área de transferência)"
         _notify(tray_icon, "EpicPen — Screenshot", msg)
 
     QTimer.singleShot(80, _do_capture)
+
+
+def _capture_to_file(dest: Path, screen=None) -> QPixmap | None:
+    """Captura a tela e salva em `dest`. Retorna o QPixmap ou None se falhar."""
+    if not _IS_WAYLAND:
+        src = screen or QApplication.primaryScreen()
+        px = src.grabWindow(0)
+        if px.isNull():
+            return None
+        if screen is not None:
+            px = _crop_to_screen(px, screen)
+        if not px.save(str(dest)):
+            return None
+        return px
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        tmp = f.name
+    try:
+        if not _grab_wayland_fullscreen(tmp):
+            return None
+        px = QPixmap(tmp)
+        if px.isNull():
+            return None
+        if screen is not None:
+            px = _crop_to_screen(px, screen)
+            if not px.save(str(dest)):
+                return None
+        else:
+            # Cópia binária direta: evita recompressão e QPixmap.save() silencioso
+            shutil.copy2(tmp, dest)
+        return px
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def _notify(tray_icon, title: str, msg: str):

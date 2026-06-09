@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QSlider, QColorDialog, QFrame, QLayout,
-    QDialog, QLabel, QLineEdit, QSpinBox, QFontComboBox, QDialogButtonBox,
+    QDialog, QLabel, QLineEdit, QPlainTextEdit, QSpinBox, QFontComboBox, QDialogButtonBox,
 )
 from PyQt6.QtCore import Qt, QPoint, QTimer, QSize, QEvent
 from PyQt6.QtGui import QColor, QCursor
@@ -62,7 +62,10 @@ _STYLE_COLLAPSED = """
 class TextDialog(QDialog):
     """Diálogo para configurar texto antes de inserir na tela."""
 
-    def __init__(self, default_color, parent=None):
+    def __init__(self, default_color, parent=None, *,
+                 initial_text: str = "",
+                 initial_font: str = "",
+                 initial_size: int = 24):
         super().__init__(parent)
         self.setWindowTitle("Inserir Texto")
         self._color = QColor(default_color)
@@ -70,15 +73,22 @@ class TextDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.setSpacing(6)
 
-        lay.addWidget(QLabel("Texto:"))
-        self._text_edit = QLineEdit()
+        lay.addWidget(QLabel("Texto: (Ctrl+Enter para confirmar)"))
+        self._text_edit = QPlainTextEdit()
         self._text_edit.setMinimumWidth(250)
+        self._text_edit.setMinimumHeight(80)
+        if initial_text:
+            self._text_edit.setPlainText(initial_text)
         lay.addWidget(self._text_edit)
 
         row_font = QHBoxLayout()
         row_font.addWidget(QLabel("Fonte:"))
         self._font_combo = QFontComboBox()
-        self._font_combo.setCurrentFont(self._font_combo.currentFont())
+        if initial_font:
+            from PyQt6.QtGui import QFont as _QFont
+            self._font_combo.setCurrentFont(_QFont(initial_font))
+        else:
+            self._font_combo.setCurrentFont(self._font_combo.currentFont())
         row_font.addWidget(self._font_combo)
         lay.addLayout(row_font)
 
@@ -86,7 +96,7 @@ class TextDialog(QDialog):
         row_size.addWidget(QLabel("Tamanho:"))
         self._size_spin = QSpinBox()
         self._size_spin.setRange(6, 144)
-        self._size_spin.setValue(24)
+        self._size_spin.setValue(max(6, min(144, int(round(initial_size)))))
         row_size.addWidget(self._size_spin)
         lay.addLayout(row_size)
 
@@ -106,6 +116,7 @@ class TextDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)
+        self._text_edit.installEventFilter(self)
 
     def _pick_color(self):
         if self.windowFlags() & Qt.WindowType.Popup:
@@ -123,13 +134,22 @@ class TextDialog(QDialog):
                 self._color = c
                 self._update_color_preview()
 
+    def eventFilter(self, obj, event):
+        if (obj is self._text_edit
+                and event.type() == QEvent.Type.KeyPress
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self.accept()
+            return True
+        return super().eventFilter(obj, event)
+
     def _update_color_preview(self):
         self._color_btn.setStyleSheet(
             f"background:{self._color.name()}; border:1px solid #888;"
         )
 
     def text(self) -> str:
-        return self._text_edit.text()
+        return self._text_edit.toPlainText()
 
     def font_family(self) -> str:
         return self._font_combo.currentFont().family()
@@ -189,6 +209,7 @@ class ToolbarWindow(QWidget):
         self._hotkeys.start()
 
         overlay.text_placement_requested.connect(self._on_text_placement_requested)
+        overlay.text_edit_requested.connect(self._on_text_edit_requested)
 
         # Tooltip interno: QLabel filho da janela, posicionado à direita da coluna
         # de botões. Não depende de popup Qt — funciona em wlr-layer-shell.
@@ -602,6 +623,41 @@ class ToolbarWindow(QWidget):
             )
         self._post_dialog(was_drawing)
 
+    def _on_text_edit_requested(self, idx: int):
+        strokes = self._overlay._strokes
+        if idx < 0 or idx >= len(strokes):
+            return
+        stroke = strokes[idx]
+        if not stroke or stroke[0][1].get("tool") != "text":
+            return
+        props = stroke[0][1]
+        was_drawing = self._pre_dialog()
+        ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
+        dlg = TextDialog(
+            props.get("color", self._current_color),
+            parent=self._overlay if ov_lsw else self,
+            initial_text=props.get("text", ""),
+            initial_font=props.get("font_family", ""),
+            initial_size=int(round(float(props.get("size", 24)))),
+        )
+        dlg.setWindowTitle("Editar Texto")
+        if ov_lsw:
+            dlg.setWindowFlags(Qt.WindowType.Popup)
+            anchor = stroke[0][0]
+            dlg.adjustSize()
+            dlg.move(int(anchor.x()) + 8, int(anchor.y()) + 8)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            new_props = {**props,
+                         "text": dlg.text(),
+                         "font_family": dlg.font_family(),
+                         "size": dlg.font_size(),
+                         "color": dlg.color()}
+            self._overlay._strokes[idx] = [(stroke[0][0], new_props)]
+            self._overlay._canvas = None
+            self._overlay._wb_canvas = None
+            self._overlay.update()
+        self._post_dialog(was_drawing)
+
     # ── Color ─────────────────────────────────────────────────────────────────
 
     def _pick_color(self):
@@ -632,7 +688,8 @@ class ToolbarWindow(QWidget):
 
     def _do_screenshot(self, clipboard: bool = False):
         import screenshot as sc
-        sc.capture(self, tray_icon=self._tray, copy_to_clipboard=clipboard)
+        sc.capture(self, tray_icon=self._tray, copy_to_clipboard=clipboard,
+                   screen=self._current_screen)
 
     # ── Mode toggles ──────────────────────────────────────────────────────────
 
@@ -1101,7 +1158,11 @@ class ToolbarWindow(QWidget):
         elif key == Qt.Key.Key_C:
             self._pick_color()
         elif key == Qt.Key.Key_Delete:
-            self._overlay.clear()
+            if (self._overlay._tool == "drag"
+                    and self._overlay._drag_hover_idx is not None):
+                self._overlay.delete_stroke(self._overlay._drag_hover_idx)
+            else:
+                self._overlay.clear()
         elif key == Qt.Key.Key_W:
             self._btn_whiteboard.toggle()
             self._toggle_whiteboard(self._btn_whiteboard.isChecked())
