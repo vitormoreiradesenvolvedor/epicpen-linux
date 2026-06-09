@@ -10,6 +10,7 @@ import icons
 import layershell
 from hotkeys import GlobalHotkeyListener
 from magnifier import MagnifierWindow
+from recorder import ScreenRecorder
 
 _ICON = QSize(16, 16)
 _BTN  = 25   # button side (px) — 30% menor que o original 36px
@@ -211,6 +212,11 @@ class ToolbarWindow(QWidget):
         overlay.text_placement_requested.connect(self._on_text_placement_requested)
         overlay.text_edit_requested.connect(self._on_text_edit_requested)
 
+        self._recorder = ScreenRecorder(parent=self)
+        self._recorder.started.connect(self._on_rec_started)
+        self._recorder.stopped.connect(self._on_rec_stopped)
+        self._recorder.failed.connect(self._on_rec_failed)
+
         # Tooltip interno: QLabel filho da janela, posicionado à direita da coluna
         # de botões. Não depende de popup Qt — funciona em wlr-layer-shell.
         self._tt_label = QLabel("", self)
@@ -377,6 +383,11 @@ class ToolbarWindow(QWidget):
         self._btn_screenshot.setIcon(icons.screenshot())
         self._btn_screenshot.clicked.connect(lambda: self._do_screenshot(clipboard=False))
         lay.addWidget(self._btn_screenshot, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        self._btn_record = self._mk_btn("Gravar tela (Ctrl+R)")
+        self._btn_record.setIcon(icons.record())
+        self._btn_record.clicked.connect(self._toggle_record)
+        lay.addWidget(self._btn_record, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         self._add_sep(lay)
 
@@ -690,6 +701,45 @@ class ToolbarWindow(QWidget):
         import screenshot as sc
         sc.capture(self, tray_icon=self._tray, copy_to_clipboard=clipboard,
                    screen=self._current_screen)
+
+    # ── Screen recorder ───────────────────────────────────────────────────────
+
+    def _toggle_record(self, checked: bool):
+        if checked:
+            if not self._recorder.start():
+                self._btn_record.setChecked(False)
+        else:
+            self._recorder.stop()
+
+    def _on_rec_started(self):
+        self._btn_record.setChecked(True)
+        self._btn_record.setIcon(icons.record_stop())
+        self._btn_record.setStyleSheet(
+            "background: rgba(200, 30, 30, 140); border: 1px solid rgba(255,80,80,160);"
+        )
+
+    def _on_rec_stopped(self, path: str):
+        self._btn_record.setChecked(False)
+        self._btn_record.setIcon(icons.record())
+        self._btn_record.setStyleSheet("")
+        if self._tray:
+            from pathlib import Path as _P
+            try:
+                rel = _P(path).relative_to(_P.home())
+                msg = f"~/{rel}"
+            except ValueError:
+                msg = path
+            self._tray.showMessage(
+                "EpicPen — Gravação", f"Salva em:\n{msg}",
+                self._tray.icon(), 5000,
+            )
+
+    def _on_rec_failed(self, msg: str):
+        self._btn_record.setChecked(False)
+        self._btn_record.setIcon(icons.record())
+        self._btn_record.setStyleSheet("")
+        if self._tray:
+            self._tray.showMessage("EpicPen — Gravação falhou", msg, self._tray.icon(), 5000)
 
     # ── Mode toggles ──────────────────────────────────────────────────────────
 
@@ -1140,6 +1190,9 @@ class ToolbarWindow(QWidget):
                 self._overlay.redo()
             elif key == Qt.Key.Key_S:
                 self._do_screenshot(clipboard=bool(shift))
+            elif key == Qt.Key.Key_R:
+                self._btn_record.toggle()
+                self._toggle_record(self._btn_record.isChecked())
             return
 
         tool_keys = {

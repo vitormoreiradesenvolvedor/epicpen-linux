@@ -336,6 +336,28 @@ def exit_btn(hover: bool = False) -> QIcon:
 
 
 
+def record() -> QIcon:
+    def draw(p):
+        # Círculo vermelho sólido — ícone universal de "gravar"
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(QColor(220, 60, 60)))
+        p.drawEllipse(QRectF(4, 4, 14, 14))
+        # Anel externo branco tênue
+        p.setPen(QPen(QColor(230, 230, 230, 120), 1.2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(QRectF(2, 2, 18, 18))
+    return _make(draw)
+
+
+def record_stop() -> QIcon:
+    def draw(p):
+        # Quadrado branco sólido — ícone universal de "parar"
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(QColor(230, 230, 230)))
+        p.drawRoundedRect(QRectF(5, 5, 12, 12), 1.5, 1.5)
+    return _make(draw)
+
+
 def logo() -> QIcon:
     """Ícone para o botão colapsado — mesmo PNG usado pela tray."""
     from pathlib import Path
