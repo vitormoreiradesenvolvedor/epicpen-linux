@@ -1019,7 +1019,6 @@ class OverlayWindow(QWidget):
             return
         if stroke[0][1].get("tool") == "bitmap":
             return  # bitmap não é escalável (renderização pré-fixada)
-            return
         if stroke[0][1].get("tool") == "text":
             pt, props = stroke[0]
             new_size = props["size"] * factor
@@ -1477,7 +1476,8 @@ class OverlayWindow(QWidget):
         pts_f = [QPointF(p) for p in raw]
 
         if tool == "text":
-            font = QFont(props.get("font_family", "Sans Serif"), props.get("size", 16))
+            font = QFont(props.get("font_family", "Sans Serif"))
+            font.setPointSizeF(max(1.0, float(props.get("size", 16))))
             painter.setFont(font)
             painter.setPen(QPen(color))
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
