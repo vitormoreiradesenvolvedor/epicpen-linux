@@ -634,7 +634,7 @@ class ToolbarWindow(QWidget):
             dlg.setWindowFlags(Qt.WindowType.Popup)
             anchor = stroke[0][0]
             dlg.adjustSize()
-            dlg.move(anchor.x() + 8, anchor.y() + 8)
+            dlg.move(int(anchor.x()) + 8, int(anchor.y()) + 8)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             new_props = {**props,
                          "text": dlg.text(),
