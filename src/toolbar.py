@@ -62,7 +62,10 @@ _STYLE_COLLAPSED = """
 class TextDialog(QDialog):
     """Diálogo para configurar texto antes de inserir na tela."""
 
-    def __init__(self, default_color, parent=None):
+    def __init__(self, default_color, parent=None, *,
+                 initial_text: str = "",
+                 initial_font: str = "",
+                 initial_size: int = 24):
         super().__init__(parent)
         self.setWindowTitle("Inserir Texto")
         self._color = QColor(default_color)
@@ -73,12 +76,18 @@ class TextDialog(QDialog):
         lay.addWidget(QLabel("Texto:"))
         self._text_edit = QLineEdit()
         self._text_edit.setMinimumWidth(250)
+        if initial_text:
+            self._text_edit.setText(initial_text)
         lay.addWidget(self._text_edit)
 
         row_font = QHBoxLayout()
         row_font.addWidget(QLabel("Fonte:"))
         self._font_combo = QFontComboBox()
-        self._font_combo.setCurrentFont(self._font_combo.currentFont())
+        if initial_font:
+            from PyQt6.QtGui import QFont as _QFont
+            self._font_combo.setCurrentFont(_QFont(initial_font))
+        else:
+            self._font_combo.setCurrentFont(self._font_combo.currentFont())
         row_font.addWidget(self._font_combo)
         lay.addLayout(row_font)
 
@@ -86,7 +95,7 @@ class TextDialog(QDialog):
         row_size.addWidget(QLabel("Tamanho:"))
         self._size_spin = QSpinBox()
         self._size_spin.setRange(6, 144)
-        self._size_spin.setValue(24)
+        self._size_spin.setValue(max(6, min(144, int(round(initial_size)))))
         row_size.addWidget(self._size_spin)
         lay.addLayout(row_size)
 
@@ -189,6 +198,7 @@ class ToolbarWindow(QWidget):
         self._hotkeys.start()
 
         overlay.text_placement_requested.connect(self._on_text_placement_requested)
+        overlay.text_edit_requested.connect(self._on_text_edit_requested)
 
         # Tooltip interno: QLabel filho da janela, posicionado à direita da coluna
         # de botões. Não depende de popup Qt — funciona em wlr-layer-shell.
@@ -600,6 +610,41 @@ class ToolbarWindow(QWidget):
             self._overlay.place_text(
                 pos, dlg.text(), dlg.font_family(), dlg.font_size(), dlg.color()
             )
+        self._post_dialog(was_drawing)
+
+    def _on_text_edit_requested(self, idx: int):
+        strokes = self._overlay._strokes
+        if idx < 0 or idx >= len(strokes):
+            return
+        stroke = strokes[idx]
+        if not stroke or stroke[0][1].get("tool") != "text":
+            return
+        props = stroke[0][1]
+        was_drawing = self._pre_dialog()
+        ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
+        dlg = TextDialog(
+            props.get("color", self._current_color),
+            parent=self._overlay if ov_lsw else self,
+            initial_text=props.get("text", ""),
+            initial_font=props.get("font_family", ""),
+            initial_size=int(round(float(props.get("size", 24)))),
+        )
+        dlg.setWindowTitle("Editar Texto")
+        if ov_lsw:
+            dlg.setWindowFlags(Qt.WindowType.Popup)
+            anchor = stroke[0][0]
+            dlg.adjustSize()
+            dlg.move(int(anchor.x()) + 8, int(anchor.y()) + 8)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            new_props = {**props,
+                         "text": dlg.text(),
+                         "font_family": dlg.font_family(),
+                         "size": dlg.font_size(),
+                         "color": dlg.color()}
+            self._overlay._strokes[idx] = [(stroke[0][0], new_props)]
+            self._overlay._canvas = None
+            self._overlay._wb_canvas = None
+            self._overlay.update()
         self._post_dialog(was_drawing)
 
     # ── Color ─────────────────────────────────────────────────────────────────
