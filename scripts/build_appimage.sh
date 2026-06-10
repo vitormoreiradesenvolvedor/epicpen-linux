@@ -12,6 +12,10 @@ VERSION=$(git -C "$ROOT" describe --tags --abbrev=0 2>/dev/null || echo "0.1.0-d
 ARCH=$(uname -m)
 OUTPUT="$ROOT/EpicPen-${VERSION}-${ARCH}.AppImage"
 
+# Cache do ffmpeg GPL compilado (libx264) — reutilizado entre builds
+FFMPEG_GPL_CACHE="$ROOT/tools/ffmpeg-gpl"
+FFMPEG_GPL_BIN="$FFMPEG_GPL_CACHE/ffmpeg"
+
 echo "══════════════════════════════════════════"
 echo "  EpicPen Linux — Build AppImage v${VERSION}"
 echo "══════════════════════════════════════════"
@@ -68,6 +72,103 @@ for a in data.get('assets', []):
 
 ensure_standalone_python
 
+# ── 0b. Compila ffmpeg GPL + libx264 para screen recording ───────────────────
+# Produz um binário estático (~20-30 MB) cacheado em tools/ffmpeg-gpl/.
+# Depende de: nasm gcc g++ make pkg-config (instalados no CI via apt-get).
+# Em caso de falha avisa e continua; o recorder usará o ffmpeg do sistema.
+build_recorder_ffmpeg() {
+  if [ -x "$FFMPEG_GPL_BIN" ]; then
+    echo "→ ffmpeg GPL em cache ($(du -sh "$FFMPEG_GPL_BIN" | cut -f1))."
+    cp "$FFMPEG_GPL_BIN" "$APPDIR/usr/bin/ffmpeg"
+    return
+  fi
+
+  for dep in nasm gcc g++ make pkg-config; do
+    if ! command -v "$dep" &>/dev/null; then
+      echo "  AVISO: '$dep' não encontrado — ffmpeg GPL não será bundlado."
+      echo "         Screen recording usará o ffmpeg do sistema (se disponível)."
+      return
+    fi
+  done
+
+  echo "→ Compilando ffmpeg GPL + libx264 para screen recording..."
+  echo "  (resultado cacheado em tools/ffmpeg-gpl — próximas builds serão instantâneas)"
+
+  local BUILD_TMP
+  BUILD_TMP=$(mktemp -d -t epicpen-ffmpeg-XXXXXX)
+  local PREFIX="$BUILD_TMP/prefix"
+  mkdir -p "$PREFIX"
+
+  if ! (
+    set -euo pipefail
+
+    # ── libx264 — estático, 8-bit, com PIC, sem CLI ──────────────────────────
+    echo "  [1/2] libx264..."
+    git clone --depth 1 -q \
+      "https://code.videolan.org/videolan/x264.git" "$BUILD_TMP/x264"
+    cd "$BUILD_TMP/x264"
+    ./configure \
+      --prefix="$PREFIX" \
+      --enable-static \
+      --enable-pic \
+      --bit-depth=8 \
+      --disable-cli \
+      --disable-opencl \
+      --extra-cflags="-O3 -fPIC" \
+      > /dev/null 2>&1
+    make -j"$(nproc)" > /dev/null 2>&1
+    make install > /dev/null 2>&1
+
+    # ── ffmpeg mínimo — só o que o screen recorder precisa ───────────────────
+    echo "  [2/2] ffmpeg (≈5 min na primeira vez)..."
+    git clone --depth 1 -q \
+      --branch release/7.1 \
+      "https://github.com/FFmpeg/FFmpeg.git" "$BUILD_TMP/ffmpeg"
+    cd "$BUILD_TMP/ffmpeg"
+    PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig" \
+    ./configure \
+      --prefix="$PREFIX" \
+      --enable-gpl \
+      --enable-libx264 \
+      --disable-everything \
+      --enable-avcodec \
+      --enable-avformat \
+      --enable-avutil \
+      --enable-swscale \
+      --enable-swresample \
+      --enable-avfilter \
+      --enable-encoder=libx264 \
+      --enable-decoder=rawvideo \
+      --enable-demuxer=rawvideo \
+      --enable-muxer=mp4,mov \
+      --enable-protocol=file,pipe \
+      --enable-filter=buffer,buffersink,scale,format,null \
+      --disable-shared \
+      --enable-static \
+      --disable-doc \
+      --disable-ffplay \
+      --disable-ffprobe \
+      --pkg-config-flags="--static" \
+      --extra-cflags="-O2 -I$PREFIX/include" \
+      --extra-ldflags="-L$PREFIX/lib" \
+      > /dev/null 2>&1
+    make -j"$(nproc)" ffmpeg > /dev/null 2>&1
+    strip --strip-unneeded ffmpeg
+    mkdir -p "$(dirname "$FFMPEG_GPL_BIN")"
+    cp ffmpeg "$FFMPEG_GPL_BIN"
+    chmod +x "$FFMPEG_GPL_BIN"
+  ); then
+    echo "  AVISO: compilação do ffmpeg GPL falhou."
+    echo "         Screen recording usará o ffmpeg do sistema (se disponível)."
+    rm -rf "$BUILD_TMP" 2>/dev/null || true
+    return
+  fi
+
+  rm -rf "$BUILD_TMP"
+  echo "  → ffmpeg GPL pronto: $(du -sh "$FFMPEG_GPL_BIN" | cut -f1)"
+  cp "$FFMPEG_GPL_BIN" "$APPDIR/usr/bin/ffmpeg"
+}
+
 # ── 1. Gera ícone PNG ──────────────────────────────────────────────────
 echo "→ Gerando ícone..."
 python3 "$SCRIPT_DIR/generate_icon.py"
@@ -83,6 +184,9 @@ mkdir -p \
   "$APPDIR/usr/lib" \
   "$APPDIR/usr/share/applications" \
   "$APPDIR/usr/share/icons/hicolor/256x256/apps"
+
+# ── 2b. ffmpeg GPL (libx264) para screen recording ───────────────────
+build_recorder_ffmpeg
 
 # ── 3. Copia Python standalone para AppDir e instala PyQt6 ────────────
 # PyQt6==6.10.1 → Qt 6.10.0 bundled: mesma série minor da lib sistema (6.10.x)
