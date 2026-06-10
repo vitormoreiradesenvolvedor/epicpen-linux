@@ -74,7 +74,7 @@ def _build_ffmpeg_cmd(
     base = [
         ffmpeg,
         "-f", "rawvideo",
-        "-pixel_format", "bgra",
+        "-pixel_format", "rgba",
         "-video_size", f"{w}x{h}",
         "-framerate", str(fps),
         "-i", "pipe:0",
@@ -215,7 +215,7 @@ class ScreenRecorder(QObject):
         image = frame.toImage()
         if image.isNull():
             return
-        image = image.convertToFormat(QImage.Format.Format_BGRA8888)
+        image = image.convertToFormat(QImage.Format.Format_RGBA8888)
         ptr = image.bits()
         ptr.setsize(image.sizeInBytes())
         try:

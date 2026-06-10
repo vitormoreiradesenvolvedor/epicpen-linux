@@ -148,9 +148,9 @@ def test_build_x264_contains_dest():
     assert dest in cmd
 
 
-def test_build_input_format_is_bgra():
+def test_build_input_format_is_rgba():
     cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True)
-    assert "bgra" in cmd
+    assert "rgba" in cmd
 
 
 def test_build_x264opts_present():
