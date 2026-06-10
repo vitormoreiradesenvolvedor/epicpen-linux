@@ -1,6 +1,6 @@
 """
-Testes do módulo recorder — verifica lógica de detecção e construção de comando
-sem dependências de hardware ou de processo externo real.
+Testes do módulo recorder — verifica lógica pura (construção de comando,
+detecção de ffmpeg, codec) sem dependências de hardware ou display real.
 """
 import sys
 import os
@@ -13,179 +13,242 @@ import pytest
 
 def _install_qt_stubs():
     def _mod(name):
-        m = types.ModuleType(name)
-        sys.modules.setdefault(name, m)
+        if name not in sys.modules:
+            sys.modules[name] = types.ModuleType(name)
         return sys.modules[name]
 
     _mod("PyQt6")
-    qtw = _mod("PyQt6.QtWidgets")
-    qtc = _mod("PyQt6.QtCore")
 
-    app_mock = MagicMock()
-    app_mock.screens.return_value = []
-    app_mock.primaryScreen.return_value = None
-    qtw.QApplication = MagicMock(return_value=app_mock)
+    qtw = _mod("PyQt6.QtWidgets")
+    qtw.QApplication = MagicMock()
     qtw.QApplication.screens = MagicMock(return_value=[])
     qtw.QApplication.primaryScreen = MagicMock(return_value=None)
 
-    proc_mock = MagicMock()
-    proc_mock.ProcessState = MagicMock()
-    proc_mock.ProcessState.Running = "Running"
-    qtc.QObject  = object
-    qtc.QProcess = MagicMock(return_value=proc_mock)
-    qtc.QProcess.ProcessState = MagicMock()
-    qtc.QProcess.ProcessState.Running = "Running"
+    qtc = _mod("PyQt6.QtCore")
 
-    # pyqtSignal stub: retorna objeto com connect/emit
-    def _signal(*args, **kwargs):
-        s = MagicMock()
-        s.connect = MagicMock()
-        s.emit    = MagicMock()
-        return s
-    qtc.pyqtSignal = _signal
+    class _FakeQObject:
+        def __init__(self, parent=None):
+            pass
+
+    class _BoundSignal:
+        def __init__(self):
+            self._cbs = []
+        def connect(self, cb):
+            self._cbs.append(cb)
+        def emit(self, *a):
+            for cb in self._cbs:
+                cb(*a)
+        def __call__(self, *a):
+            return self
+
+    class _SignalDescriptor:
+        def __set_name__(self, owner, name):
+            self._name = name
+        def __get__(self, obj, cls):
+            if obj is None:
+                return self
+            k = f"_sig_{self._name}"
+            if not hasattr(obj, k):
+                setattr(obj, k, _BoundSignal())
+            return getattr(obj, k)
+
+    def _pyqtSignal(*args, **kwargs):
+        return _SignalDescriptor()
+
+    qtc.QObject = _FakeQObject
+    qtc.pyqtSignal = _pyqtSignal
+
+    qtm = _mod("PyQt6.QtMultimedia")
+    qtm.QScreenCapture = MagicMock
+    qtm.QMediaCaptureSession = MagicMock
+    qtm.QVideoSink = MagicMock
+    qtm.QVideoFrame = MagicMock
+
+    qtg = _mod("PyQt6.QtGui")
+    qtg.QImage = MagicMock
 
 _install_qt_stubs()
 
 import recorder as rec  # noqa: E402
 
 
-# ── Detecção de ambiente ──────────────────────────────────────────────────────
+# ── _find_ffmpeg ──────────────────────────────────────────────────────────────
 
-def test_detect_env_x11(monkeypatch):
-    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
-    assert rec._detect_env() == "x11"
-
-
-def test_detect_env_xcb_treated_as_x11(monkeypatch):
-    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
-    monkeypatch.setenv("QT_QPA_PLATFORM", "xcb")
-    assert rec._detect_env() == "x11"
-
-
-def test_detect_env_wayland_wlroots(monkeypatch):
-    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
-    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "sway")
-    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
-    assert rec._detect_env() == "wayland-wlroots"
+def test_find_ffmpeg_returns_bundled_when_appdir_set(tmp_path, monkeypatch):
+    fake_ffmpeg = tmp_path / "usr" / "bin" / "ffmpeg"
+    fake_ffmpeg.parent.mkdir(parents=True)
+    fake_ffmpeg.touch()
+    fake_ffmpeg.chmod(0o755)
+    monkeypatch.setenv("APPDIR", str(tmp_path))
+    monkeypatch.setattr(rec, "_which", lambda t: "/usr/bin/ffmpeg")
+    assert rec._find_ffmpeg() == str(fake_ffmpeg)
 
 
-def test_detect_env_wayland_gnome(monkeypatch):
-    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
-    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "GNOME")
-    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
-    assert rec._detect_env() == "wayland-gnome"
-
-
-def test_detect_env_wayland_kde(monkeypatch):
-    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
-    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "KDE")
-    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
-    assert rec._detect_env() == "wayland-kde"
-
-
-# ── build_command: X11 ────────────────────────────────────────────────────────
-
-def test_build_x11_no_ffmpeg_returns_none(tmp_path, monkeypatch):
-    monkeypatch.setattr(rec, "_which", lambda t: None)
-    cmd = rec.build_command(tmp_path / "out.mp4", "x11", None, (1920, 1080, 30))
-    assert cmd is None
-
-
-def test_build_x11_cpu_fallback(tmp_path, monkeypatch):
+def test_find_ffmpeg_falls_back_to_system(tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDIR", str(tmp_path))  # APPDIR sem executável
     monkeypatch.setattr(rec, "_which", lambda t: "/usr/bin/ffmpeg" if t == "ffmpeg" else None)
-    cmd = rec.build_command(tmp_path / "out.mp4", "x11", None, (1920, 1080, 30))
-    assert cmd is not None
-    assert "ffmpeg" in cmd[0]
-    assert "libx264" in cmd
+    assert rec._find_ffmpeg() == "/usr/bin/ffmpeg"
+
+
+def test_find_ffmpeg_returns_none_when_absent(tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDIR", str(tmp_path))
+    monkeypatch.setattr(rec, "_which", lambda t: None)
+    assert rec._find_ffmpeg() is None
+
+
+def test_find_ffmpeg_no_appdir(monkeypatch):
+    monkeypatch.delenv("APPDIR", raising=False)
+    monkeypatch.setattr(rec, "_which", lambda t: "/usr/local/bin/ffmpeg" if t == "ffmpeg" else None)
+    assert rec._find_ffmpeg() == "/usr/local/bin/ffmpeg"
+
+
+# ── _has_libx264 ──────────────────────────────────────────────────────────────
+
+def test_has_libx264_true(monkeypatch):
+    r = MagicMock()
+    r.stdout = " V..... libx264   libx264 H.264 / AVC / MPEG-4 AVC"
+    monkeypatch.setattr("subprocess.run", MagicMock(return_value=r))
+    assert rec._has_libx264("/usr/bin/ffmpeg") is True
+
+
+def test_has_libx264_false(monkeypatch):
+    r = MagicMock()
+    r.stdout = " V..... mpeg4   MPEG-4 part 2"
+    monkeypatch.setattr("subprocess.run", MagicMock(return_value=r))
+    assert rec._has_libx264("/usr/bin/ffmpeg") is False
+
+
+def test_has_libx264_exception_returns_false(monkeypatch):
+    monkeypatch.setattr("subprocess.run", MagicMock(side_effect=OSError("nope")))
+    assert rec._has_libx264("/usr/bin/ffmpeg") is False
+
+
+# ── _build_ffmpeg_cmd (com x264) ──────────────────────────────────────────────
+
+def test_build_x264_contains_ultrafast():
+    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True)
     assert "ultrafast" in cmd
-    assert "30" in cmd          # framerate
-
-
-def test_build_x11_vaapi(tmp_path, monkeypatch):
-    monkeypatch.setattr(rec, "_which", lambda t: "/usr/bin/ffmpeg" if t == "ffmpeg" else None)
-    cmd = rec.build_command(tmp_path / "out.mp4", "x11", "/dev/dri/renderD128", (1920, 1080, 60))
-    assert cmd is not None
-    assert "h264_vaapi" in cmd
-    assert "/dev/dri/renderD128" in cmd
-
-
-def test_build_x11_resolution_in_command(tmp_path, monkeypatch):
-    monkeypatch.setattr(rec, "_which", lambda t: "/usr/bin/ffmpeg" if t == "ffmpeg" else None)
-    cmd = rec.build_command(tmp_path / "out.mp4", "x11", None, (2560, 1440, 144))
-    assert "2560x1440" in cmd
-    assert "144" in cmd
-
-
-# ── build_command: Wayland wlroots ────────────────────────────────────────────
-
-def test_build_wlroots_prefers_wl_screenrec_with_vaapi(tmp_path, monkeypatch):
-    def _which_mock(t):
-        return f"/usr/bin/{t}" if t in ("wl-screenrec", "wf-recorder") else None
-    monkeypatch.setattr(rec, "_which", _which_mock)
-    cmd = rec.build_command(tmp_path / "out.mp4", "wayland-wlroots", "/dev/dri/renderD128",
-                            (1920, 1080, 60))
-    assert cmd is not None
-    assert "wl-screenrec" in cmd[0]
-    assert "/dev/dri/renderD128" in cmd
-
-
-def test_build_wlroots_falls_back_to_wf_recorder_vaapi(tmp_path, monkeypatch):
-    def _which_mock(t):
-        return "/usr/bin/wf-recorder" if t == "wf-recorder" else None
-    monkeypatch.setattr(rec, "_which", _which_mock)
-    cmd = rec.build_command(tmp_path / "out.mp4", "wayland-wlroots", "/dev/dri/renderD128",
-                            (1920, 1080, 60))
-    assert cmd is not None
-    assert "wf-recorder" in cmd[0]
-    assert "h264_vaapi" in cmd
-
-
-def test_build_wlroots_cpu_fallback(tmp_path, monkeypatch):
-    def _which_mock(t):
-        return "/usr/bin/wf-recorder" if t == "wf-recorder" else None
-    monkeypatch.setattr(rec, "_which", _which_mock)
-    cmd = rec.build_command(tmp_path / "out.mp4", "wayland-wlroots", None, (1920, 1080, 60))
-    assert cmd is not None
-    assert "wf-recorder" in cmd[0]
     assert "libx264" in cmd
 
 
-def test_build_wlroots_no_tools_returns_none(tmp_path, monkeypatch):
-    monkeypatch.setattr(rec, "_which", lambda t: None)
-    cmd = rec.build_command(tmp_path / "out.mp4", "wayland-wlroots", None, (1920, 1080, 60))
-    assert cmd is None
+def test_build_x264_contains_fastdecode():
+    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True)
+    assert "fastdecode" in cmd
 
 
-# ── build_command: GNOME/KDE Wayland ─────────────────────────────────────────
-
-def test_build_gnome_prefers_gpu_screen_recorder(tmp_path, monkeypatch):
-    def _which_mock(t):
-        return f"/usr/bin/{t}" if t in ("gpu-screen-recorder", "wf-recorder") else None
-    monkeypatch.setattr(rec, "_which", _which_mock)
-    cmd = rec.build_command(tmp_path / "out.mp4", "wayland-gnome", None, (1920, 1080, 60))
-    assert cmd is not None
-    assert "gpu-screen-recorder" in cmd[0]
+def test_build_x264_contains_resolution():
+    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1280, 720, 60, "/tmp/out.mp4", True)
+    assert "1280x720" in cmd
+    assert "60" in cmd
 
 
-def test_build_kde_falls_back_to_wf_recorder(tmp_path, monkeypatch):
-    def _which_mock(t):
-        return "/usr/bin/wf-recorder" if t == "wf-recorder" else None
-    monkeypatch.setattr(rec, "_which", _which_mock)
-    cmd = rec.build_command(tmp_path / "out.mp4", "wayland-kde", None, (1920, 1080, 60))
-    assert cmd is not None
-    assert "wf-recorder" in cmd[0]
+def test_build_x264_contains_dest():
+    dest = "/home/user/Vídeos/EpicPen/rec.mp4"
+    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 30, dest, True)
+    assert dest in cmd
 
 
-def test_build_gnome_no_tools_returns_none(tmp_path, monkeypatch):
-    monkeypatch.setattr(rec, "_which", lambda t: None)
-    cmd = rec.build_command(tmp_path / "out.mp4", "wayland-gnome", None, (1920, 1080, 60))
-    assert cmd is None
+def test_build_input_format_is_bgra():
+    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True)
+    assert "bgra" in cmd
 
 
-# ── Dest path ─────────────────────────────────────────────────────────────────
+def test_build_x264opts_present():
+    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True)
+    assert "-x264opts" in cmd
+    opts_idx = cmd.index("-x264opts")
+    opts_val = cmd[opts_idx + 1]
+    assert "ultrafast" not in opts_val  # deve estar em -preset, não aqui
+    assert "sliced-threads" in opts_val
+    assert "aq-mode=0" in opts_val
 
-def test_dest_path_in_command(tmp_path, monkeypatch):
-    monkeypatch.setattr(rec, "_which", lambda t: "/usr/bin/ffmpeg" if t == "ffmpeg" else None)
-    dest = tmp_path / "out.mp4"
-    cmd = rec.build_command(dest, "x11", None, (1920, 1080, 30))
-    assert str(dest) in cmd
+
+def test_build_x264_faststart():
+    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True)
+    assert "+faststart" in cmd
+
+
+def test_build_x264_no_audio():
+    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True)
+    assert "-an" in cmd
+
+
+def test_build_x264_profile_baseline():
+    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True)
+    assert "baseline" in cmd
+
+
+# ── _build_ffmpeg_cmd (sem x264, fallback mpeg4) ─────────────────────────────
+
+def test_build_no_x264_uses_mpeg4():
+    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", False)
+    assert "mpeg4" in cmd
+    assert "libx264" not in cmd
+
+
+def test_build_no_x264_no_x264opts():
+    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", False)
+    assert "-x264opts" not in cmd
+
+
+def test_build_no_x264_contains_dest():
+    dest = "/tmp/rec.mp4"
+    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 30, dest, False)
+    assert dest in cmd
+
+
+# ── ScreenRecorder.start: caminhos de falha ───────────────────────────────────
+
+def test_start_returns_false_when_no_ffmpeg(monkeypatch):
+    monkeypatch.setattr(rec, "_find_ffmpeg", lambda: None)
+    recorder = rec.ScreenRecorder()
+    recorder.failed = MagicMock()
+    assert recorder.start() is False
+    recorder.failed.emit.assert_called_once()
+    msg = recorder.failed.emit.call_args[0][0]
+    assert "ffmpeg" in msg.lower()
+
+
+def test_start_returns_false_when_no_screen(monkeypatch):
+    monkeypatch.setattr(rec, "_find_ffmpeg", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(rec, "_best_screen", lambda: None)
+    recorder = rec.ScreenRecorder()
+    recorder.failed = MagicMock()
+    assert recorder.start() is False
+    recorder.failed.emit.assert_called_once()
+
+
+def test_start_returns_true_when_already_recording(monkeypatch):
+    monkeypatch.setattr(rec, "_find_ffmpeg", lambda: "/usr/bin/ffmpeg")
+    recorder = rec.ScreenRecorder()
+    recorder._active = True
+    assert recorder.start() is True
+
+
+def test_start_emits_failed_on_popen_error(tmp_path, monkeypatch):
+    screen_mock = MagicMock()
+    screen_mock.geometry.return_value.width.return_value = 1920
+    screen_mock.geometry.return_value.height.return_value = 1080
+    screen_mock.refreshRate.return_value = 60.0
+
+    monkeypatch.setattr(rec, "_find_ffmpeg", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(rec, "_best_screen", lambda: screen_mock)
+    monkeypatch.setattr(rec, "_has_libx264", lambda f: True)
+    monkeypatch.setattr(rec, "_save_dir", lambda: tmp_path)
+    monkeypatch.setattr("subprocess.Popen", MagicMock(side_effect=OSError("permission denied")))
+
+    recorder = rec.ScreenRecorder()
+    recorder.failed = MagicMock()
+    assert recorder.start() is False
+    recorder.failed.emit.assert_called_once()
+
+
+# ── ScreenRecorder.stop: sem gravação ação é noop ────────────────────────────
+
+def test_stop_when_not_recording_is_noop():
+    recorder = rec.ScreenRecorder()
+    recorder.stopped = MagicMock()
+    recorder.failed = MagicMock()
+    recorder.stop()  # não deve lançar
+    recorder.stopped.emit.assert_not_called()
+    recorder.failed.emit.assert_not_called()

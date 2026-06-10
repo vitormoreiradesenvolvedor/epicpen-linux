@@ -1,18 +1,21 @@
 import os
+import queue
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 
-from PyQt6.QtCore import QObject, QProcess, pyqtSignal
+from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QApplication
+from PyQt6.QtMultimedia import QMediaCaptureSession, QScreenCapture, QVideoSink, QVideoFrame
+from PyQt6.QtGui import QImage
 
 _EXTRA_PATHS = [
     "/usr/bin", "/usr/local/bin", "/bin",
     str(Path.home() / ".local" / "bin"),
     "/snap/bin",
-    "/usr/games",
-    "/opt/bin",
 ]
 
 
@@ -27,147 +30,77 @@ def _which(tool: str) -> str | None:
     return None
 
 
-def _detect_env() -> str:
-    if (os.environ.get("WAYLAND_DISPLAY")
-            and os.environ.get("QT_QPA_PLATFORM", "wayland") != "xcb"):
-        desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
-        if "gnome" in desktop:
-            return "wayland-gnome"
-        if "kde" in desktop or "plasma" in desktop:
-            return "wayland-kde"
-        return "wayland-wlroots"
-    return "x11"
-
-
-def _detect_vaapi() -> str | None:
-    """Retorna /dev/dri/renderDXXX se VAAPI H.264 encoding disponível, senão None."""
-    if not _which("vainfo"):
-        return None
-    for dev in ("/dev/dri/renderD128", "/dev/dri/renderD129"):
-        if not os.path.exists(dev):
-            continue
-        try:
-            r = subprocess.run(
-                ["vainfo", "--display", "drm", "--device", dev],
-                capture_output=True, text=True, timeout=5,
-            )
-            if "VAEntrypointEncSlice" in r.stdout and "H264" in r.stdout:
-                return dev
-        except Exception:
-            pass
-    return None
-
-
-def _get_screen_info() -> tuple[int, int, int]:
-    """Retorna (largura, altura, hz) — resolução do monitor primário, Hz do mais rápido."""
-    screens = QApplication.screens()
-    if not screens:
-        return 1920, 1080, 30
-    primary = QApplication.primaryScreen() or screens[0]
-    geo = primary.geometry()
-    hz = max(max(round(s.refreshRate()) for s in screens), 1)
-    return geo.width(), geo.height(), hz
-
-
 def _save_dir() -> Path:
-    for d in (Path.home() / "Vídeos", Path.home() / "Videos"):
-        if d.exists():
-            return d / "EpicPen"
+    for parent in (Path.home() / "Vídeos", Path.home() / "Videos"):
+        if parent.exists():
+            return parent / "EpicPen"
     return Path.home() / "Vídeos" / "EpicPen"
 
 
-def build_command(
-    dest: Path,
-    env: str,
-    vaapi_dev: str | None,
-    _screen_info: tuple[int, int, int] | None = None,
-) -> list[str] | None:
-    """Monta o comando de gravação. `_screen_info` permite injeção em testes."""
-    w, h, fps = _screen_info or _get_screen_info()
+def _best_screen():
+    """Retorna o monitor com maior taxa de atualização entre todos os conectados."""
+    screens = QApplication.screens()
+    if not screens:
+        return QApplication.primaryScreen()
+    return max(screens, key=lambda s: s.refreshRate())
 
-    if env == "wayland-wlroots":
-        # Melhor: wl-screenrec (DMA-buf, encode inteiramente na GPU)
-        if _which("wl-screenrec") and vaapi_dev:
-            return [
-                _which("wl-screenrec"),
-                "--encode-device", vaapi_dev,
-                "--codec", "h264",
-                "-f", str(dest),
-            ]
-        # Bom: wf-recorder + VAAPI
-        if _which("wf-recorder") and vaapi_dev:
-            return [
-                _which("wf-recorder"),
-                "-c", "h264_vaapi",
-                "-d", vaapi_dev,
-                "--pixel-format", "yuv420p",
-                "-f", str(dest),
-            ]
-        # Fallback CPU: wf-recorder + libx264 ultrafast
-        if _which("wf-recorder"):
-            return [
-                _which("wf-recorder"),
-                "-c", "libx264",
-                "--codec-param", "preset=ultrafast",
-                "--codec-param", "crf=30",
-                "-f", str(dest),
-            ]
 
-    elif env in ("wayland-gnome", "wayland-kde"):
-        # gpu-screen-recorder usa portal internamente (GNOME + KDE)
-        if _which("gpu-screen-recorder"):
-            return [
-                _which("gpu-screen-recorder"),
-                "-w", "screen",
-                "-f", str(fps),
-                "-c", "h264",
-                "-o", str(dest),
-            ]
-        # Fallback: wf-recorder (funciona no KDE Wayland)
-        if _which("wf-recorder"):
-            cmd = [_which("wf-recorder"), "-f", str(dest)]
-            if vaapi_dev:
-                cmd += ["-c", "h264_vaapi", "-d", vaapi_dev, "--pixel-format", "yuv420p"]
-            else:
-                cmd += ["-c", "libx264",
-                        "--codec-param", "preset=ultrafast",
-                        "--codec-param", "crf=30"]
-            return cmd
+def _find_ffmpeg() -> str | None:
+    """Retorna caminho do ffmpeg: bundled no AppImage tem prioridade."""
+    appdir = os.environ.get("APPDIR", "")
+    if appdir:
+        bundled = os.path.join(appdir, "usr", "bin", "ffmpeg")
+        if os.access(bundled, os.X_OK):
+            return bundled
+    return _which("ffmpeg")
 
-    else:  # x11
-        ffmpeg = _which("ffmpeg")
-        if not ffmpeg:
-            return None
-        display = os.environ.get("DISPLAY", ":0")
-        if vaapi_dev:
-            return [
-                ffmpeg, "-y",
-                "-vaapi_device", vaapi_dev,
-                "-f", "x11grab",
-                "-framerate", str(fps),
-                "-video_size", f"{w}x{h}",
-                "-i", f"{display}+0,0",
-                "-rtbufsize", "64M",
-                "-vf", "format=nv12,hwupload",
-                "-c:v", "h264_vaapi",
-                "-b:v", "3000k",
-                str(dest),
-            ]
-        return [
-            ffmpeg, "-y",
-            "-f", "x11grab",
-            "-framerate", str(fps),
-            "-video_size", f"{w}x{h}",
-            "-i", f"{display}+0,0",
-            "-rtbufsize", "64M",
+
+def _has_libx264(ffmpeg: str) -> bool:
+    """Retorna True se este build do ffmpeg inclui o encoder libx264."""
+    try:
+        r = subprocess.run(
+            [ffmpeg, "-encoders"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return "libx264" in r.stdout
+    except Exception:
+        return False
+
+
+def _build_ffmpeg_cmd(
+    ffmpeg: str, w: int, h: int, fps: int, dest: str, has_x264: bool
+) -> list[str]:
+    """Monta o comando ffmpeg para rawvideo via stdin → MP4 de saída."""
+    base = [
+        ffmpeg,
+        "-f", "rawvideo",
+        "-pixel_format", "bgra",
+        "-video_size", f"{w}x{h}",
+        "-framerate", str(fps),
+        "-i", "pipe:0",
+    ]
+    if has_x264:
+        encode = [
             "-c:v", "libx264",
             "-preset", "ultrafast",
-            "-tune", "zerolatency",
-            "-crf", "30",
+            "-tune", "fastdecode",
+            "-crf", "23",
+            "-profile:v", "baseline",
+            "-level", "4.0",
+            "-x264opts",
+            (
+                "aq-mode=0:no-deblock:sliced-threads:threads=2:"
+                "bframes=0:weightp=0:subme=0:trellis=0:rc-lookahead=0:sync-lookahead=0"
+            ),
             "-pix_fmt", "yuv420p",
-            str(dest),
+            "-g", "300",
+            "-sc_threshold", "0",
         ]
-    return None
+    else:
+        # Fallback sem libx264: MPEG-4 nativo do FFmpeg (sem GPL)
+        encode = ["-c:v", "mpeg4", "-q:v", "5"]
+
+    return base + encode + ["-an", "-movflags", "+faststart", "-y", dest]
 
 
 class ScreenRecorder(QObject):
@@ -177,59 +110,129 @@ class ScreenRecorder(QObject):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._proc = QProcess(self)
-        self._proc.finished.connect(self._on_finished)
-        self._dest: Path | None = None
-        self._env   = _detect_env()
-        self._vaapi = _detect_vaapi()
+        self._capture = QScreenCapture()
+        self._sink = QVideoSink()
+        self._session = QMediaCaptureSession()
+        self._session.setScreenCapture(self._capture)
+        self._session.setVideoSink(self._sink)
+        self._sink.videoFrameChanged.connect(self._on_frame)
+
+        self._proc: Optional[subprocess.Popen] = None
+        self._dest: Optional[Path] = None
+        self._active = False
+        self._frame_queue: queue.Queue[Optional[bytes]] = queue.Queue(maxsize=16)
+        self._writer_thread: Optional[threading.Thread] = None
 
     @property
     def is_recording(self) -> bool:
-        return self._proc.state() == QProcess.ProcessState.Running
+        return self._active
 
     def start(self) -> bool:
-        if self.is_recording:
+        if self._active:
             return True
+
+        ffmpeg = _find_ffmpeg()
+        if not ffmpeg:
+            self.failed.emit(
+                "ffmpeg não encontrado.\n"
+                "Instale com: sudo dnf install ffmpeg  (Fedora)\n"
+                "             sudo apt install ffmpeg  (Ubuntu/Debian)"
+            )
+            return False
+
+        screen = _best_screen()
+        if screen is None:
+            self.failed.emit("Nenhuma tela detectada.")
+            return False
+
+        geo = screen.geometry()
+        w, h = geo.width(), geo.height()
+        fps = max(1, int(round(screen.refreshRate())))
+
         save_dir = _save_dir()
         save_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._dest = save_dir / f"epicpen_rec_{ts}.mp4"
-        cmd = build_command(self._dest, self._env, self._vaapi)
-        if not cmd:
-            self.failed.emit(
-                "Nenhuma ferramenta de gravação encontrada.\n"
-                "Instale: wf-recorder, wl-screenrec, gpu-screen-recorder ou ffmpeg"
+
+        has_x264 = _has_libx264(ffmpeg)
+        cmd = _build_ffmpeg_cmd(ffmpeg, w, h, fps, str(self._dest), has_x264)
+
+        try:
+            self._proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
+        except OSError as e:
+            self.failed.emit(f"Falha ao iniciar ffmpeg: {e}")
             return False
-        self._proc.start(cmd[0], cmd[1:])
-        if not self._proc.waitForStarted(3000):
-            self.failed.emit(f"Falha ao iniciar: {Path(cmd[0]).name}")
-            return False
+
+        self._active = True
+        self._writer_thread = threading.Thread(
+            target=self._writer_loop, daemon=True, name="epicpen-recorder",
+        )
+        self._writer_thread.start()
+
+        self._capture.setScreen(screen)
+        self._capture.start()
         self.started.emit()
         return True
 
     def stop(self):
-        if not self.is_recording:
+        if not self._active:
             return
-        prog = self._proc.program()
-        if prog and "ffmpeg" in prog:
-            # ffmpeg para graciosamente ao receber 'q' no stdin
-            self._proc.write(b"q")
-            self._proc.closeWriteChannel()
-        else:
-            # wf-recorder / wl-screenrec / gpu-screen-recorder: SIGTERM salva o arquivo
-            self._proc.terminate()
-        if not self._proc.waitForFinished(8000):
-            self._proc.kill()
+        self._active = False
+        self._capture.stop()
 
-    def _on_finished(self, _exit_code, _status):
-        dest = self._dest
-        if dest and dest.exists() and dest.stat().st_size > 0:
+        self._frame_queue.put(None)  # sentinel para encerrar o writer
+        if self._writer_thread:
+            self._writer_thread.join(timeout=5)
+            self._writer_thread = None
+
+        if self._proc is not None:
             try:
-                rel = dest.relative_to(Path.home())
-                msg = f"~/{rel}"
-            except ValueError:
-                msg = str(dest)
-            self.stopped.emit(str(dest))
-        else:
-            self.failed.emit("Gravação falhou ou arquivo vazio.")
+                self._proc.stdin.close()
+            except OSError:
+                pass
+            try:
+                self._proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                self._proc.wait()
+
+            dest = self._dest
+            self._proc = None
+
+            if dest and dest.exists() and dest.stat().st_size > 0:
+                self.stopped.emit(str(dest))
+            else:
+                self.failed.emit("Gravação falhou ou arquivo vazio.")
+
+    def _on_frame(self, frame: QVideoFrame):
+        if not self._active:
+            return
+        image = frame.toImage()
+        if image.isNull():
+            return
+        image = image.convertToFormat(QImage.Format.Format_BGRA8888)
+        ptr = image.bits()
+        ptr.setsize(image.sizeInBytes())
+        try:
+            self._frame_queue.put_nowait(bytes(ptr))
+        except queue.Full:
+            pass  # frame descartado — encoder não acompanha a captura
+
+    def _writer_loop(self):
+        """Thread dedicada: lê frames da fila e escreve no stdin do ffmpeg."""
+        while True:
+            data = self._frame_queue.get()
+            if data is None:
+                break
+            if self._proc is None or self._proc.poll() is not None:
+                break
+            try:
+                self._proc.stdin.write(data)
+                self._proc.stdin.flush()
+            except (BrokenPipeError, OSError):
+                break
