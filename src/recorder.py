@@ -73,6 +73,9 @@ def _build_ffmpeg_cmd(
     """Monta o comando ffmpeg para rawvideo via stdin → MP4 de saída."""
     base = [
         ffmpeg,
+        # Wall-clock timestamps: cada frame recebe o horário real de chegada,
+        # evitando vídeo acelerado causado por bursts iniciais do QVideoSink.
+        "-use_wallclock_as_timestamps", "1",
         "-f", "rawvideo",
         "-pixel_format", "rgba",
         "-video_size", f"{w}x{h}",
