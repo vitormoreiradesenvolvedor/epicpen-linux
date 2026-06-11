@@ -3,6 +3,7 @@ import queue
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -17,6 +18,64 @@ _EXTRA_PATHS = [
     str(Path.home() / ".local" / "bin"),
     "/snap/bin",
 ]
+
+# Formatos nativos Qt → nome ffmpeg (single-plane; bits(0) = frame completo).
+# Populado na primeira chamada para não importar enums antes do QApp existir.
+_NATIVE_FMTS: Optional[dict] = None
+
+
+def _get_native_fmts() -> dict:
+    global _NATIVE_FMTS
+    if _NATIVE_FMTS is None:
+        from PyQt6.QtMultimedia import QVideoFrameFormat as F
+        _NATIVE_FMTS = {
+            F.PixelFormat.Format_BGRA8888: "bgra",
+            F.PixelFormat.Format_BGRA8888_Premultiplied: "bgra",
+            F.PixelFormat.Format_RGBA8888: "rgba",
+            F.PixelFormat.Format_RGBX8888: "rgb0",
+        }
+    return _NATIVE_FMTS
+
+
+def _native_pix_fmt(frame: QVideoFrame) -> str:
+    """Retorna o pixel format ffmpeg do frame; 'rgba' como fallback seguro."""
+    return _get_native_fmts().get(frame.pixelFormat(), "rgba")
+
+
+def _map_frame_direct(frame: QVideoFrame) -> Optional[bytes]:
+    """Copia bytes do frame via map() sem conversão de pixels. None se falhar."""
+    if not frame.map(QVideoFrame.MapMode.ReadOnly):
+        return None
+    try:
+        bits = frame.bits(0)
+        n = frame.mappedBytes(0)
+        bits.setsize(n)
+        return bytes(bits)
+    except Exception:
+        return None
+    finally:
+        frame.unmap()
+
+
+def _frame_to_bytes(frame: QVideoFrame, expected_fmt: str) -> Optional[bytes]:
+    """Converte frame para bytes no formato esperado pelo ffmpeg.
+
+    Caminho rápido: map() direto quando o formato nativo bate (zero conversão).
+    Fallback: toImage() + convertToFormat(RGBA8888).
+    """
+    if _get_native_fmts().get(frame.pixelFormat()) == expected_fmt:
+        data = _map_frame_direct(frame)
+        if data is not None:
+            return data
+
+    image = frame.toImage()
+    if image.isNull():
+        return None
+    if image.format() != QImage.Format.Format_RGBA8888:
+        image = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    ptr = image.bits()
+    ptr.setsize(image.sizeInBytes())
+    return bytes(ptr)
 
 
 def _which(tool: str) -> str | None:
@@ -68,16 +127,15 @@ def _has_libx264(ffmpeg: str) -> bool:
 
 
 def _build_ffmpeg_cmd(
-    ffmpeg: str, w: int, h: int, fps: int, dest: str, has_x264: bool
+    ffmpeg: str, w: int, h: int, fps: int, dest: str, has_x264: bool,
+    pix_fmt: str = "rgba",
 ) -> list[str]:
     """Monta o comando ffmpeg para rawvideo via stdin → MP4 de saída."""
     base = [
         ffmpeg,
-        # Wall-clock timestamps: cada frame recebe o horário real de chegada,
-        # evitando vídeo acelerado causado por bursts iniciais do QVideoSink.
         "-use_wallclock_as_timestamps", "1",
         "-f", "rawvideo",
-        "-pixel_format", "rgba",
+        "-pixel_format", pix_fmt,
         "-video_size", f"{w}x{h}",
         "-framerate", str(fps),
         "-i", "pipe:0",
@@ -92,7 +150,7 @@ def _build_ffmpeg_cmd(
             "-level", "4.0",
             "-x264opts",
             (
-                "aq-mode=0:no-deblock:sliced-threads:threads=2:"
+                "aq-mode=0:no-deblock:sliced-threads:threads=0:"
                 "bframes=0:weightp=0:subme=0:trellis=0:rc-lookahead=0:sync-lookahead=0"
             ),
             "-pix_fmt", "yuv420p",
@@ -100,10 +158,17 @@ def _build_ffmpeg_cmd(
             "-sc_threshold", "0",
         ]
     else:
-        # Fallback sem libx264: MPEG-4 nativo do FFmpeg (sem GPL)
         encode = ["-c:v", "mpeg4", "-q:v", "5"]
 
     return base + encode + ["-an", "-movflags", "+faststart", "-y", dest]
+
+
+def _lower_priority():
+    """preexec_fn: reduz niceness do ffmpeg para não roubar CPU do UI."""
+    try:
+        os.setpriority(os.PRIO_PROCESS, 0, 10)
+    except Exception:
+        pass
 
 
 class ScreenRecorder(QObject):
@@ -123,8 +188,20 @@ class ScreenRecorder(QObject):
         self._proc: Optional[subprocess.Popen] = None
         self._dest: Optional[Path] = None
         self._active = False
-        self._frame_queue: queue.Queue[Optional[bytes]] = queue.Queue(maxsize=16)
+        # Fila pequena: 4 frames. Se o encoder atrasar, descarta em vez de acumular.
+        self._frame_queue: queue.Queue[Optional[bytes]] = queue.Queue(maxsize=4)
         self._writer_thread: Optional[threading.Thread] = None
+        self._start_lock = threading.Lock()
+
+        # Configurados em start()
+        self._ffmpeg_path: Optional[str] = None
+        self._rec_w = 0
+        self._rec_h = 0
+        self._rec_fps = 0
+        self._rec_has_x264 = False
+        self._detected_fmt: Optional[str] = None
+        self._last_frame_ts = 0.0
+        self._min_frame_interval = 1.0 / 60
 
     @property
     def is_recording(self) -> bool:
@@ -149,37 +226,55 @@ class ScreenRecorder(QObject):
             return False
 
         geo = screen.geometry()
-        w, h = geo.width(), geo.height()
-        fps = max(1, int(round(screen.refreshRate())))
+        self._rec_w = geo.width()
+        self._rec_h = geo.height()
+        # Captura no Hz nativo; limite de 60 fps mantém uso de CPU razoável
+        self._rec_fps = max(1, min(int(round(screen.refreshRate())), 60))
+        self._ffmpeg_path = ffmpeg
+        self._rec_has_x264 = _has_libx264(ffmpeg)
+        self._detected_fmt = None
+        self._proc = None
 
         save_dir = _save_dir()
         save_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._dest = save_dir / f"epicpen_rec_{ts}.mp4"
 
-        has_x264 = _has_libx264(ffmpeg)
-        cmd = _build_ffmpeg_cmd(ffmpeg, w, h, fps, str(self._dest), has_x264)
+        self._min_frame_interval = 1.0 / self._rec_fps
+        self._last_frame_ts = 0.0
+        self._active = True
 
+        self._capture.setScreen(screen)
+        self._capture.start()
+        self.started.emit()
+        return True
+
+    def _start_ffmpeg(self, pix_fmt: str) -> bool:
+        """Inicia o processo ffmpeg. Chamado na primeira frame (thread multimedia)."""
+        cmd = _build_ffmpeg_cmd(
+            self._ffmpeg_path,
+            self._rec_w, self._rec_h, self._rec_fps,
+            str(self._dest),
+            self._rec_has_x264,
+            pix_fmt,
+        )
         try:
             self._proc = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                preexec_fn=_lower_priority,
             )
         except OSError as e:
             self.failed.emit(f"Falha ao iniciar ffmpeg: {e}")
             return False
 
-        self._active = True
+        self._detected_fmt = pix_fmt
         self._writer_thread = threading.Thread(
             target=self._writer_loop, daemon=True, name="epicpen-recorder",
         )
         self._writer_thread.start()
-
-        self._capture.setScreen(screen)
-        self._capture.start()
-        self.started.emit()
         return True
 
     def stop(self):
@@ -188,8 +283,8 @@ class ScreenRecorder(QObject):
         self._active = False
         self._capture.stop()
 
-        self._frame_queue.put(None)  # sentinel para encerrar o writer
         if self._writer_thread:
+            self._frame_queue.put(None)
             self._writer_thread.join(timeout=5)
             self._writer_thread = None
 
@@ -211,23 +306,42 @@ class ScreenRecorder(QObject):
                 self.stopped.emit(str(dest))
             else:
                 self.failed.emit("Gravação falhou ou arquivo vazio.")
+        else:
+            self.failed.emit("Nenhum frame capturado.")
 
     def _on_frame(self, frame: QVideoFrame):
         if not self._active:
             return
-        image = frame.toImage()
-        if image.isNull():
+
+        # Throttle: descartar frames acima da taxa alvo
+        now = time.monotonic()
+        if now - self._last_frame_ts < self._min_frame_interval:
             return
-        image = image.convertToFormat(QImage.Format.Format_RGBA8888)
-        ptr = image.bits()
-        ptr.setsize(image.sizeInBytes())
+
+        # Lazy start: detecta o formato nativo e inicia o FFmpeg na primeira frame
+        if self._proc is None:
+            with self._start_lock:
+                if self._proc is None:
+                    pix_fmt = _native_pix_fmt(frame)
+                    if not self._start_ffmpeg(pix_fmt):
+                        self._active = False
+                        return
+
+        self._last_frame_ts = now
+
+        data = _frame_to_bytes(frame, self._detected_fmt)
+        if data is None:
+            return
+
         try:
-            self._frame_queue.put_nowait(bytes(ptr))
+            self._frame_queue.put_nowait(data)
         except queue.Full:
-            pass  # frame descartado — encoder não acompanha a captura
+            pass  # frame descartado — encoder não acompanha
 
     def _writer_loop(self):
-        """Thread dedicada: lê frames da fila e escreve no stdin do ffmpeg."""
+        """Thread dedicada: lê frames da fila e escreve no stdin do ffmpeg.
+        Sem flush() — o pipe do SO gerencia o buffering.
+        """
         while True:
             data = self._frame_queue.get()
             if data is None:
@@ -236,6 +350,5 @@ class ScreenRecorder(QObject):
                 break
             try:
                 self._proc.stdin.write(data)
-                self._proc.stdin.flush()
             except (BrokenPipeError, OSError):
                 break

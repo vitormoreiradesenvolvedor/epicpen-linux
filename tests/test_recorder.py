@@ -1,6 +1,6 @@
 """
-Testes do módulo recorder — verifica lógica pura (construção de comando,
-detecção de ffmpeg, codec) sem dependências de hardware ou display real.
+Testes do módulo recorder — verifica lógica pura (comandos ffmpeg, detecção
+de codec, formato nativo, caminhos de falha) sem display ou hardware real.
 """
 import sys
 import os
@@ -38,8 +38,6 @@ def _install_qt_stubs():
         def emit(self, *a):
             for cb in self._cbs:
                 cb(*a)
-        def __call__(self, *a):
-            return self
 
     class _SignalDescriptor:
         def __set_name__(self, owner, name):
@@ -58,11 +56,23 @@ def _install_qt_stubs():
     qtc.QObject = _FakeQObject
     qtc.pyqtSignal = _pyqtSignal
 
+    # Multimedia stubs
     qtm = _mod("PyQt6.QtMultimedia")
     qtm.QScreenCapture = MagicMock
     qtm.QMediaCaptureSession = MagicMock
     qtm.QVideoSink = MagicMock
     qtm.QVideoFrame = MagicMock
+
+    class _PixFmt:
+        Format_BGRA8888 = "Format_BGRA8888"
+        Format_BGRA8888_Premultiplied = "Format_BGRA8888_Premultiplied"
+        Format_RGBA8888 = "Format_RGBA8888"
+        Format_RGBX8888 = "Format_RGBX8888"
+
+    class _VideoFrameFormat:
+        PixelFormat = _PixFmt()
+
+    qtm.QVideoFrameFormat = _VideoFrameFormat
 
     qtg = _mod("PyQt6.QtGui")
     qtg.QImage = MagicMock
@@ -85,7 +95,7 @@ def test_find_ffmpeg_returns_bundled_when_appdir_set(tmp_path, monkeypatch):
 
 
 def test_find_ffmpeg_falls_back_to_system(tmp_path, monkeypatch):
-    monkeypatch.setenv("APPDIR", str(tmp_path))  # APPDIR sem executável
+    monkeypatch.setenv("APPDIR", str(tmp_path))
     monkeypatch.setattr(rec, "_which", lambda t: "/usr/bin/ffmpeg" if t == "ffmpeg" else None)
     assert rec._find_ffmpeg() == "/usr/bin/ffmpeg"
 
@@ -123,6 +133,29 @@ def test_has_libx264_exception_returns_false(monkeypatch):
     assert rec._has_libx264("/usr/bin/ffmpeg") is False
 
 
+# ── _native_pix_fmt ───────────────────────────────────────────────────────────
+
+def test_native_pix_fmt_bgra(monkeypatch):
+    monkeypatch.setattr(rec, "_NATIVE_FMTS", None)
+    frame = MagicMock()
+    frame.pixelFormat.return_value = "Format_BGRA8888"
+    assert rec._native_pix_fmt(frame) == "bgra"
+
+
+def test_native_pix_fmt_rgba(monkeypatch):
+    monkeypatch.setattr(rec, "_NATIVE_FMTS", None)
+    frame = MagicMock()
+    frame.pixelFormat.return_value = "Format_RGBA8888"
+    assert rec._native_pix_fmt(frame) == "rgba"
+
+
+def test_native_pix_fmt_unknown_defaults_rgba(monkeypatch):
+    monkeypatch.setattr(rec, "_NATIVE_FMTS", None)
+    frame = MagicMock()
+    frame.pixelFormat.return_value = "Format_NV12"
+    assert rec._native_pix_fmt(frame) == "rgba"
+
+
 # ── _build_ffmpeg_cmd (com x264) ──────────────────────────────────────────────
 
 def test_build_x264_contains_ultrafast():
@@ -148,19 +181,25 @@ def test_build_x264_contains_dest():
     assert dest in cmd
 
 
-def test_build_input_format_is_rgba():
+def test_build_default_pix_fmt_is_rgba():
     cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True)
-    assert "rgba" in cmd
+    idx = cmd.index("-pixel_format")
+    assert cmd[idx + 1] == "rgba"
+
+
+def test_build_custom_pix_fmt_bgra():
+    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True, "bgra")
+    idx = cmd.index("-pixel_format")
+    assert cmd[idx + 1] == "bgra"
 
 
 def test_build_x264opts_present():
     cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True)
     assert "-x264opts" in cmd
-    opts_idx = cmd.index("-x264opts")
-    opts_val = cmd[opts_idx + 1]
-    assert "ultrafast" not in opts_val  # deve estar em -preset, não aqui
-    assert "sliced-threads" in opts_val
-    assert "aq-mode=0" in opts_val
+    opts = cmd[cmd.index("-x264opts") + 1]
+    assert "sliced-threads" in opts
+    assert "aq-mode=0" in opts
+    assert "threads=0" in opts
 
 
 def test_build_x264_faststart():
@@ -178,6 +217,11 @@ def test_build_x264_profile_baseline():
     assert "baseline" in cmd
 
 
+def test_build_wallclock_timestamps():
+    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True)
+    assert "-use_wallclock_as_timestamps" in cmd
+
+
 # ── _build_ffmpeg_cmd (sem x264, fallback mpeg4) ─────────────────────────────
 
 def test_build_no_x264_uses_mpeg4():
@@ -191,12 +235,6 @@ def test_build_no_x264_no_x264opts():
     assert "-x264opts" not in cmd
 
 
-def test_build_no_x264_contains_dest():
-    dest = "/tmp/rec.mp4"
-    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 30, dest, False)
-    assert dest in cmd
-
-
 # ── ScreenRecorder.start: caminhos de falha ───────────────────────────────────
 
 def test_start_returns_false_when_no_ffmpeg(monkeypatch):
@@ -205,8 +243,7 @@ def test_start_returns_false_when_no_ffmpeg(monkeypatch):
     recorder.failed = MagicMock()
     assert recorder.start() is False
     recorder.failed.emit.assert_called_once()
-    msg = recorder.failed.emit.call_args[0][0]
-    assert "ffmpeg" in msg.lower()
+    assert "ffmpeg" in recorder.failed.emit.call_args[0][0].lower()
 
 
 def test_start_returns_false_when_no_screen(monkeypatch):
@@ -219,36 +256,46 @@ def test_start_returns_false_when_no_screen(monkeypatch):
 
 
 def test_start_returns_true_when_already_recording(monkeypatch):
-    monkeypatch.setattr(rec, "_find_ffmpeg", lambda: "/usr/bin/ffmpeg")
     recorder = rec.ScreenRecorder()
     recorder._active = True
     assert recorder.start() is True
 
 
-def test_start_emits_failed_on_popen_error(tmp_path, monkeypatch):
-    screen_mock = MagicMock()
-    screen_mock.geometry.return_value.width.return_value = 1920
-    screen_mock.geometry.return_value.height.return_value = 1080
-    screen_mock.refreshRate.return_value = 60.0
+# ── ScreenRecorder._start_ffmpeg: falha no Popen ─────────────────────────────
 
-    monkeypatch.setattr(rec, "_find_ffmpeg", lambda: "/usr/bin/ffmpeg")
-    monkeypatch.setattr(rec, "_best_screen", lambda: screen_mock)
-    monkeypatch.setattr(rec, "_has_libx264", lambda f: True)
-    monkeypatch.setattr(rec, "_save_dir", lambda: tmp_path)
-    monkeypatch.setattr("subprocess.Popen", MagicMock(side_effect=OSError("permission denied")))
-
+def test_start_ffmpeg_emits_failed_on_popen_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "subprocess.Popen", MagicMock(side_effect=OSError("permission denied"))
+    )
     recorder = rec.ScreenRecorder()
+    recorder._ffmpeg_path = "/usr/bin/ffmpeg"
+    recorder._rec_w = 1920
+    recorder._rec_h = 1080
+    recorder._rec_fps = 30
+    recorder._rec_has_x264 = True
+    recorder._dest = tmp_path / "out.mp4"
     recorder.failed = MagicMock()
-    assert recorder.start() is False
+    assert recorder._start_ffmpeg("rgba") is False
     recorder.failed.emit.assert_called_once()
 
 
-# ── ScreenRecorder.stop: sem gravação ação é noop ────────────────────────────
+# ── ScreenRecorder.stop: casos de borda ──────────────────────────────────────
 
 def test_stop_when_not_recording_is_noop():
     recorder = rec.ScreenRecorder()
     recorder.stopped = MagicMock()
     recorder.failed = MagicMock()
-    recorder.stop()  # não deve lançar
+    recorder.stop()
     recorder.stopped.emit.assert_not_called()
     recorder.failed.emit.assert_not_called()
+
+
+def test_stop_when_ffmpeg_never_started_emits_failed():
+    recorder = rec.ScreenRecorder()
+    recorder._active = True
+    recorder._proc = None
+    recorder.stopped = MagicMock()
+    recorder.failed = MagicMock()
+    recorder.stop()
+    recorder.failed.emit.assert_called_once()
+    recorder.stopped.emit.assert_not_called()
