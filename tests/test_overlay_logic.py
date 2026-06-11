@@ -172,6 +172,7 @@ def overlay():
     ov._pen_scratch      = None
     ov._wb_canvas        = None
     ov._erased_cache     = {}
+    ov._anchor_cache     = {}
     ov._undo_ops         = []
     ov._wb_pan           = _QPointF(0.0, 0.0)
     ov._wb_zoom          = 1.0

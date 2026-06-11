@@ -94,6 +94,19 @@ class OverlayWindow(QWidget):
         # Elimina o _rebuild_canvas / _wb_canvas rebuild por frame durante o drag.
         self._drag_base: QPixmap | None = None
 
+        # Stroke arrastado pré-renderizado num pixmap flutuante (coords de canvas).
+        # Durante o move só o offset acumulado muda — paintEvent faz dois blits e
+        # os pontos do stroke são transladados UMA vez, no release. O custo por
+        # frame é independente do número de pontos do stroke.
+        self._drag_pixmap: QPixmap | None = None
+        self._drag_pix_pos = QPointF(0.0, 0.0)   # origem do pixmap em canvas
+        self._drag_offset = QPointF(0.0, 0.0)    # delta acumulado do drag
+
+        # Cache de âncoras (centroides) por índice de stroke. Evita recalcular
+        # O(pontos) por stroke a cada frame em _draw_drag_handles/_find_stroke_at.
+        # Invalidado junto com _erased_cache.
+        self._anchor_cache: dict[int, QPointF] = {}
+
         # Cache de _is_fully_erased: dict[stroke_idx → bool].
         # Invalidado (limpo) sempre que a estrutura de _strokes muda.
         # Evita O(n²) por frame em _draw_drag_handles e _find_stroke_at.
@@ -605,6 +618,69 @@ class OverlayWindow(QWidget):
             sum(p.y() for p in pts) / len(pts),
         )
 
+    def _stroke_bbox(self, stroke: list) -> QRectF:
+        """Bounding box do stroke em coords de canvas, incluindo largura do traço."""
+        props = stroke[0][1]
+        tool = props.get("tool", "pen")
+        p0 = stroke[0][0]
+        if tool == "bitmap":
+            px = props.get("pixmap")
+            if px is None:
+                return QRectF(p0.x(), p0.y(), 0, 0)
+            return QRectF(p0.x(), p0.y(), px.width(), px.height())
+        if tool == "text":
+            font = QFont(props.get("font_family", "Sans Serif"))
+            font.setPointSizeF(max(1.0, float(props.get("size", 16))))
+            fm = QFontMetrics(font)
+            lines = props.get("text", "").split("\n")
+            w = max((fm.horizontalAdvance(ln) for ln in lines), default=0)
+            h = fm.height() * max(1, len(lines))
+            return QRectF(p0.x(), p0.y() - fm.ascent(), w, h)
+        xs = [pt.x() for pt, _ in stroke]
+        ys = [pt.y() for pt, _ in stroke]
+        sz = props.get("size", 3)
+        if tool == "eraser":
+            half = sz * 2.0
+        elif tool == "highlighter":
+            half = sz * 3.0
+        else:
+            half = sz / 2.0
+        pad = half + 2.0  # margem anti-aliasing
+        return QRectF(
+            min(xs) - pad, min(ys) - pad,
+            (max(xs) - min(xs)) + 2 * pad, (max(ys) - min(ys)) + 2 * pad,
+        )
+
+    def _build_drag_pixmap(self, indices: list[int]) -> None:
+        """Pré-renderiza os strokes num pixmap flutuante para drag O(1) por frame.
+
+        Se o bounding box for desproporcional (stroke gigante em canvas WB com
+        muito pan), deixa _drag_pixmap = None — paintEvent usa o fallback que
+        desenha o stroke com painter.translate(offset), ainda sem rebuild de pontos.
+        """
+        self._drag_pixmap = None
+        rect = QRectF()
+        for i in indices:
+            if self._strokes[i]:
+                rect = rect.united(self._stroke_bbox(self._strokes[i]))
+        w = int(math.ceil(rect.width()))
+        h = int(math.ceil(rect.height()))
+        if w <= 0 or h <= 0:
+            return
+        # Cap de memória: até 4× a área do ecrã (~127MB em 4K). Acima disso, fallback.
+        if w * h > self.width() * self.height() * 4:
+            return
+        pm = QPixmap(w, h)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.translate(-rect.left(), -rect.top())
+        for i in indices:
+            self._draw_stroke(p, self._strokes[i])
+        p.end()
+        self._drag_pixmap = pm
+        self._drag_pix_pos = QPointF(rect.left(), rect.top())
+
     def _find_linked_erasers(self, stroke_idx: int) -> list[int]:
         """Índices de strokes de borracha posteriores que cobrem stroke_idx.
 
@@ -711,8 +787,18 @@ class OverlayWindow(QWidget):
         self._invalidate_erased_cache()
 
     def _invalidate_erased_cache(self) -> None:
-        """Limpa o cache de _is_fully_erased. Chamar sempre que _strokes muda estruturalmente."""
+        """Limpa os caches dependentes de _strokes (erased + âncoras).
+        Chamar sempre que _strokes muda estruturalmente ou de geometria."""
         self._erased_cache.clear()
+        self._anchor_cache.clear()
+
+    def _anchor(self, idx: int) -> QPointF:
+        """Âncora do stroke idx, cacheada (centroide é O(pontos) para calcular)."""
+        a = self._anchor_cache.get(idx)
+        if a is None:
+            a = self._stroke_anchor(self._strokes[idx])
+            self._anchor_cache[idx] = a
+        return a
 
     def _is_fully_erased(self, idx: int) -> bool:
         """True se todos os pontos amostrados do stroke estão cobertos por erasers posteriores.
@@ -1027,7 +1113,7 @@ class OverlayWindow(QWidget):
                 continue  # erasers movem-se com o stroke a que pertencem, não são arrastáveis por si
             if self._is_fully_erased(i):
                 continue
-            a = self._stroke_anchor(stroke)
+            a = self._anchor(i)
             d2 = (a.x() - px) ** 2 + (a.y() - py) ** 2
             if d2 < best_dist2:
                 best_dist2, best_idx = d2, i
@@ -1077,6 +1163,7 @@ class OverlayWindow(QWidget):
             ]
         self._canvas = None
         self._wb_canvas = None
+        self._invalidate_erased_cache()  # geometria mudou — âncoras/erased inválidos
         self.update()
 
     # ── Mouse events ──────────────────────────────────────────────────────
@@ -1147,6 +1234,10 @@ class OverlayWindow(QWidget):
                 self._drag_stroke_idx = idx
                 self._drag_linked_erasers = linked  # WB: move junto; não-WB: []
                 self._drag_last_pos = event.pos()
+                self._drag_offset = QPointF(0.0, 0.0)
+                # Stroke arrastado vira um pixmap flutuante: o move só altera o
+                # offset (dois blits por frame, custo independente dos pontos).
+                self._build_drag_pixmap([idx] + linked)
                 self._drawing = True
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
             return
@@ -1206,14 +1297,12 @@ class OverlayWindow(QWidget):
                 if self._whiteboard and self._wb_zoom != 0:
                     dx /= self._wb_zoom
                     dy /= self._wb_zoom
-                delta = QPointF(dx, dy)
-                self._translate_stroke(self._drag_stroke_idx, delta)
-                for j in self._drag_linked_erasers:
-                    if j < len(self._strokes):
-                        self._translate_stroke(j, delta)
+                # Só acumula o offset — nenhum ponto é transladado por frame.
+                # A translação real acontece uma única vez no mouseRelease.
+                self._drag_offset = QPointF(
+                    self._drag_offset.x() + dx, self._drag_offset.y() + dy,
+                )
                 self._drag_last_pos = pos
-                # _drag_base não inclui o stroke arrastado: sem rebuild de canvas por frame.
-                # _canvas/_wb_canvas serão invalidados uma única vez no mouseRelease.
                 self.update()
             else:
                 new_hover = self._find_stroke_at(pos)
@@ -1278,11 +1367,20 @@ class OverlayWindow(QWidget):
 
         if self._tool == "drag":
             if self._drawing:
+                # Aplica o offset acumulado aos pontos UMA vez (não por frame)
+                off = self._drag_offset
+                if self._drag_stroke_idx is not None and (off.x() or off.y()):
+                    self._translate_stroke(self._drag_stroke_idx, off)
+                    for j in self._drag_linked_erasers:
+                        if j < len(self._strokes):
+                            self._translate_stroke(j, off)
                 self._drawing = False
                 self._drag_stroke_idx = None
                 self._drag_linked_erasers = []
                 self._drag_last_pos = None
                 self._drag_base = None
+                self._drag_pixmap = None
+                self._drag_offset = QPointF(0.0, 0.0)
                 # Rebuild de canvas uma vez no final do drag (não por frame)
                 self._canvas = None
                 self._wb_canvas = None
@@ -1361,6 +1459,11 @@ class OverlayWindow(QWidget):
             if idx is not None:
                 factor = 1.1 if event.angleDelta().y() > 0 else 0.9
                 self._scale_stroke(idx, factor)
+                if self._drawing and self._drag_stroke_idx is not None:
+                    # Pixmap flutuante reflete o stroke escalado
+                    self._build_drag_pixmap(
+                        [self._drag_stroke_idx] + self._drag_linked_erasers
+                    )
             event.accept()
         else:
             event.ignore()
@@ -1380,29 +1483,34 @@ class OverlayWindow(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # ── Drag activo: usa _drag_base + stroke arrastado — O(1) por frame ──────
+        # ── Drag activo: blit base + blit pixmap flutuante no offset — O(1) ──────
         if self._drag_base is not None and self._drawing and self._drag_stroke_idx is not None:
             painter.drawPixmap(0, 0, self._drag_base)
-            drag_s = self._strokes[self._drag_stroke_idx]
+            off = self._drag_offset
             if self._whiteboard:
                 painter.save()
-                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
                 painter.translate(self._wb_pan)
                 painter.scale(self._wb_zoom, self._wb_zoom)
-                self._draw_stroke(painter, drag_s)
-                # WB: erasers ligados viajam com o stroke (pintam cor de fundo)
-                for j in self._drag_linked_erasers:
-                    if j < len(self._strokes):
-                        self._draw_stroke(painter, self._strokes[j])
-                self._draw_drag_handles(painter)
-                painter.restore()
+            if self._drag_pixmap is not None:
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+                painter.drawPixmap(
+                    QPointF(self._drag_pix_pos.x() + off.x(),
+                            self._drag_pix_pos.y() + off.y()),
+                    self._drag_pixmap,
+                )
             else:
-                self._draw_stroke(painter, drag_s)
-                # Não-WB: após bake os linked erasers são []; esta linha é no-op
+                # Fallback (bbox gigante): desenha com translate — os pontos do
+                # stroke continuam intactos, só a transform do painter muda.
+                painter.save()
+                painter.translate(off)
+                self._draw_stroke(painter, self._strokes[self._drag_stroke_idx])
                 for j in self._drag_linked_erasers:
                     if j < len(self._strokes):
                         self._draw_stroke(painter, self._strokes[j])
-                self._draw_drag_handles(painter)
+                painter.restore()
+            self._draw_drag_handles(painter)
+            if self._whiteboard:
+                painter.restore()
         # ── Restante (não drag activo) ────────────────────────────────────────────
         elif self._whiteboard:
             # Cache WB: rebuild apenas quando strokes/pan/zoom/tamanho mudam.
@@ -1544,7 +1652,13 @@ class OverlayWindow(QWidget):
             if self._is_fully_erased(i):
                 continue
 
-            anchor = self._stroke_anchor(stroke)
+            anchor = self._anchor(i)
+            if self._drawing and i == self._drag_stroke_idx:
+                # Pontos só são transladados no release — handle segue o offset
+                anchor = QPointF(
+                    anchor.x() + self._drag_offset.x(),
+                    anchor.y() + self._drag_offset.y(),
+                )
 
             is_active = (self._drawing and i == self._drag_stroke_idx)
             is_hover  = (not self._drawing and i == self._drag_hover_idx)
