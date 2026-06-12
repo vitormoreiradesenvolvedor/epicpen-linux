@@ -222,6 +222,165 @@ def test_build_wallclock_timestamps():
     assert "-use_wallclock_as_timestamps" in cmd
 
 
+def test_build_vsync_vfr_present():
+    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True)
+    idx = cmd.index("-vsync")
+    assert cmd[idx + 1] == "vfr"
+
+
+# ── _build_ffmpeg_cmd (VAAPI) ─────────────────────────────────────────────────
+
+def test_build_vaapi_uses_h264_vaapi():
+    cmd = rec._build_ffmpeg_cmd(
+        "/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True,
+        vaapi_device="/dev/dri/renderD128",
+    )
+    assert "h264_vaapi" in cmd
+    assert "libx264" not in cmd
+
+
+def test_build_vaapi_init_hw_device():
+    cmd = rec._build_ffmpeg_cmd(
+        "/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True,
+        vaapi_device="/dev/dri/renderD128",
+    )
+    idx = cmd.index("-init_hw_device")
+    assert cmd[idx + 1] == "vaapi=va:/dev/dri/renderD128"
+    assert "-filter_hw_device" in cmd
+
+
+def test_build_vaapi_hwupload_filter():
+    cmd = rec._build_ffmpeg_cmd(
+        "/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True,
+        vaapi_device="/dev/dri/renderD128",
+    )
+    idx = cmd.index("-vf")
+    assert "hwupload" in cmd[idx + 1]
+
+
+def test_build_vaapi_takes_priority_over_x264():
+    cmd = rec._build_ffmpeg_cmd(
+        "/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True,
+        vaapi_device="/dev/dri/renderD129",
+    )
+    assert "-x264opts" not in cmd
+
+
+# ── _probe_vaapi ──────────────────────────────────────────────────────────────
+
+def test_probe_vaapi_returns_device_on_success(monkeypatch):
+    monkeypatch.setattr(rec, "_VAAPI_CACHE", {})
+    monkeypatch.setattr(
+        "glob.glob", lambda p: ["/dev/dri/renderD128", "/dev/dri/renderD129"]
+    )
+    r = MagicMock()
+    r.returncode = 0
+    monkeypatch.setattr("subprocess.run", MagicMock(return_value=r))
+    assert rec._probe_vaapi("/usr/bin/ffmpeg") == "/dev/dri/renderD128"
+
+
+def test_probe_vaapi_returns_none_when_encode_fails(monkeypatch):
+    monkeypatch.setattr(rec, "_VAAPI_CACHE", {})
+    monkeypatch.setattr("glob.glob", lambda p: ["/dev/dri/renderD128"])
+    r = MagicMock()
+    r.returncode = 1
+    monkeypatch.setattr("subprocess.run", MagicMock(return_value=r))
+    assert rec._probe_vaapi("/usr/bin/ffmpeg") is None
+
+
+def test_probe_vaapi_returns_none_without_devices(monkeypatch):
+    monkeypatch.setattr(rec, "_VAAPI_CACHE", {})
+    monkeypatch.setattr("glob.glob", lambda p: [])
+    assert rec._probe_vaapi("/usr/bin/ffmpeg") is None
+
+
+def test_probe_vaapi_caches_result(monkeypatch):
+    monkeypatch.setattr(rec, "_VAAPI_CACHE", {})
+    monkeypatch.setattr("glob.glob", lambda p: ["/dev/dri/renderD128"])
+    r = MagicMock()
+    r.returncode = 0
+    run = MagicMock(return_value=r)
+    monkeypatch.setattr("subprocess.run", run)
+    rec._probe_vaapi("/usr/bin/ffmpeg")
+    rec._probe_vaapi("/usr/bin/ffmpeg")
+    assert run.call_count == 1
+
+
+def test_probe_vaapi_survives_exception(monkeypatch):
+    monkeypatch.setattr(rec, "_VAAPI_CACHE", {})
+    monkeypatch.setattr("glob.glob", lambda p: ["/dev/dri/renderD128"])
+    monkeypatch.setattr("subprocess.run", MagicMock(side_effect=OSError("boom")))
+    assert rec._probe_vaapi("/usr/bin/ffmpeg") is None
+
+
+# ── _pick_ffmpeg ──────────────────────────────────────────────────────────────
+
+def test_pick_prefers_vaapi(monkeypatch):
+    monkeypatch.setattr(rec, "_ffmpeg_candidates", lambda: ["/app/ffmpeg", "/usr/bin/ffmpeg"])
+    monkeypatch.setattr(
+        rec, "_probe_vaapi",
+        lambda f: "/dev/dri/renderD128" if f == "/usr/bin/ffmpeg" else None,
+    )
+    monkeypatch.setattr(rec, "_has_libx264", lambda f: True)
+    path, dev, x264 = rec._pick_ffmpeg()
+    assert path == "/usr/bin/ffmpeg"
+    assert dev == "/dev/dri/renderD128"
+    assert x264 is True
+
+
+def test_pick_falls_back_to_x264(monkeypatch):
+    monkeypatch.setattr(rec, "_ffmpeg_candidates", lambda: ["/app/ffmpeg", "/usr/bin/ffmpeg"])
+    monkeypatch.setattr(rec, "_probe_vaapi", lambda f: None)
+    monkeypatch.setattr(rec, "_has_libx264", lambda f: f == "/app/ffmpeg")
+    path, dev, x264 = rec._pick_ffmpeg()
+    assert path == "/app/ffmpeg"
+    assert dev is None
+    assert x264 is True
+
+
+def test_pick_last_resort_mpeg4(monkeypatch):
+    monkeypatch.setattr(rec, "_ffmpeg_candidates", lambda: ["/usr/bin/ffmpeg"])
+    monkeypatch.setattr(rec, "_probe_vaapi", lambda f: None)
+    monkeypatch.setattr(rec, "_has_libx264", lambda f: False)
+    path, dev, x264 = rec._pick_ffmpeg()
+    assert path == "/usr/bin/ffmpeg"
+    assert dev is None
+    assert x264 is False
+
+
+def test_pick_returns_none_without_ffmpeg(monkeypatch):
+    monkeypatch.setattr(rec, "_ffmpeg_candidates", lambda: [])
+    assert rec._pick_ffmpeg() == (None, None, False)
+
+
+# ── Deduplicação de frames (encode-on-change) ─────────────────────────────────
+
+def test_is_duplicate_false_for_new_data():
+    recorder = rec.ScreenRecorder()
+    recorder._last_data = b"aaaa"
+    recorder._last_sent_ts = 100.0
+    assert recorder._is_duplicate(b"bbbb", 100.1) is False
+
+
+def test_is_duplicate_true_for_same_data_within_interval():
+    recorder = rec.ScreenRecorder()
+    recorder._last_data = b"aaaa"
+    recorder._last_sent_ts = 100.0
+    assert recorder._is_duplicate(b"aaaa", 100.5) is True
+
+
+def test_is_duplicate_false_after_resend_interval():
+    recorder = rec.ScreenRecorder()
+    recorder._last_data = b"aaaa"
+    recorder._last_sent_ts = 100.0
+    assert recorder._is_duplicate(b"aaaa", 101.5) is False
+
+
+def test_is_duplicate_false_when_no_previous_frame():
+    recorder = rec.ScreenRecorder()
+    assert recorder._is_duplicate(b"aaaa", 100.0) is False
+
+
 # ── _build_ffmpeg_cmd (sem x264, fallback mpeg4) ─────────────────────────────
 
 def test_build_no_x264_uses_mpeg4():
@@ -238,7 +397,7 @@ def test_build_no_x264_no_x264opts():
 # ── ScreenRecorder.start: caminhos de falha ───────────────────────────────────
 
 def test_start_returns_false_when_no_ffmpeg(monkeypatch):
-    monkeypatch.setattr(rec, "_find_ffmpeg", lambda: None)
+    monkeypatch.setattr(rec, "_pick_ffmpeg", lambda: (None, None, False))
     recorder = rec.ScreenRecorder()
     recorder.failed = MagicMock()
     assert recorder.start() is False
@@ -247,7 +406,7 @@ def test_start_returns_false_when_no_ffmpeg(monkeypatch):
 
 
 def test_start_returns_false_when_no_screen(monkeypatch):
-    monkeypatch.setattr(rec, "_find_ffmpeg", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(rec, "_pick_ffmpeg", lambda: ("/usr/bin/ffmpeg", None, True))
     monkeypatch.setattr(rec, "_best_screen", lambda: None)
     recorder = rec.ScreenRecorder()
     recorder.failed = MagicMock()
