@@ -368,6 +368,14 @@ class ToolbarWindow(QWidget):
         self._drag_start_screen = None   # cursor em coords de ecrã no press
         self._drag_start_pos    = None   # _lsw_pos snapshot no início do drag
         self._dragging          = False  # True após exceder o threshold
+        # Moves do drag coalescidos num tick de ~60Hz com amortecimento:
+        # um move_to por evento entra em oscilação quando os eventos chegam
+        # atrasados sob carga (gravação) — evento gerado com a superfície na
+        # posição antiga somado ao _lsw_pos novo sobrecorrige a cada passo.
+        self._drag_target: QPoint | None = None
+        self._drag_move_timer = QTimer(self)
+        self._drag_move_timer.setInterval(16)
+        self._drag_move_timer.timeout.connect(self._apply_drag_move)
         self._lsw_ptr           = None   # LayerShellQt::Window* se layer-shell ativo
         self._drawing_active    = True
         self._passthrough_active = False  # True quando no modo seta (visível + sem input)
@@ -1433,14 +1441,15 @@ class ToolbarWindow(QWidget):
                 new_pos = self._clamp_to_screen(self._drag_start_pos + cursor_delta,
                                                 self._current_screen)
                 if self.parent() is not None:
+                    # Embed: move síncrono de child widget, sem compositor
                     self.move(new_pos)
+                    self._lsw_pos = new_pos
                 else:
-                    scr = self._current_screen
-                    origin = scr.geometry().topLeft() if scr else QPoint(0, 0)
-                    rel = new_pos - origin
-                    layershell.move_to(self._lsw_ptr, rel.x(), rel.y())
-                    self.update()
-                self._lsw_pos = new_pos
+                    # Layer-shell: só registra o alvo; o timer aplica
+                    # coalescido (1 move por frame) com amortecimento
+                    self._drag_target = new_pos
+                    if not self._drag_move_timer.isActive():
+                        self._drag_move_timer.start()
                 return True
             if self._dragging:
                 # startSystemMove() ativo — compositor move; consumir eventos residuais
@@ -1451,6 +1460,11 @@ class ToolbarWindow(QWidget):
             self._drag_start  = None
             self._dragging    = False
             if was_dragging:
+                self._drag_move_timer.stop()
+                if self._lsw_ptr and self._drag_target is not None:
+                    # Aplica a posição final pendente sem amortecimento
+                    self._move_lsw_to(self._drag_target)
+                self._drag_target = None
                 if self._lsw_ptr:
                     cursor_abs = event.scenePosition().toPoint() + self._lsw_pos
                     new_screen = self._screen_at(cursor_abs)
@@ -1466,6 +1480,39 @@ class ToolbarWindow(QWidget):
                 return True  # consome release → botão não dispara click após drag
 
         return False  # passa todos os demais eventos adiante
+
+    # ── Drag coalescido (layer-shell) ─────────────────────────────────────────
+
+    def _move_lsw_to(self, pos: QPoint):
+        """Move a superfície layer-shell para pos (coords de ecrã) e atualiza
+        o tracking. self.update() mantém move_to em sincronia com o compositor
+        (sem ele o overshoot acumula em arrasto rápido)."""
+        scr = self._current_screen
+        origin = scr.geometry().topLeft() if scr else QPoint(0, 0)
+        rel = pos - origin
+        layershell.move_to(self._lsw_ptr, rel.x(), rel.y())
+        self._lsw_pos = pos
+        self.update()
+
+    def _apply_drag_move(self):
+        """Tick do drag: aplica o alvo mais recente com amortecimento.
+
+        O passo parcial (60%) converge rápido mas absorve a sobrecorreção
+        causada por eventos atrasados — sem ele a toolbar treme quando a
+        gravação carrega a CPU e os MouseMove chegam em rajadas."""
+        if self._drag_target is None or not self._lsw_ptr:
+            self._drag_move_timer.stop()
+            return
+        cur = self._lsw_pos
+        dx = self._drag_target.x() - cur.x()
+        dy = self._drag_target.y() - cur.y()
+        if dx == 0 and dy == 0:
+            return
+        if abs(dx) <= 2 and abs(dy) <= 2:
+            new_pos = QPoint(self._drag_target)
+        else:
+            new_pos = QPoint(cur.x() + round(dx * 0.6), cur.y() + round(dy * 0.6))
+        self._move_lsw_to(new_pos)
 
     # ── Tab override via event() (segunda camada de segurança) ────────────────
 
