@@ -84,32 +84,65 @@ import recorder as rec  # noqa: E402
 
 # ── _find_ffmpeg ──────────────────────────────────────────────────────────────
 
+def _make_exe(path: Path) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
+    path.chmod(0o755)
+    return str(path)
+
+
 def test_find_ffmpeg_returns_bundled_when_appdir_set(tmp_path, monkeypatch):
-    fake_ffmpeg = tmp_path / "usr" / "bin" / "ffmpeg"
-    fake_ffmpeg.parent.mkdir(parents=True)
-    fake_ffmpeg.touch()
-    fake_ffmpeg.chmod(0o755)
+    bundled = _make_exe(tmp_path / "usr" / "bin" / "ffmpeg")
+    system = _make_exe(tmp_path / "sys" / "ffmpeg")
     monkeypatch.setenv("APPDIR", str(tmp_path))
-    monkeypatch.setattr(rec, "_which", lambda t: "/usr/bin/ffmpeg")
-    assert rec._find_ffmpeg() == str(fake_ffmpeg)
+    monkeypatch.setattr("shutil.which", lambda t: system)
+    monkeypatch.setattr(rec, "_EXTRA_PATHS", [])
+    assert rec._find_ffmpeg() == bundled
 
 
 def test_find_ffmpeg_falls_back_to_system(tmp_path, monkeypatch):
-    monkeypatch.setenv("APPDIR", str(tmp_path))
-    monkeypatch.setattr(rec, "_which", lambda t: "/usr/bin/ffmpeg" if t == "ffmpeg" else None)
-    assert rec._find_ffmpeg() == "/usr/bin/ffmpeg"
+    system = _make_exe(tmp_path / "sys" / "ffmpeg")
+    monkeypatch.setenv("APPDIR", str(tmp_path))  # sem bundled dentro
+    monkeypatch.setattr("shutil.which", lambda t: system)
+    monkeypatch.setattr(rec, "_EXTRA_PATHS", [])
+    assert rec._find_ffmpeg() == system
 
 
 def test_find_ffmpeg_returns_none_when_absent(tmp_path, monkeypatch):
     monkeypatch.setenv("APPDIR", str(tmp_path))
-    monkeypatch.setattr(rec, "_which", lambda t: None)
+    monkeypatch.setattr("shutil.which", lambda t: None)
+    monkeypatch.setattr(rec, "_EXTRA_PATHS", [])
     assert rec._find_ffmpeg() is None
 
 
-def test_find_ffmpeg_no_appdir(monkeypatch):
+def test_find_ffmpeg_no_appdir(tmp_path, monkeypatch):
+    system = _make_exe(tmp_path / "local" / "ffmpeg")
     monkeypatch.delenv("APPDIR", raising=False)
-    monkeypatch.setattr(rec, "_which", lambda t: "/usr/local/bin/ffmpeg" if t == "ffmpeg" else None)
-    assert rec._find_ffmpeg() == "/usr/local/bin/ffmpeg"
+    monkeypatch.setattr("shutil.which", lambda t: system)
+    monkeypatch.setattr(rec, "_EXTRA_PATHS", [])
+    assert rec._find_ffmpeg() == system
+
+
+def test_candidates_include_extra_paths(tmp_path, monkeypatch):
+    """ffmpeg da distro entra mesmo sombreado por outro no PATH (ex.: brew)."""
+    brew = _make_exe(tmp_path / "brew" / "ffmpeg")
+    distro = _make_exe(tmp_path / "distro" / "ffmpeg")
+    monkeypatch.delenv("APPDIR", raising=False)
+    monkeypatch.setattr("shutil.which", lambda t: brew)
+    monkeypatch.setattr(rec, "_EXTRA_PATHS", [str(tmp_path / "distro")])
+    assert rec._ffmpeg_candidates() == [brew, distro]
+
+
+def test_candidates_dedupe_symlinks(tmp_path, monkeypatch):
+    """/bin/ffmpeg symlink de /usr/bin/ffmpeg não duplica candidato."""
+    real = _make_exe(tmp_path / "usr" / "ffmpeg")
+    link_dir = tmp_path / "bin"
+    link_dir.mkdir()
+    (link_dir / "ffmpeg").symlink_to(real)
+    monkeypatch.delenv("APPDIR", raising=False)
+    monkeypatch.setattr("shutil.which", lambda t: real)
+    monkeypatch.setattr(rec, "_EXTRA_PATHS", [str(link_dir)])
+    assert rec._ffmpeg_candidates() == [real]
 
 
 # ── _has_libx264 ──────────────────────────────────────────────────────────────
@@ -322,17 +355,20 @@ def test_pick_prefers_vaapi(monkeypatch):
         lambda f: "/dev/dri/renderD128" if f == "/usr/bin/ffmpeg" else None,
     )
     monkeypatch.setattr(rec, "_has_libx264", lambda f: True)
-    path, dev, x264 = rec._pick_ffmpeg()
+    monkeypatch.setattr(rec, "_has_audio_support", lambda f: False)
+    path, dev, x264, audio = rec._pick_ffmpeg()
     assert path == "/usr/bin/ffmpeg"
     assert dev == "/dev/dri/renderD128"
     assert x264 is True
+    assert audio is False
 
 
 def test_pick_falls_back_to_x264(monkeypatch):
     monkeypatch.setattr(rec, "_ffmpeg_candidates", lambda: ["/app/ffmpeg", "/usr/bin/ffmpeg"])
     monkeypatch.setattr(rec, "_probe_vaapi", lambda f: None)
     monkeypatch.setattr(rec, "_has_libx264", lambda f: f == "/app/ffmpeg")
-    path, dev, x264 = rec._pick_ffmpeg()
+    monkeypatch.setattr(rec, "_has_audio_support", lambda f: False)
+    path, dev, x264, audio = rec._pick_ffmpeg()
     assert path == "/app/ffmpeg"
     assert dev is None
     assert x264 is True
@@ -342,15 +378,127 @@ def test_pick_last_resort_mpeg4(monkeypatch):
     monkeypatch.setattr(rec, "_ffmpeg_candidates", lambda: ["/usr/bin/ffmpeg"])
     monkeypatch.setattr(rec, "_probe_vaapi", lambda f: None)
     monkeypatch.setattr(rec, "_has_libx264", lambda f: False)
-    path, dev, x264 = rec._pick_ffmpeg()
+    monkeypatch.setattr(rec, "_has_audio_support", lambda f: False)
+    path, dev, x264, audio = rec._pick_ffmpeg()
     assert path == "/usr/bin/ffmpeg"
     assert dev is None
     assert x264 is False
 
 
+def test_pick_audio_outweighs_vaapi(monkeypatch):
+    """Sistema com pulse+aac ganha do bundled com VAAPI: áudio pesa mais."""
+    monkeypatch.setattr(rec, "_ffmpeg_candidates", lambda: ["/app/ffmpeg", "/usr/bin/ffmpeg"])
+    monkeypatch.setattr(
+        rec, "_probe_vaapi",
+        lambda f: "/dev/dri/renderD128" if f == "/app/ffmpeg" else None,
+    )
+    monkeypatch.setattr(rec, "_has_libx264", lambda f: True)
+    monkeypatch.setattr(rec, "_has_audio_support", lambda f: f == "/usr/bin/ffmpeg")
+    path, dev, x264, audio = rec._pick_ffmpeg()
+    assert path == "/usr/bin/ffmpeg"
+    assert audio is True
+
+
 def test_pick_returns_none_without_ffmpeg(monkeypatch):
     monkeypatch.setattr(rec, "_ffmpeg_candidates", lambda: [])
-    assert rec._pick_ffmpeg() == (None, None, False)
+    assert rec._pick_ffmpeg() == (None, None, False, False)
+
+
+# ── Áudio: _build_ffmpeg_cmd ──────────────────────────────────────────────────
+
+def test_build_two_audio_devices_uses_amix():
+    cmd = rec._build_ffmpeg_cmd(
+        "/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True,
+        audio_devices=["mic_dev", "sink_dev.monitor"],
+    )
+    assert cmd.count("pulse") == 2
+    assert "mic_dev" in cmd
+    assert "sink_dev.monitor" in cmd
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert "amix=inputs=2" in fc
+    assert "aac" in cmd
+    assert "-an" not in cmd
+
+
+def test_build_one_audio_device_maps_directly():
+    cmd = rec._build_ffmpeg_cmd(
+        "/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True,
+        audio_devices=["mic_dev"],
+    )
+    assert "-filter_complex" not in cmd
+    idx = cmd.index("-map")
+    assert cmd[idx + 1] == "0:v"
+    assert "1:a" in cmd
+    assert "aac" in cmd
+    assert "-an" not in cmd
+
+
+def test_build_no_audio_devices_disables_audio():
+    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True)
+    assert "-an" in cmd
+    assert "pulse" not in cmd
+    assert "aac" not in cmd
+
+
+# ── _has_audio_support ────────────────────────────────────────────────────────
+
+def test_has_audio_support_true(monkeypatch):
+    def _run(cmd, **kw):
+        r = MagicMock()
+        r.stdout = " D  pulse  Pulse audio" if "-devices" in cmd else " A..... aac  AAC"
+        return r
+    monkeypatch.setattr("subprocess.run", _run)
+    assert rec._has_audio_support("/usr/bin/ffmpeg") is True
+
+
+def test_has_audio_support_false_without_pulse(monkeypatch):
+    def _run(cmd, **kw):
+        r = MagicMock()
+        r.stdout = " D  alsa  ALSA" if "-devices" in cmd else " A..... aac  AAC"
+        return r
+    monkeypatch.setattr("subprocess.run", _run)
+    assert rec._has_audio_support("/usr/bin/ffmpeg") is False
+
+
+def test_has_audio_support_false_without_aac(monkeypatch):
+    def _run(cmd, **kw):
+        r = MagicMock()
+        r.stdout = " D  pulse  Pulse audio" if "-devices" in cmd else " A..... mp2  MP2"
+        return r
+    monkeypatch.setattr("subprocess.run", _run)
+    assert rec._has_audio_support("/usr/bin/ffmpeg") is False
+
+
+def test_has_audio_support_exception_returns_false(monkeypatch):
+    monkeypatch.setattr("subprocess.run", MagicMock(side_effect=OSError("boom")))
+    assert rec._has_audio_support("/usr/bin/ffmpeg") is False
+
+
+# ── _default_audio_devices ────────────────────────────────────────────────────
+
+def test_default_audio_devices_mic_and_monitor(monkeypatch):
+    def _run(cmd, **kw):
+        r = MagicMock()
+        r.returncode = 0
+        r.stdout = "mic_src\n" if "get-default-source" in cmd else "spk_sink\n"
+        return r
+    monkeypatch.setattr("subprocess.run", _run)
+    assert rec._default_audio_devices() == ["mic_src", "spk_sink.monitor"]
+
+
+def test_default_audio_devices_dedupes_monitor_as_mic(monkeypatch):
+    def _run(cmd, **kw):
+        r = MagicMock()
+        r.returncode = 0
+        r.stdout = "spk_sink.monitor\n" if "get-default-source" in cmd else "spk_sink\n"
+        return r
+    monkeypatch.setattr("subprocess.run", _run)
+    assert rec._default_audio_devices() == ["spk_sink.monitor"]
+
+
+def test_default_audio_devices_empty_without_pactl(monkeypatch):
+    monkeypatch.setattr("subprocess.run", MagicMock(side_effect=FileNotFoundError))
+    assert rec._default_audio_devices() == []
 
 
 # ── Deduplicação de frames (encode-on-change) ─────────────────────────────────
@@ -397,7 +545,7 @@ def test_build_no_x264_no_x264opts():
 # ── ScreenRecorder.start: caminhos de falha ───────────────────────────────────
 
 def test_start_returns_false_when_no_ffmpeg(monkeypatch):
-    monkeypatch.setattr(rec, "_pick_ffmpeg", lambda: (None, None, False))
+    monkeypatch.setattr(rec, "_pick_ffmpeg", lambda: (None, None, False, False))
     recorder = rec.ScreenRecorder()
     recorder.failed = MagicMock()
     assert recorder.start() is False
@@ -406,7 +554,7 @@ def test_start_returns_false_when_no_ffmpeg(monkeypatch):
 
 
 def test_start_returns_false_when_no_screen(monkeypatch):
-    monkeypatch.setattr(rec, "_pick_ffmpeg", lambda: ("/usr/bin/ffmpeg", None, True))
+    monkeypatch.setattr(rec, "_pick_ffmpeg", lambda: ("/usr/bin/ffmpeg", None, True, False))
     monkeypatch.setattr(rec, "_best_screen", lambda: None)
     recorder = rec.ScreenRecorder()
     recorder.failed = MagicMock()

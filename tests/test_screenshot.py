@@ -23,6 +23,7 @@ def _install_qt_stubs():
     qtw.QApplication = MagicMock()
     qtc.QTimer       = MagicMock()
     qtc.QRect        = MagicMock()
+    qtc.QEventLoop   = MagicMock()
     qtg.QClipboard   = MagicMock()
     qtg.QPixmap      = MagicMock()
 

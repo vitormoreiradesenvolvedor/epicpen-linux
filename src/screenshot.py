@@ -6,7 +6,7 @@ from pathlib import Path
 from datetime import datetime
 
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import QTimer, QRect
+from PyQt6.QtCore import QTimer, QRect, QEventLoop
 from PyQt6.QtGui import QClipboard, QPixmap
 
 _SAVE_DIR = Path.home() / "Imagens" / "EpicPen"
@@ -84,6 +84,59 @@ def _grab_wayland_region(x: int, y: int, w: int, h: int, path: str) -> bool:
         if _try_tool(cmd, path):
             return True
     return False
+
+
+# ── Captura nativa Qt (bundled no AppImage) ───────────────────────────────────
+
+def _grab_via_qt(path: str, screen=None, timeout_ms: int = 4000) -> bool:
+    """Captura um frame único via QScreenCapture (Qt Multimedia).
+
+    Não depende de nenhuma ferramenta do sistema — Qt Multimedia vem bundled
+    no AppImage e usa o portal de ScreenCast no Wayland (mesmo mecanismo do
+    gravador). Captura apenas o monitor indicado (ou o primário).
+
+    O primeiro frame de alguns compositores chega preto/incompleto; espera-se
+    o segundo frame válido, usando o primeiro como reserva no timeout.
+    """
+    try:
+        from PyQt6.QtMultimedia import (
+            QMediaCaptureSession, QScreenCapture, QVideoSink,
+        )
+    except ImportError:
+        return False
+
+    capture = QScreenCapture()
+    sink = QVideoSink()
+    session = QMediaCaptureSession()
+    session.setScreenCapture(capture)
+    session.setVideoSink(sink)
+    if screen is not None:
+        capture.setScreen(screen)
+
+    loop = QEventLoop()
+    state: dict = {"img": None, "count": 0}
+
+    def _on_frame(frame):
+        if not frame.isValid():
+            return
+        img = frame.toImage()
+        if img.isNull():
+            return
+        state["img"] = img.copy()
+        state["count"] += 1
+        if state["count"] >= 2:
+            loop.quit()
+
+    sink.videoFrameChanged.connect(_on_frame)
+    capture.start()
+    QTimer.singleShot(timeout_ms, loop.quit)
+    loop.exec()
+    capture.stop()
+
+    img = state["img"]
+    if img is None:
+        return False
+    return bool(img.save(path))
 
 
 # ── Recorte de monitor específico ────────────────────────────────────────────
@@ -181,19 +234,28 @@ def _capture_to_file(dest: Path, screen=None) -> QPixmap | None:
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
         tmp = f.name
     try:
-        if not _grab_wayland_fullscreen(tmp):
-            return None
-        px = QPixmap(tmp)
-        if px.isNull():
-            return None
-        if screen is not None:
-            px = _crop_to_screen(px, screen)
-            if not px.save(str(dest)):
+        if _grab_wayland_fullscreen(tmp):
+            px = QPixmap(tmp)
+            if px.isNull():
                 return None
-        else:
-            # Cópia binária direta: evita recompressão e QPixmap.save() silencioso
+            if screen is not None:
+                px = _crop_to_screen(px, screen)
+                if not px.save(str(dest)):
+                    return None
+            else:
+                # Cópia binária direta: evita recompressão e QPixmap.save() silencioso
+                shutil.copy2(tmp, dest)
+            return px
+
+        # Fallback garantido: QScreenCapture (Qt Multimedia, bundled no AppImage).
+        # Captura já é por-monitor — sem crop posterior.
+        if _grab_via_qt(tmp, screen):
+            px = QPixmap(tmp)
+            if px.isNull():
+                return None
             shutil.copy2(tmp, dest)
-        return px
+            return px
+        return None
     finally:
         try:
             os.unlink(tmp)

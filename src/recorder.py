@@ -2,6 +2,7 @@ import glob
 import os
 import queue
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -79,17 +80,6 @@ def _frame_to_bytes(frame: QVideoFrame, expected_fmt: str) -> Optional[bytes]:
     return bytes(ptr)
 
 
-def _which(tool: str) -> str | None:
-    found = shutil.which(tool)
-    if found:
-        return found
-    for p in _EXTRA_PATHS:
-        candidate = os.path.join(p, tool)
-        if os.access(candidate, os.X_OK):
-            return candidate
-    return None
-
-
 def _save_dir() -> Path:
     for parent in (Path.home() / "Vídeos", Path.home() / "Videos"):
         if parent.exists():
@@ -106,16 +96,26 @@ def _best_screen():
 
 
 def _ffmpeg_candidates() -> list[str]:
-    """Lista ordenada de binários ffmpeg disponíveis (bundled primeiro)."""
+    """Todos os binários ffmpeg instalados (bundled primeiro).
+
+    Inclui cada caminho de _EXTRA_PATHS além do primeiro do PATH: builds de
+    Homebrew/snap costumam vir sem pulse/VAAPI e sombrear o ffmpeg da distro
+    que tem tudo — a pontuação do _pick_ffmpeg decide, não a ordem do PATH.
+    """
     out: list[str] = []
+
+    def _add(path: Optional[str]):
+        if path:
+            real = os.path.realpath(path)
+            if real not in out and os.access(real, os.X_OK):
+                out.append(real)
+
     appdir = os.environ.get("APPDIR", "")
     if appdir:
-        bundled = os.path.join(appdir, "usr", "bin", "ffmpeg")
-        if os.access(bundled, os.X_OK):
-            out.append(bundled)
-    system = _which("ffmpeg")
-    if system and system not in out:
-        out.append(system)
+        _add(os.path.join(appdir, "usr", "bin", "ffmpeg"))
+    _add(shutil.which("ffmpeg"))
+    for p in _EXTRA_PATHS:
+        _add(os.path.join(p, "ffmpeg"))
     return out
 
 
@@ -135,6 +135,53 @@ def _has_libx264(ffmpeg: str) -> bool:
         return "libx264" in r.stdout
     except Exception:
         return False
+
+
+def _has_audio_support(ffmpeg: str) -> bool:
+    """True se este ffmpeg captura PulseAudio/PipeWire E encoda AAC."""
+    try:
+        r = subprocess.run(
+            [ffmpeg, "-devices"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if "pulse" not in r.stdout:
+            return False
+        r = subprocess.run(
+            [ffmpeg, "-encoders"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return " aac " in r.stdout
+    except Exception:
+        return False
+
+
+def _default_audio_devices() -> list[str]:
+    """Devices PulseAudio para gravar: [microfone, monitor dos alto-falantes].
+
+    Usa pactl para descobrir os defaults — se o pactl responde, o servidor
+    de som (PipeWire/Pulse) está vivo e o ffmpeg vai conseguir conectar.
+    Sem pactl, retorna [] (gravação segue sem áudio em vez de falhar tudo).
+    """
+    def _pactl(*args: str) -> Optional[str]:
+        try:
+            r = subprocess.run(
+                ["pactl", *args], capture_output=True, text=True, timeout=3,
+            )
+            out = r.stdout.strip()
+            return out if r.returncode == 0 and out else None
+        except Exception:
+            return None
+
+    devs: list[str] = []
+    mic = _pactl("get-default-source")
+    if mic:
+        devs.append(mic)
+    sink = _pactl("get-default-sink")
+    if sink:
+        monitor = f"{sink}.monitor"
+        if monitor not in devs:
+            devs.append(monitor)
+    return devs
 
 
 # Cache de probes VAAPI por binário ffmpeg — o teste real custa ~200ms,
@@ -174,37 +221,46 @@ def _probe_vaapi(ffmpeg: str) -> Optional[str]:
     return found
 
 
-def _pick_ffmpeg() -> tuple[Optional[str], Optional[str], bool]:
-    """Escolhe o melhor encoder disponível: (ffmpeg, vaapi_device, has_x264).
+def _pick_ffmpeg() -> tuple[Optional[str], Optional[str], bool, bool]:
+    """Escolhe o melhor ffmpeg: (path, vaapi_device, has_x264, has_audio).
 
-    Prioridade: VAAPI (encode na GPU, ~0% CPU) → libx264 ultrafast → mpeg4.
-    O bundled do AppImage não tem VAAPI, por isso o ffmpeg do sistema também
-    é considerado — quem oferecer GPU ganha.
+    Pontuação por capacidade: áudio (mic+alto-falantes) pesa mais que VAAPI,
+    que pesa mais que libx264. O bundled do AppImage não tem pulse nem VAAPI,
+    por isso o ffmpeg do sistema também concorre — quem oferecer mais ganha.
     """
     cands = _ffmpeg_candidates()
     if not cands:
-        return None, None, False
+        return None, None, False, False
+
+    best = None
+    best_score = -1
     for c in cands:
-        dev = _probe_vaapi(c)
-        if dev:
-            return c, dev, _has_libx264(c)
-    for c in cands:
-        if _has_libx264(c):
-            return c, None, True
-    return cands[0], None, False
+        vaapi = _probe_vaapi(c)
+        audio = _has_audio_support(c)
+        x264 = _has_libx264(c)
+        score = (4 if audio else 0) + (2 if vaapi else 0) + (1 if x264 else 0)
+        if score > best_score:
+            best_score = score
+            best = (c, vaapi, x264, audio)
+    return best
 
 
 def _build_ffmpeg_cmd(
     ffmpeg: str, w: int, h: int, fps: int, dest: str, has_x264: bool,
     pix_fmt: str = "rgba",
     vaapi_device: Optional[str] = None,
+    audio_devices: Optional[list[str]] = None,
 ) -> list[str]:
     """Monta o comando ffmpeg para rawvideo via stdin → MP4 de saída.
 
     -vsync vfr preserva os timestamps wallclock sem duplicar frames — é o que
     permite a deduplicação no _on_frame: tela estática gera zero trabalho de
     encode e o player simplesmente segura o último frame.
+
+    audio_devices: devices pulse (mic e/ou monitor). Dois devices são mixados
+    com amix; o vídeo continua vindo do pipe:0.
     """
+    audio_devices = audio_devices or []
     base = [ffmpeg]
     if vaapi_device:
         base += [
@@ -219,6 +275,8 @@ def _build_ffmpeg_cmd(
         "-framerate", str(fps),
         "-i", "pipe:0",
     ]
+    for dev in audio_devices:
+        base += ["-f", "pulse", "-thread_queue_size", "1024", "-i", dev]
     if vaapi_device:
         # Encode 100% na GPU: hwupload + h264_vaapi. CPU só faz o memcpy do pipe.
         encode = [
@@ -248,9 +306,25 @@ def _build_ffmpeg_cmd(
     else:
         encode = ["-c:v", "mpeg4", "-q:v", "5"]
 
-    return base + encode + [
+    if len(audio_devices) >= 2:
+        # Mic + alto-falantes mixados; normalize=0 evita cortar o volume pela metade
+        audio = [
+            "-filter_complex",
+            "[1:a][2:a]amix=inputs=2:duration=longest:normalize=0[aout]",
+            "-map", "0:v", "-map", "[aout]",
+            "-c:a", "aac", "-b:a", "160k", "-ac", "2",
+        ]
+    elif len(audio_devices) == 1:
+        audio = [
+            "-map", "0:v", "-map", "1:a",
+            "-c:a", "aac", "-b:a", "160k", "-ac", "2",
+        ]
+    else:
+        audio = ["-an"]
+
+    return base + encode + audio + [
         "-vsync", "vfr",
-        "-an", "-movflags", "+faststart", "-y", dest,
+        "-movflags", "+faststart", "-y", dest,
     ]
 
 
@@ -291,6 +365,7 @@ class ScreenRecorder(QObject):
         self._rec_fps = 0
         self._rec_has_x264 = False
         self._rec_vaapi_dev: Optional[str] = None
+        self._rec_audio_devs: list[str] = []
         self._detected_fmt: Optional[str] = None
         self._last_frame_ts = 0.0
         self._min_frame_interval = 1.0 / 60
@@ -311,7 +386,7 @@ class ScreenRecorder(QObject):
         if self._active:
             return True
 
-        ffmpeg, vaapi_dev, has_x264 = _pick_ffmpeg()
+        ffmpeg, vaapi_dev, has_x264, has_audio = _pick_ffmpeg()
         if not ffmpeg:
             self.failed.emit(
                 "ffmpeg não encontrado.\n"
@@ -333,6 +408,7 @@ class ScreenRecorder(QObject):
         self._ffmpeg_path = ffmpeg
         self._rec_has_x264 = has_x264
         self._rec_vaapi_dev = vaapi_dev
+        self._rec_audio_devs = _default_audio_devices() if has_audio else []
         self._detected_fmt = None
         self._proc = None
         self._last_data = None
@@ -361,6 +437,7 @@ class ScreenRecorder(QObject):
             self._rec_has_x264,
             pix_fmt,
             vaapi_device=self._rec_vaapi_dev,
+            audio_devices=self._rec_audio_devs,
         )
         try:
             self._proc = subprocess.Popen(
@@ -398,6 +475,14 @@ class ScreenRecorder(QObject):
                 self._proc.stdin.close()
             except OSError:
                 pass
+            if self._rec_audio_devs:
+                # Inputs de áudio são ao vivo: EOF do vídeo não encerra o ffmpeg.
+                # SIGINT = 'q' gracioso — flush dos encoders e moov escrito
+                # (kill deixaria o MP4 corrompido por causa do +faststart).
+                try:
+                    self._proc.send_signal(signal.SIGINT)
+                except (ProcessLookupError, OSError):
+                    pass
             try:
                 self._proc.wait(timeout=10)
             except subprocess.TimeoutExpired:

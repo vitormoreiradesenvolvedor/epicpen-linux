@@ -2,6 +2,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QSlider, QColorDialog, QFrame, QLayout,
     QDialog, QLabel, QLineEdit, QPlainTextEdit, QSpinBox, QFontComboBox, QDialogButtonBox,
+    QMessageBox,
 )
 from PyQt6.QtCore import Qt, QPoint, QTimer, QSize, QEvent
 from PyQt6.QtGui import QColor, QCursor
@@ -722,17 +723,25 @@ class ToolbarWindow(QWidget):
         self._btn_record.setChecked(False)
         self._btn_record.setIcon(icons.record())
         self._btn_record.setStyleSheet("")
+        from pathlib import Path as _P
+        try:
+            rel = _P(path).relative_to(_P.home())
+            msg = f"~/{rel}"
+        except ValueError:
+            msg = path
         if self._tray:
-            from pathlib import Path as _P
-            try:
-                rel = _P(path).relative_to(_P.home())
-                msg = f"~/{rel}"
-            except ValueError:
-                msg = path
             self._tray.showMessage(
                 "EpicPen — Gravação", f"Salva em:\n{msg}",
                 self._tray.icon(), 5000,
             )
+        clicked = self._show_rec_dialog(
+            "Gravação concluída",
+            f"Vídeo salvo em:\n{msg}",
+            extra_button="Abrir pasta",
+        )
+        if clicked == "Abrir pasta":
+            import subprocess
+            subprocess.Popen(["xdg-open", str(_P(path).parent)])
 
     def _on_rec_failed(self, msg: str):
         self._btn_record.setChecked(False)
@@ -740,6 +749,40 @@ class ToolbarWindow(QWidget):
         self._btn_record.setStyleSheet("")
         if self._tray:
             self._tray.showMessage("EpicPen — Gravação falhou", msg, self._tray.icon(), 5000)
+        self._show_rec_dialog("Gravação falhou", msg, error=True)
+
+    def _show_rec_dialog(self, title: str, text: str,
+                         extra_button: str | None = None,
+                         error: bool = False) -> str | None:
+        """Modal de fim de gravação. Retorna o texto do botão extra se clicado.
+
+        Em layer-shell o diálogo abre como Popup parented ao overlay (mesmo
+        padrão do TextDialog) — notificações de tray não são garantidas em
+        todos os ambientes, o modal é o feedback primário.
+        """
+        was_drawing = self._pre_dialog()
+        ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
+        box = QMessageBox(self._overlay if ov_lsw else self)
+        box.setWindowTitle(f"EpicPen — {title}")
+        box.setText(text)
+        box.setIcon(QMessageBox.Icon.Critical if error
+                    else QMessageBox.Icon.Information)
+        extra = None
+        if extra_button:
+            extra = box.addButton(extra_button, QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Ok)
+        if ov_lsw:
+            box.setWindowFlags(Qt.WindowType.Popup)
+            box.adjustSize()
+            geo = self._overlay.geometry()
+            box.move(
+                geo.x() + (geo.width() - box.width()) // 2,
+                geo.y() + (geo.height() - box.height()) // 2,
+            )
+        box.exec()
+        clicked = extra_button if (extra is not None and box.clickedButton() is extra) else None
+        self._post_dialog(was_drawing)
+        return clicked
 
     # ── Mode toggles ──────────────────────────────────────────────────────────
 
