@@ -15,6 +15,8 @@ from PyQt6.QtWidgets import QApplication
 from PyQt6.QtMultimedia import QMediaCaptureSession, QScreenCapture, QVideoSink, QVideoFrame
 from PyQt6.QtGui import QImage
 
+from hostenv import host_env
+
 _EXTRA_PATHS = [
     "/usr/bin", "/usr/local/bin", "/bin",
     str(Path.home() / ".local" / "bin"),
@@ -130,7 +132,7 @@ def _has_libx264(ffmpeg: str) -> bool:
     try:
         r = subprocess.run(
             [ffmpeg, "-encoders"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, env=host_env(),
         )
         return "libx264" in r.stdout
     except Exception:
@@ -142,13 +144,13 @@ def _has_audio_support(ffmpeg: str) -> bool:
     try:
         r = subprocess.run(
             [ffmpeg, "-devices"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, env=host_env(),
         )
         if "pulse" not in r.stdout:
             return False
         r = subprocess.run(
             [ffmpeg, "-encoders"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, env=host_env(),
         )
         return " aac " in r.stdout
     except Exception:
@@ -165,7 +167,7 @@ def _default_audio_devices() -> list[str]:
     def _pactl(*args: str) -> Optional[str]:
         try:
             r = subprocess.run(
-                ["pactl", *args], capture_output=True, text=True, timeout=3,
+                ["pactl", *args], capture_output=True, text=True, timeout=3, env=host_env(),
             )
             out = r.stdout.strip()
             return out if r.returncode == 0 and out else None
@@ -211,7 +213,7 @@ def _probe_vaapi(ffmpeg: str) -> Optional[str]:
             "-f", "null", "-",
         ]
         try:
-            r = subprocess.run(cmd, capture_output=True, timeout=8)
+            r = subprocess.run(cmd, capture_output=True, timeout=8, env=host_env())
             if r.returncode == 0:
                 found = dev
                 break
@@ -405,7 +407,7 @@ def _has_filter(ffmpeg: str, name: str) -> bool:
     try:
         r = subprocess.run(
             [ffmpeg, "-filters"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, env=host_env(),
         )
         ok = f" {name} " in r.stdout
     except Exception:
@@ -465,7 +467,7 @@ def _container_start(ffprobe: str, path: str) -> Optional[float]:
         r = subprocess.run(
             [ffprobe, "-v", "error", "-show_entries", "format=start_time",
              "-of", "csv=p=0", path],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, env=host_env(),
         )
         return float(r.stdout.strip())
     except Exception:
@@ -709,7 +711,7 @@ class ScreenRecorder(QObject):
                 stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                preexec_fn=_lower_priority,
+                preexec_fn=_lower_priority, env=host_env(),
             )
         except OSError as e:
             self.failed.emit(f"Falha ao iniciar ffmpeg: {e}")
@@ -836,7 +838,7 @@ class ScreenRecorder(QObject):
             r = subprocess.run(
                 cmd,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                preexec_fn=_lower_priority, timeout=3600,
+                preexec_fn=_lower_priority, env=host_env(), timeout=3600,
             )
         except Exception:
             self.failed.emit(f"Montagem do vídeo falhou; captura mantida em {video}")

@@ -32,9 +32,16 @@ def _available_tools() -> list[str]:
 # ── Execução de ferramentas ───────────────────────────────────────────────────
 
 def _try_tool(cmd: list[str], path: str, timeout: int = 10) -> bool:
-    """Executa a ferramenta e verifica se produziu um arquivo válido."""
+    """Executa a ferramenta e verifica se produziu um arquivo válido.
+
+    env=host_env(): dentro do AppImage, o LD_LIBRARY_PATH bundlado quebra
+    ferramentas Qt do sistema (spectacle) — sem o ambiente limpo, todas
+    falhavam e o screenshot caía sempre no fallback de portal.
+    """
+    from hostenv import host_env
     try:
-        r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout,
+                           env=host_env())
         return r.returncode == 0 and Path(path).exists() and Path(path).stat().st_size > 0
     except Exception:
         return False
@@ -105,6 +112,8 @@ def _grab_via_qt(path: str, screen=None, timeout_ms: int = 4000) -> bool:
     except ImportError:
         return False
 
+    import time as _time
+
     capture = QScreenCapture()
     sink = QVideoSink()
     session = QMediaCaptureSession()
@@ -115,6 +124,7 @@ def _grab_via_qt(path: str, screen=None, timeout_ms: int = 4000) -> bool:
 
     loop = QEventLoop()
     state: dict = {"img": None, "count": 0}
+    t0 = _time.monotonic()
 
     def _on_frame(frame):
         if not frame.isValid():
@@ -124,14 +134,28 @@ def _grab_via_qt(path: str, screen=None, timeout_ms: int = 4000) -> bool:
             return
         state["img"] = img.copy()
         state["count"] += 1
-        if state["count"] >= 2:
+        # Warm-up: o KDE entrega frames pretos no início da sessão de
+        # ScreenCast — espera ≥2 frames E ≥250ms antes de aceitar
+        if state["count"] >= 2 and _time.monotonic() - t0 >= 0.25:
             loop.quit()
 
     sink.videoFrameChanged.connect(_on_frame)
     capture.start()
     QTimer.singleShot(timeout_ms, loop.quit)
     loop.exec()
+
+    # Encerra a sessão de ScreenCast de verdade: sem o deleteLater, cada
+    # captura deixava um ícone de "transmissão de tela" pendurado no KDE
+    try:
+        sink.videoFrameChanged.disconnect(_on_frame)
+    except TypeError:
+        pass
     capture.stop()
+    session.setScreenCapture(None)
+    session.setVideoSink(None)
+    capture.deleteLater()
+    sink.deleteLater()
+    session.deleteLater()
 
     img = state["img"]
     if img is None:
