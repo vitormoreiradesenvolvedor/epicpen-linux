@@ -61,7 +61,12 @@ def _install_qt_stubs():
     qtm.QScreenCapture = MagicMock
     qtm.QMediaCaptureSession = MagicMock
     qtm.QVideoSink = MagicMock
-    qtm.QVideoFrame = MagicMock
+
+    class _VideoFrame:
+        class MapMode:
+            ReadOnly = 1
+
+    qtm.QVideoFrame = _VideoFrame
 
     class _PixFmt:
         Format_BGRA8888 = "Format_BGRA8888"
@@ -501,6 +506,118 @@ def test_default_audio_devices_empty_without_pactl(monkeypatch):
     assert rec._default_audio_devices() == []
 
 
+# ── Estratégia adaptativa (gpu / cpu / disk) ──────────────────────────────────
+
+_GB = 1 << 30
+
+
+def test_strategy_gpu_when_vaapi():
+    assert rec._pick_strategy("/dev/dri/renderD128", True, 2,
+                              500_000_000, 100 * _GB, True) == "gpu"
+
+
+def test_strategy_cpu_when_many_cores():
+    assert rec._pick_strategy(None, True, 8,
+                              500_000_000, 100 * _GB, True) == "cpu"
+
+
+def test_strategy_disk_when_weak_cpu_and_fast_disk():
+    assert rec._pick_strategy(None, True, 4,
+                              500_000_000, 500 * _GB, True) == "disk"
+
+
+def test_strategy_cpu_when_weak_cpu_but_slow_disk():
+    assert rec._pick_strategy(None, True, 4,
+                              500_000_000, 500 * _GB, False) == "cpu"
+
+
+def test_strategy_cpu_when_weak_cpu_but_no_space():
+    assert rec._pick_strategy(None, True, 2,
+                              500_000_000, 1 * _GB, True) == "cpu"
+
+
+# ── _queue_frames (fila dimensionada pela RAM) ────────────────────────────────
+
+def test_queue_frames_minimum_is_4():
+    # 8GB de frame (absurdo) com pouca RAM → mínimo 4
+    assert rec._queue_frames(8 * _GB, 1 * _GB) == 4
+
+
+def test_queue_frames_scales_with_ram():
+    # frame 1080p (~8MB) com 8GB livres → 25% = 2GB → 240 (teto)
+    assert rec._queue_frames(8_294_400, 8 * _GB) == 240
+
+
+def test_queue_frames_capped_at_240():
+    assert rec._queue_frames(1024, 64 * _GB) == 240
+
+
+def test_queue_frames_partial_budget():
+    # frame de 100MB, 8GB livres → 2GB/100MB = 20 frames
+    assert rec._queue_frames(100 * 1024 * 1024, 8 * _GB) == 20
+
+
+# ── _build_ffmpeg_cmd (estratégia disk e crop) ────────────────────────────────
+
+def test_build_raw_intermediate_uses_rawvideo():
+    cmd = rec._build_ffmpeg_cmd(
+        "/usr/bin/ffmpeg", 1920, 1080, 144, "/tmp/cap.nut", True,
+        raw_intermediate=True,
+    )
+    assert cmd[cmd.index("-c:v") + 1] == "rawvideo"
+    assert "libx264" not in cmd
+    assert "+faststart" not in cmd  # nut não usa moov
+
+
+def test_build_raw_intermediate_ignores_vaapi():
+    cmd = rec._build_ffmpeg_cmd(
+        "/usr/bin/ffmpeg", 1920, 1080, 60, "/tmp/cap.nut", True,
+        vaapi_device="/dev/dri/renderD128", raw_intermediate=True,
+    )
+    assert "h264_vaapi" not in cmd
+    assert "-init_hw_device" not in cmd
+
+
+def test_build_crop_filter_when_stride_padded():
+    cmd = rec._build_ffmpeg_cmd(
+        "/usr/bin/ffmpeg", 1928, 1080, 60, "/tmp/out.mp4", True,
+        crop=(1920, 1080),
+    )
+    vf = cmd[cmd.index("-vf") + 1]
+    assert "crop=1920:1080:0:0" in vf
+
+
+def test_build_crop_combines_with_vaapi_chain():
+    cmd = rec._build_ffmpeg_cmd(
+        "/usr/bin/ffmpeg", 1928, 1080, 60, "/tmp/out.mp4", True,
+        vaapi_device="/dev/dri/renderD128", crop=(1920, 1080),
+    )
+    vf = cmd[cmd.index("-vf") + 1]
+    assert vf == "crop=1920:1080:0:0,format=nv12,hwupload"
+
+
+def test_build_no_crop_no_filter_on_cpu():
+    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 60, "/tmp/out.mp4", True)
+    assert "-vf" not in cmd
+
+
+# ── _build_transcode_cmd ──────────────────────────────────────────────────────
+
+def test_transcode_uses_x264_veryfast():
+    cmd = rec._build_transcode_cmd("/usr/bin/ffmpeg", "/tmp/cap.nut", "/tmp/out.mp4", True)
+    assert "libx264" in cmd
+    assert "veryfast" in cmd
+    assert cmd[cmd.index("-c:a") + 1] == "copy"
+    assert "+faststart" in cmd
+    assert cmd[-1] == "/tmp/out.mp4"
+
+
+def test_transcode_falls_back_to_mpeg4():
+    cmd = rec._build_transcode_cmd("/usr/bin/ffmpeg", "/tmp/cap.nut", "/tmp/out.mp4", False)
+    assert "mpeg4" in cmd
+    assert "libx264" not in cmd
+
+
 # ── Deduplicação de frames (encode-on-change) ─────────────────────────────────
 
 def test_is_duplicate_false_for_new_data():
@@ -570,6 +687,18 @@ def test_start_returns_true_when_already_recording(monkeypatch):
 
 # ── ScreenRecorder._start_ffmpeg: falha no Popen ─────────────────────────────
 
+def _fake_frame(w=1920, h=1080, stride=None):
+    frame = MagicMock()
+    size = MagicMock()
+    size.width.return_value = w
+    size.height.return_value = h
+    frame.size.return_value = size
+    frame.map.return_value = stride is not None
+    frame.bytesPerLine.return_value = stride if stride is not None else 0
+    frame.pixelFormat.return_value = "Format_RGBA8888"
+    return frame
+
+
 def test_start_ffmpeg_emits_failed_on_popen_error(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "subprocess.Popen", MagicMock(side_effect=OSError("permission denied"))
@@ -581,8 +710,9 @@ def test_start_ffmpeg_emits_failed_on_popen_error(tmp_path, monkeypatch):
     recorder._rec_fps = 30
     recorder._rec_has_x264 = True
     recorder._dest = tmp_path / "out.mp4"
+    recorder._capture_dest = tmp_path / "out.mp4"
     recorder.failed = MagicMock()
-    assert recorder._start_ffmpeg("rgba") is False
+    assert recorder._start_ffmpeg(_fake_frame()) is False
     recorder.failed.emit.assert_called_once()
 
 

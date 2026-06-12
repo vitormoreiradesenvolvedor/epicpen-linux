@@ -245,13 +245,75 @@ def _pick_ffmpeg() -> tuple[Optional[str], Optional[str], bool, bool]:
     return best
 
 
+# ── Perfil da máquina e estratégia de gravação ────────────────────────────────
+
+def _mem_available_bytes() -> int:
+    """RAM disponível (MemAvailable). 2GB como palpite conservador se falhar."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except Exception:
+        pass
+    return 2 << 30
+
+
+def _any_fast_disk() -> bool:
+    """True se há disco não-rotacional (SSD/NVMe) na máquina."""
+    try:
+        for rot in glob.glob("/sys/block/*/queue/rotational"):
+            name = rot.split("/")[3]
+            if name.startswith(("loop", "zram", "ram", "sr", "dm-")):
+                continue
+            with open(rot) as f:
+                if f.read().strip() == "0":
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _pick_strategy(vaapi_dev: Optional[str], has_x264: bool, cores: int,
+                   raw_bps: int, disk_free: int, disk_fast: bool) -> str:
+    """Decide onde a máquina está 'menos pior' para encodar:
+
+    gpu  — VAAPI funcional: encode na GPU, CPU livre (melhor caso).
+    cpu  — CPU dá conta do x264 ultrafast em tempo real.
+    disk — CPU fraca mas SSD/NVMe com espaço: grava rawvideo num .nut
+           intermediário (~zero CPU durante a captura) e re-encoda ao parar.
+    """
+    if vaapi_dev:
+        return "gpu"
+    if cores >= 6:
+        return "cpu"
+    # CPU fraca: rawvideo no disco se for SSD e couberem ≥2.5 min de captura
+    if disk_fast and disk_free > raw_bps * 150:
+        return "disk"
+    return "cpu"
+
+
+def _queue_frames(frame_bytes: int, mem_available: int) -> int:
+    """Profundidade da fila de frames: usa a RAM que sobra como amortecedor.
+
+    Até 25% da RAM disponível (máx. 2GB) em frames — picos do encoder não
+    descartam frames em máquinas com memória; mínimo de 4 nas apertadas.
+    """
+    if frame_bytes <= 0:
+        return 4
+    budget = min(int(mem_available * 0.25), 2 << 30)
+    return max(4, min(budget // frame_bytes, 240))
+
+
 def _build_ffmpeg_cmd(
     ffmpeg: str, w: int, h: int, fps: int, dest: str, has_x264: bool,
     pix_fmt: str = "rgba",
     vaapi_device: Optional[str] = None,
     audio_devices: Optional[list[str]] = None,
+    raw_intermediate: bool = False,
+    crop: Optional[tuple[int, int]] = None,
 ) -> list[str]:
-    """Monta o comando ffmpeg para rawvideo via stdin → MP4 de saída.
+    """Monta o comando ffmpeg para rawvideo via stdin → MP4 (ou .nut) de saída.
 
     -vsync vfr preserva os timestamps wallclock sem duplicar frames — é o que
     permite a deduplicação no _on_frame: tela estática gera zero trabalho de
@@ -259,10 +321,13 @@ def _build_ffmpeg_cmd(
 
     audio_devices: devices pulse (mic e/ou monitor). Dois devices são mixados
     com amix; o vídeo continua vindo do pipe:0.
+    raw_intermediate: estratégia disk — copia rawvideo para .nut sem encodar.
+    crop: (w, h) reais quando o stride do frame tem padding (w do comando é
+    stride/4; o filtro corta de volta para a área visível).
     """
     audio_devices = audio_devices or []
     base = [ffmpeg]
-    if vaapi_device:
+    if vaapi_device and not raw_intermediate:
         base += [
             "-init_hw_device", f"vaapi=va:{vaapi_device}",
             "-filter_hw_device", "va",
@@ -277,10 +342,19 @@ def _build_ffmpeg_cmd(
     ]
     for dev in audio_devices:
         base += ["-f", "pulse", "-thread_queue_size", "1024", "-i", dev]
-    if vaapi_device:
+
+    vf_parts: list[str] = []
+    if crop is not None:
+        vf_parts.append(f"crop={crop[0]}:{crop[1]}:0:0")
+
+    if raw_intermediate:
+        # Estratégia disk: zero encode agora; só memcpy pipe → arquivo .nut
+        # (nut preserva timestamps VFR). Re-encode acontece ao parar.
+        encode = ["-c:v", "rawvideo"]
+    elif vaapi_device:
         # Encode 100% na GPU: hwupload + h264_vaapi. CPU só faz o memcpy do pipe.
+        vf_parts += ["format=nv12", "hwupload"]
         encode = [
-            "-vf", "format=nv12,hwupload",
             "-c:v", "h264_vaapi",
             "-qp", "24",
             "-bf", "0",
@@ -306,6 +380,9 @@ def _build_ffmpeg_cmd(
     else:
         encode = ["-c:v", "mpeg4", "-q:v", "5"]
 
+    if vf_parts:
+        encode = ["-vf", ",".join(vf_parts)] + encode
+
     if len(audio_devices) >= 2:
         # Mic + alto-falantes mixados; normalize=0 evita cortar o volume pela metade
         audio = [
@@ -322,8 +399,23 @@ def _build_ffmpeg_cmd(
     else:
         audio = ["-an"]
 
-    return base + encode + audio + [
-        "-vsync", "vfr",
+    tail = ["-vsync", "vfr"]
+    if not raw_intermediate:
+        tail += ["-movflags", "+faststart"]
+    return base + encode + audio + tail + ["-y", dest]
+
+
+def _build_transcode_cmd(ffmpeg: str, src: str, dest: str, has_x264: bool) -> list[str]:
+    """Re-encode do .nut intermediário (estratégia disk) para o MP4 final."""
+    if has_x264:
+        encode = [
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-pix_fmt", "yuv420p",
+        ]
+    else:
+        encode = ["-c:v", "mpeg4", "-q:v", "5"]
+    return [ffmpeg, "-i", src] + encode + [
+        "-c:a", "copy",
         "-movflags", "+faststart", "-y", dest,
     ]
 
@@ -353,12 +445,13 @@ class ScreenRecorder(QObject):
         self._proc: Optional[subprocess.Popen] = None
         self._dest: Optional[Path] = None
         self._active = False
-        # Fila pequena: 4 frames. Se o encoder atrasar, descarta em vez de acumular.
+        # Profundidade real definida no _start_ffmpeg via _queue_frames (RAM)
         self._frame_queue: queue.Queue[Optional[bytes]] = queue.Queue(maxsize=4)
         self._writer_thread: Optional[threading.Thread] = None
         self._start_lock = threading.Lock()
 
-        # Configurados em start()
+        # Configurados em start(); _rec_w/_rec_h são refinados no primeiro
+        # frame real (resolução física do compositor, não a lógica do Qt)
         self._ffmpeg_path: Optional[str] = None
         self._rec_w = 0
         self._rec_h = 0
@@ -366,9 +459,10 @@ class ScreenRecorder(QObject):
         self._rec_has_x264 = False
         self._rec_vaapi_dev: Optional[str] = None
         self._rec_audio_devs: list[str] = []
+        self._rec_strategy = "cpu"
+        self._capture_dest: Optional[Path] = None  # .nut na estratégia disk
+        self._frame_nbytes = 0                     # stride×h — fatia exata p/ pipe
         self._detected_fmt: Optional[str] = None
-        self._last_frame_ts = 0.0
-        self._min_frame_interval = 1.0 / 60
 
         # Deduplicação de frames (encode-on-change): frames idênticos ao último
         # enviado não vão para o encoder. bytes == bytes é memcmp em C com
@@ -401,10 +495,12 @@ class ScreenRecorder(QObject):
             return False
 
         geo = screen.geometry()
-        self._rec_w = geo.width()
-        self._rec_h = geo.height()
-        # Captura no Hz nativo; limite de 60 fps mantém uso de CPU razoável
-        self._rec_fps = max(1, min(int(round(screen.refreshRate())), 60))
+        dpr = screen.devicePixelRatio() or 1.0
+        # Estimativa em pixels físicos (refinada no primeiro frame real)
+        self._rec_w = int(geo.width() * dpr)
+        self._rec_h = int(geo.height() * dpr)
+        # Hz nativo do monitor, sem teto artificial — máximo que a máquina dá
+        self._rec_fps = max(1, min(int(round(screen.refreshRate())), 240))
         self._ffmpeg_path = ffmpeg
         self._rec_has_x264 = has_x264
         self._rec_vaapi_dev = vaapi_dev
@@ -413,14 +509,28 @@ class ScreenRecorder(QObject):
         self._proc = None
         self._last_data = None
         self._last_sent_ts = 0.0
+        self._frame_nbytes = 0
 
         save_dir = _save_dir()
         save_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._dest = save_dir / f"epicpen_rec_{ts}.mp4"
 
-        self._min_frame_interval = 1.0 / self._rec_fps
-        self._last_frame_ts = 0.0
+        # Estratégia adaptativa: encoda onde a máquina está menos pior
+        raw_bps = self._rec_w * self._rec_h * 4 * self._rec_fps
+        try:
+            disk_free = shutil.disk_usage(save_dir).free
+        except OSError:
+            disk_free = 0
+        self._rec_strategy = _pick_strategy(
+            vaapi_dev, has_x264, os.cpu_count() or 2,
+            raw_bps, disk_free, _any_fast_disk(),
+        )
+        if self._rec_strategy == "disk":
+            self._capture_dest = save_dir / f".epicpen_rec_{ts}.nut"
+        else:
+            self._capture_dest = self._dest
+
         self._active = True
 
         self._capture.setScreen(screen)
@@ -428,16 +538,42 @@ class ScreenRecorder(QObject):
         self.started.emit()
         return True
 
-    def _start_ffmpeg(self, pix_fmt: str) -> bool:
-        """Inicia o processo ffmpeg. Chamado na primeira frame (thread multimedia)."""
+    def _start_ffmpeg(self, frame: QVideoFrame) -> bool:
+        """Inicia o processo ffmpeg. Chamado na primeira frame (thread multimedia).
+
+        Lê do frame real a resolução física e o stride: o comando usa
+        stride/4 como largura (rawvideo é empacotado) e um filtro crop
+        devolve a área visível quando o compositor adiciona padding.
+        """
+        pix_fmt = _native_pix_fmt(frame)
+        size = frame.size()
+        w, h = size.width(), size.height()
+        stride = 0
+        if frame.map(QVideoFrame.MapMode.ReadOnly):
+            try:
+                stride = frame.bytesPerLine(0)
+            finally:
+                frame.unmap()
+        if w <= 0 or h <= 0:
+            w, h = self._rec_w, self._rec_h
+        if stride <= 0:
+            stride = w * 4
+
+        src_w = stride // 4
+        crop = (w, h) if src_w != w else None
+        self._rec_w, self._rec_h = w, h
+        self._frame_nbytes = stride * h
+
         cmd = _build_ffmpeg_cmd(
             self._ffmpeg_path,
-            self._rec_w, self._rec_h, self._rec_fps,
-            str(self._dest),
+            src_w, h, self._rec_fps,
+            str(self._capture_dest),
             self._rec_has_x264,
             pix_fmt,
-            vaapi_device=self._rec_vaapi_dev,
+            vaapi_device=self._rec_vaapi_dev if self._rec_strategy == "gpu" else None,
             audio_devices=self._rec_audio_devs,
+            raw_intermediate=(self._rec_strategy == "disk"),
+            crop=crop,
         )
         try:
             self._proc = subprocess.Popen(
@@ -450,6 +586,18 @@ class ScreenRecorder(QObject):
         except OSError as e:
             self.failed.emit(f"Falha ao iniciar ffmpeg: {e}")
             return False
+
+        # Pipe de 1MB: menos syscalls a 100+ MB/s de rawvideo
+        try:
+            import fcntl
+            F_SETPIPE_SZ = 1031  # Linux
+            fcntl.fcntl(self._proc.stdin.fileno(), F_SETPIPE_SZ, 1 << 20)
+        except Exception:
+            pass
+
+        # Fila dimensionada pela RAM disponível: amortece picos do encoder
+        depth = _queue_frames(self._frame_nbytes, _mem_available_bytes())
+        self._frame_queue = queue.Queue(maxsize=depth)
 
         self._detected_fmt = pix_fmt
         self._writer_thread = threading.Thread(
@@ -489,39 +637,68 @@ class ScreenRecorder(QObject):
                 self._proc.kill()
                 self._proc.wait()
 
+            captured = self._capture_dest
             dest = self._dest
             self._proc = None
 
-            if dest and dest.exists() and dest.stat().st_size > 0:
-                self.stopped.emit(str(dest))
-            else:
+            if not (captured and captured.exists() and captured.stat().st_size > 0):
                 self.failed.emit("Gravação falhou ou arquivo vazio.")
+            elif self._rec_strategy == "disk" and captured != dest:
+                # Estratégia disk: re-encode em background; stopped sai no fim
+                threading.Thread(
+                    target=self._post_encode, args=(captured, dest),
+                    daemon=True, name="epicpen-transcode",
+                ).start()
+            else:
+                self.stopped.emit(str(dest))
         else:
             self.failed.emit("Nenhum frame capturado.")
+
+    def _post_encode(self, src: Path, dest: Path):
+        """Transcode do .nut intermediário para MP4 (estratégia disk)."""
+        cmd = _build_transcode_cmd(
+            self._ffmpeg_path, str(src), str(dest), self._rec_has_x264,
+        )
+        try:
+            r = subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                preexec_fn=_lower_priority, timeout=3600,
+            )
+        except Exception:
+            self.failed.emit(f"Re-encode falhou; captura bruta mantida em {src}")
+            return
+        if r.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
+            try:
+                src.unlink()
+            except OSError:
+                pass
+            self.stopped.emit(str(dest))
+        else:
+            self.failed.emit(f"Re-encode falhou; captura bruta mantida em {src}")
 
     def _on_frame(self, frame: QVideoFrame):
         if not self._active:
             return
 
-        # Throttle: descartar frames acima da taxa alvo
+        # Sem throttle: o compositor já entrega no máximo o Hz do monitor e a
+        # deduplicação corta o que não mudou. (O throttle antigo derrubava
+        # frames legítimos por jitter — até metade do FPS em rajadas regulares.)
         now = time.monotonic()
-        if now - self._last_frame_ts < self._min_frame_interval:
-            return
 
-        # Lazy start: detecta o formato nativo e inicia o FFmpeg na primeira frame
+        # Lazy start: detecta formato/resolução reais e inicia o FFmpeg na 1ª frame
         if self._proc is None:
             with self._start_lock:
                 if self._proc is None:
-                    pix_fmt = _native_pix_fmt(frame)
-                    if not self._start_ffmpeg(pix_fmt):
+                    if not self._start_ffmpeg(frame):
                         self._active = False
                         return
-
-        self._last_frame_ts = now
 
         data = _frame_to_bytes(frame, self._detected_fmt)
         if data is None:
             return
+        if self._frame_nbytes and len(data) > self._frame_nbytes:
+            data = data[:self._frame_nbytes]  # padding além de stride×h
 
         # Encode-on-change: frame idêntico ao anterior não vai para o encoder.
         if self._is_duplicate(data, now):

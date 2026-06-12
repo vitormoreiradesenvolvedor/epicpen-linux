@@ -178,6 +178,81 @@ def grab_region(x: int, y: int, w: int, h: int) -> QPixmap | None:
 
 # ── API pública de captura ────────────────────────────────────────────────────
 
+def failure_hint() -> str:
+    """Mensagem de erro com as ferramentas encontradas (ou ausentes)."""
+    tools = _available_tools()
+    if tools:
+        return (
+            f"Ferramentas encontradas: {', '.join(tools)}\n"
+            "Nenhuma retornou imagem válida."
+        )
+    return (
+        "Nenhuma ferramenta de captura encontrada e a captura via portal falhou.\n"
+        "Instale uma das opções compatíveis:\n"
+        "  Wayland: grim, wayshot, gnome-screenshot, spectacle, flameshot\n"
+        "  X11: maim, scrot, flameshot"
+    )
+
+
+def save_pixmap(pixmap: QPixmap) -> Path | None:
+    """Salva o pixmap em _SAVE_DIR com nome timestampado. None se falhar."""
+    _SAVE_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest = _SAVE_DIR / f"epicpen_{ts}.png"
+    return dest if pixmap.save(str(dest)) else None
+
+
+def _grab_pixmap(screen=None) -> QPixmap | None:
+    """Captura a tela e retorna o QPixmap cru, sem salvar em disco."""
+    if not _IS_WAYLAND:
+        src = screen or QApplication.primaryScreen()
+        px = src.grabWindow(0)
+        if px.isNull():
+            return None
+        if screen is not None:
+            px = _crop_to_screen(px, screen)
+        return px
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        tmp = f.name
+    try:
+        if _grab_wayland_fullscreen(tmp):
+            px = QPixmap(tmp)
+            if px.isNull():
+                return None
+            return _crop_to_screen(px, screen) if screen is not None else px
+        # Fallback garantido (bundled): QScreenCapture já captura por-monitor
+        if _grab_via_qt(tmp, screen):
+            px = QPixmap(tmp)
+            return px if not px.isNull() else None
+        return None
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def capture_for_edit(toolbar_window, screen=None, on_result=None) -> None:
+    """Captura e entrega o QPixmap cru ao chamador — sem salvar.
+
+    O chamador decide recortar/salvar/copiar (CropDialog na toolbar).
+    on_result(pixmap | None, hint | None) é chamado após restaurar a toolbar.
+    """
+    toolbar_window.hide()
+
+    def _do_capture():
+        px = _grab_pixmap(screen)
+        toolbar_window.show()
+        if on_result is None:
+            return
+        if px is None:
+            on_result(None, failure_hint())
+        else:
+            on_result(px, None)
+
+    QTimer.singleShot(80, _do_capture)
+
 def capture(toolbar_window, tray_icon=None,
             copy_to_clipboard: bool = False,
             screen=None) -> None:
@@ -195,16 +270,7 @@ def capture(toolbar_window, tray_icon=None,
         toolbar_window.show()
 
         if pixmap is None:
-            tools = _available_tools()
-            hint = (
-                f"Ferramentas encontradas: {', '.join(tools)}\nNenhuma retornou imagem válida."
-                if tools else
-                "Nenhuma ferramenta de captura encontrada.\n"
-                "Instale uma das opções compatíveis:\n"
-                "  Wayland: grim, wayshot, gnome-screenshot, spectacle, flameshot\n"
-                "  X11: maim, scrot, flameshot"
-            )
-            _notify(tray_icon, "EpicPen — Screenshot falhou", hint)
+            _notify(tray_icon, "EpicPen — Screenshot falhou", failure_hint())
             return
 
         if copy_to_clipboard:

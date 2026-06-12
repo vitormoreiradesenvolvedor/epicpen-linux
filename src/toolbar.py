@@ -61,6 +61,114 @@ _STYLE_COLLAPSED = """
 """
 
 
+class _CropArea(QLabel):
+    """Exibe a captura e permite seleção retangular por arrasto (rubber band)."""
+
+    def __init__(self, pixmap, parent=None):
+        super().__init__(parent)
+        self.setPixmap(pixmap)
+        self.setFixedSize(pixmap.size())
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        from PyQt6.QtWidgets import QRubberBand
+        self._band = QRubberBand(QRubberBand.Shape.Rectangle, self)
+        self._origin = None
+        self._selection = None  # QRect em coords do pixmap exibido
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        from PyQt6.QtCore import QRect, QSize
+        self._origin = event.pos()
+        self._selection = None
+        self._band.setGeometry(QRect(self._origin, QSize()))
+        self._band.show()
+
+    def mouseMoveEvent(self, event):
+        if self._origin is None:
+            return
+        from PyQt6.QtCore import QRect
+        self._band.setGeometry(QRect(self._origin, event.pos()).normalized())
+
+    def mouseReleaseEvent(self, event):
+        if self._origin is None:
+            return
+        from PyQt6.QtCore import QRect
+        rect = QRect(self._origin, event.pos()).normalized()
+        rect = rect.intersected(self.rect())
+        self._origin = None
+        if rect.width() >= 4 and rect.height() >= 4:
+            self._selection = rect
+        else:
+            self._selection = None
+            self._band.hide()
+
+    def selection(self):
+        return self._selection
+
+    def clear_selection(self):
+        self._selection = None
+        self._band.hide()
+
+
+class CropDialog(QDialog):
+    """Pré-visualização da captura com recorte opcional por arrasto."""
+
+    def __init__(self, pixmap, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("EpicPen — Captura")
+        self._original = pixmap
+
+        from PyQt6.QtWidgets import QApplication
+        screen = QApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen else None
+        max_w = int(avail.width() * 0.65) if avail else 1000
+        max_h = int(avail.height() * 0.65) if avail else 650
+        scaled = pixmap.scaled(
+            max_w, max_h,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        # Fatores para mapear a seleção de volta às coords originais
+        self._fx = pixmap.width() / max(1, scaled.width())
+        self._fy = pixmap.height() / max(1, scaled.height())
+
+        lay = QVBoxLayout(self)
+        lay.setSpacing(6)
+        hint = QLabel("Arraste sobre a imagem para recortar (opcional)")
+        hint.setStyleSheet("color: #bbb;")
+        lay.addWidget(hint)
+        self._area = _CropArea(scaled)
+        lay.addWidget(self._area)
+
+        row = QHBoxLayout()
+        btn_full = QPushButton("Sem recorte")
+        btn_full.clicked.connect(self._area.clear_selection)
+        btn_cancel = QPushButton("Cancelar")
+        btn_cancel.clicked.connect(self.reject)
+        btn_save = QPushButton("Salvar")
+        btn_save.setDefault(True)
+        btn_save.clicked.connect(self.accept)
+        row.addWidget(btn_full)
+        row.addStretch(1)
+        row.addWidget(btn_cancel)
+        row.addWidget(btn_save)
+        lay.addLayout(row)
+
+    def result_pixmap(self):
+        """Pixmap final: o recorte selecionado ou a imagem inteira."""
+        sel = self._area.selection()
+        if sel is None:
+            return self._original
+        from PyQt6.QtCore import QRect
+        rect = QRect(
+            round(sel.x() * self._fx), round(sel.y() * self._fy),
+            round(sel.width() * self._fx), round(sel.height() * self._fy),
+        ).intersected(self._original.rect())
+        if rect.width() < 1 or rect.height() < 1:
+            return self._original
+        return self._original.copy(rect)
+
+
 class TextDialog(QDialog):
     """Diálogo para configurar texto antes de inserir na tela."""
 
@@ -700,8 +808,60 @@ class ToolbarWindow(QWidget):
 
     def _do_screenshot(self, clipboard: bool = False):
         import screenshot as sc
-        sc.capture(self, tray_icon=self._tray, copy_to_clipboard=clipboard,
-                   screen=self._current_screen)
+
+        def _on_result(px, hint):
+            if px is None:
+                self._show_rec_dialog(
+                    "Screenshot falhou",
+                    hint or "Não foi possível capturar a tela.",
+                    error=True,
+                )
+                return
+            ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
+            dlg = CropDialog(px, parent=self._overlay if ov_lsw else self)
+            if ov_lsw:
+                dlg.setWindowFlags(Qt.WindowType.Popup)
+                dlg.adjustSize()
+                geo = self._overlay.geometry()
+                dlg.move(
+                    geo.x() + (geo.width() - dlg.width()) // 2,
+                    geo.y() + (geo.height() - dlg.height()) // 2,
+                )
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return  # cancelado — sem feedback de erro
+            final = dlg.result_pixmap()
+            if clipboard:
+                from PyQt6.QtWidgets import QApplication
+                QApplication.clipboard().setPixmap(final)
+            dest = sc.save_pixmap(final)
+            if dest is None:
+                self._show_rec_dialog(
+                    "Screenshot falhou", "Não foi possível salvar a imagem.",
+                    error=True,
+                )
+                return
+            from pathlib import Path as _P
+            try:
+                msg = f"~/{dest.relative_to(_P.home())}"
+            except ValueError:
+                msg = str(dest)
+            if clipboard:
+                msg += "\n(copiada para a área de transferência)"
+            if self._tray:
+                self._tray.showMessage(
+                    "EpicPen — Screenshot", f"Salva em:\n{msg}",
+                    self._tray.icon(), 4000,
+                )
+            clicked = self._show_rec_dialog(
+                "Screenshot salva", f"Imagem salva em:\n{msg}",
+                extra_button="Abrir pasta",
+            )
+            if clicked == "Abrir pasta":
+                import subprocess
+                subprocess.Popen(["xdg-open", str(dest.parent)])
+
+        sc.capture_for_edit(self, screen=self._current_screen,
+                            on_result=_on_result)
 
     # ── Screen recorder ───────────────────────────────────────────────────────
 
