@@ -305,27 +305,33 @@ def _queue_frames(frame_bytes: int, mem_available: int) -> int:
     return max(4, min(budget // frame_bytes, 240))
 
 
+# Timebase do vídeo: 1000 ticks/s (1ms). Com timestamps wallclock, um timebase
+# grosso (1/fps) faz frames lidos em rajada caírem no mesmo tick e o -vsync vfr
+# descartá-los como duplicados — medido: 2/3 dos frames perdidos a 144.
+_VIDEO_TIMEBASE_FPS = 1000
+
+
 def _build_ffmpeg_cmd(
     ffmpeg: str, w: int, h: int, fps: int, dest: str, has_x264: bool,
     pix_fmt: str = "rgba",
     vaapi_device: Optional[str] = None,
-    audio_devices: Optional[list[str]] = None,
     raw_intermediate: bool = False,
     crop: Optional[tuple[int, int]] = None,
 ) -> list[str]:
-    """Monta o comando ffmpeg para rawvideo via stdin → MP4 (ou .nut) de saída.
+    """Comando do processo de VÍDEO: rawvideo via stdin → .mkv (ou .nut).
+
+    Só vídeo, nunca áudio: mux ao vivo de vídeo+áudio no ffmpeg CLI trava a
+    leitura do pipe em ~23fps (medido) — o áudio roda num processo separado
+    e os dois são montados no final com timestamps absolutos (-copyts).
 
     -vsync vfr preserva os timestamps wallclock sem duplicar frames — é o que
     permite a deduplicação no _on_frame: tela estática gera zero trabalho de
     encode e o player simplesmente segura o último frame.
 
-    audio_devices: devices pulse (mic e/ou monitor). Dois devices são mixados
-    com amix; o vídeo continua vindo do pipe:0.
     raw_intermediate: estratégia disk — copia rawvideo para .nut sem encodar.
     crop: (w, h) reais quando o stride do frame tem padding (w do comando é
     stride/4; o filtro corta de volta para a área visível).
     """
-    audio_devices = audio_devices or []
     base = [ffmpeg]
     if vaapi_device and not raw_intermediate:
         base += [
@@ -337,11 +343,9 @@ def _build_ffmpeg_cmd(
         "-f", "rawvideo",
         "-pixel_format", pix_fmt,
         "-video_size", f"{w}x{h}",
-        "-framerate", str(fps),
+        "-framerate", str(_VIDEO_TIMEBASE_FPS),
         "-i", "pipe:0",
     ]
-    for dev in audio_devices:
-        base += ["-f", "pulse", "-thread_queue_size", "1024", "-i", dev]
 
     vf_parts: list[str] = []
     if crop is not None:
@@ -383,30 +387,97 @@ def _build_ffmpeg_cmd(
     if vf_parts:
         encode = ["-vf", ",".join(vf_parts)] + encode
 
-    if len(audio_devices) >= 2:
-        # Mic + alto-falantes mixados; normalize=0 evita cortar o volume pela metade
-        audio = [
-            "-filter_complex",
-            "[1:a][2:a]amix=inputs=2:duration=longest:normalize=0[aout]",
-            "-map", "0:v", "-map", "[aout]",
-            "-c:a", "aac", "-b:a", "160k", "-ac", "2",
+    # -copyts preserva a época wallclock no arquivo — é o que permite
+    # sincronizar com o áudio (processo separado) na montagem final
+    return base + encode + ["-an", "-vsync", "vfr", "-copyts", "-y", dest]
+
+
+def _build_audio_cmd(ffmpeg: str, devices: list[str], dest: str) -> list[str]:
+    """Comando do processo de ÁUDIO: pulse (mic e/ou monitor) → .mka.
+
+    Processo separado do vídeo de propósito; timestamps wallclock + -copyts
+    preservam a época real de captura para o sync exato na montagem.
+    """
+    base = [ffmpeg]
+    for dev in devices:
+        base += [
+            "-use_wallclock_as_timestamps", "1",
+            "-f", "pulse", "-thread_queue_size", "1024", "-i", dev,
         ]
-    elif len(audio_devices) == 1:
-        audio = [
-            "-map", "0:v", "-map", "1:a",
-            "-c:a", "aac", "-b:a", "160k", "-ac", "2",
+    if len(devices) >= 2:
+        # Mic + alto-falantes mixados; normalize=0 evita cortar o volume pela metade
+        maps = [
+            "-filter_complex",
+            "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0[aout]",
+            "-map", "[aout]",
         ]
     else:
-        audio = ["-an"]
+        maps = ["-map", "0:a"]
+    return base + maps + [
+        "-c:a", "aac", "-b:a", "160k", "-ac", "2",
+        "-copyts", "-y", dest,
+    ]
 
-    tail = ["-vsync", "vfr"]
-    if not raw_intermediate:
-        tail += ["-movflags", "+faststart"]
-    return base + encode + audio + tail + ["-y", dest]
+
+def _ffprobe_path(ffmpeg: str) -> Optional[str]:
+    """ffprobe ao lado do ffmpeg escolhido, ou no PATH. None se ausente."""
+    cand = os.path.join(os.path.dirname(ffmpeg), "ffprobe")
+    if os.access(cand, os.X_OK):
+        return cand
+    return shutil.which("ffprobe")
 
 
-def _build_transcode_cmd(ffmpeg: str, src: str, dest: str, has_x264: bool) -> list[str]:
+def _container_start(ffprobe: str, path: str) -> Optional[float]:
+    """start_time (segundos, época wallclock com -copyts) do container."""
+    try:
+        r = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=start_time",
+             "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=10,
+        )
+        return float(r.stdout.strip())
+    except Exception:
+        return None
+
+
+def _audio_inputs(audio: Optional[str], audio_skip: float) -> list[str]:
+    """Input de áudio na montagem; -ss apara o lead anterior ao 1º frame de vídeo."""
+    if not audio:
+        return []
+    pre = ["-ss", f"{audio_skip:.3f}"] if audio_skip > 0.01 else []
+    return pre + ["-i", audio]
+
+
+def _build_remux_cmd(ffmpeg: str, video: str, audio: Optional[str],
+                     dest: str, audio_skip: float = 0.0) -> list[str]:
+    """Montagem final sem re-encode: vídeo .mkv (+ áudio .mka) → MP4.
+
+    -copyts + avoid_negative_ts make_zero: ambos os arquivos carregam
+    timestamps na época wallclock; o shift comum para zero preserva o
+    offset real entre áudio e vídeo (sync exato).
+    audio_skip: apara o áudio gravado antes do primeiro frame de vídeo
+    (o portal demora a entregar o 1º frame; sem o corte, o MP4 abre
+    com segundos de tela preta).
+    """
+    cmd = [ffmpeg, "-i", video] + _audio_inputs(audio, audio_skip)
+    cmd += ["-map", "0:v"]
+    if audio:
+        cmd += ["-map", "1:a", "-c:a", "copy"]
+    return cmd + [
+        "-c:v", "copy",
+        "-copyts", "-avoid_negative_ts", "make_zero",
+        "-movflags", "+faststart", "-y", dest,
+    ]
+
+
+def _build_transcode_cmd(ffmpeg: str, video: str, audio: Optional[str],
+                         dest: str, has_x264: bool,
+                         audio_skip: float = 0.0) -> list[str]:
     """Re-encode do .nut intermediário (estratégia disk) para o MP4 final."""
+    cmd = [ffmpeg, "-i", video] + _audio_inputs(audio, audio_skip)
+    cmd += ["-map", "0:v"]
+    if audio:
+        cmd += ["-map", "1:a", "-c:a", "copy"]
     if has_x264:
         encode = [
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
@@ -414,8 +485,8 @@ def _build_transcode_cmd(ffmpeg: str, src: str, dest: str, has_x264: bool) -> li
         ]
     else:
         encode = ["-c:v", "mpeg4", "-q:v", "5"]
-    return [ffmpeg, "-i", src] + encode + [
-        "-c:a", "copy",
+    return cmd + encode + [
+        "-copyts", "-avoid_negative_ts", "make_zero",
         "-movflags", "+faststart", "-y", dest,
     ]
 
@@ -460,7 +531,9 @@ class ScreenRecorder(QObject):
         self._rec_vaapi_dev: Optional[str] = None
         self._rec_audio_devs: list[str] = []
         self._rec_strategy = "cpu"
-        self._capture_dest: Optional[Path] = None  # .nut na estratégia disk
+        self._capture_dest: Optional[Path] = None  # .mkv (ou .nut em disk)
+        self._audio_dest: Optional[Path] = None    # .mka do processo de áudio
+        self._audio_proc: Optional[subprocess.Popen] = None
         self._frame_nbytes = 0                     # stride×h — fatia exata p/ pipe
         self._detected_fmt: Optional[str] = None
 
@@ -476,7 +549,8 @@ class ScreenRecorder(QObject):
     def is_recording(self) -> bool:
         return self._active
 
-    def start(self) -> bool:
+    def start(self, screen=None) -> bool:
+        """Inicia a gravação. screen: monitor a capturar (default: maior Hz)."""
         if self._active:
             return True
 
@@ -489,7 +563,8 @@ class ScreenRecorder(QObject):
             )
             return False
 
-        screen = _best_screen()
+        if screen is None:
+            screen = _best_screen()
         if screen is None:
             self.failed.emit("Nenhuma tela detectada.")
             return False
@@ -526,10 +601,29 @@ class ScreenRecorder(QObject):
             vaapi_dev, has_x264, os.cpu_count() or 2,
             raw_bps, disk_free, _any_fast_disk(),
         )
-        if self._rec_strategy == "disk":
-            self._capture_dest = save_dir / f".epicpen_rec_{ts}.nut"
-        else:
-            self._capture_dest = self._dest
+        ext = ".nut" if self._rec_strategy == "disk" else ".mkv"
+        self._capture_dest = save_dir / f".epicpen_rec_{ts}{ext}"
+
+        # Áudio em processo separado, iniciado já: o sync com o vídeo é por
+        # timestamp absoluto, não por ordem de partida
+        self._audio_dest = None
+        self._audio_proc = None
+        if self._rec_audio_devs:
+            self._audio_dest = save_dir / f".epicpen_rec_{ts}.mka"
+            acmd = _build_audio_cmd(
+                ffmpeg, self._rec_audio_devs, str(self._audio_dest),
+            )
+            try:
+                self._audio_proc = subprocess.Popen(
+                    acmd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    preexec_fn=_lower_priority,
+                )
+            except OSError:
+                self._audio_proc = None
+                self._audio_dest = None
 
         self._active = True
 
@@ -571,7 +665,6 @@ class ScreenRecorder(QObject):
             self._rec_has_x264,
             pix_fmt,
             vaapi_device=self._rec_vaapi_dev if self._rec_strategy == "gpu" else None,
-            audio_devices=self._rec_audio_devs,
             raw_intermediate=(self._rec_strategy == "disk"),
             crop=crop,
         )
@@ -614,23 +707,38 @@ class ScreenRecorder(QObject):
         self._last_data = None  # libera o frame retido pela deduplicação
 
         if self._writer_thread:
-            self._frame_queue.put(None)
+            # Esvazia a fila antes do sentinela: put() numa fila cheia
+            # bloquearia a UI; frames restantes já não interessam
+            try:
+                while True:
+                    self._frame_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._frame_queue.put_nowait(None)
+            except queue.Full:
+                pass
             self._writer_thread.join(timeout=5)
             self._writer_thread = None
+
+        # Áudio: SIGINT gracioso (input ao vivo nunca termina sozinho)
+        if self._audio_proc is not None:
+            try:
+                self._audio_proc.send_signal(signal.SIGINT)
+            except (ProcessLookupError, OSError):
+                pass
+            try:
+                self._audio_proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self._audio_proc.kill()
+                self._audio_proc.wait()
+            self._audio_proc = None
 
         if self._proc is not None:
             try:
                 self._proc.stdin.close()
-            except OSError:
+            except (OSError, ValueError):
                 pass
-            if self._rec_audio_devs:
-                # Inputs de áudio são ao vivo: EOF do vídeo não encerra o ffmpeg.
-                # SIGINT = 'q' gracioso — flush dos encoders e moov escrito
-                # (kill deixaria o MP4 corrompido por causa do +faststart).
-                try:
-                    self._proc.send_signal(signal.SIGINT)
-                except (ProcessLookupError, OSError):
-                    pass
             try:
                 self._proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
@@ -642,23 +750,53 @@ class ScreenRecorder(QObject):
             self._proc = None
 
             if not (captured and captured.exists() and captured.stat().st_size > 0):
+                self._cleanup_temp(self._audio_dest)
                 self.failed.emit("Gravação falhou ou arquivo vazio.")
-            elif self._rec_strategy == "disk" and captured != dest:
-                # Estratégia disk: re-encode em background; stopped sai no fim
-                threading.Thread(
-                    target=self._post_encode, args=(captured, dest),
-                    daemon=True, name="epicpen-transcode",
-                ).start()
             else:
-                self.stopped.emit(str(dest))
+                # Montagem final (remux instantâneo ou transcode na estratégia
+                # disk) em background; stopped é emitido ao concluir
+                threading.Thread(
+                    target=self._assemble,
+                    args=(captured, self._audio_dest, dest),
+                    daemon=True, name="epicpen-assemble",
+                ).start()
         else:
+            self._cleanup_temp(self._audio_dest)
             self.failed.emit("Nenhum frame capturado.")
 
-    def _post_encode(self, src: Path, dest: Path):
-        """Transcode do .nut intermediário para MP4 (estratégia disk)."""
-        cmd = _build_transcode_cmd(
-            self._ffmpeg_path, str(src), str(dest), self._rec_has_x264,
-        )
+    @staticmethod
+    def _cleanup_temp(path: Optional[Path]):
+        if path is not None:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+    def _assemble(self, video: Path, audio: Optional[Path], dest: Path):
+        """Monta o MP4 final a partir das capturas de vídeo e áudio."""
+        audio_ok = audio is not None and audio.exists() and audio.stat().st_size > 0
+        audio_arg = str(audio) if audio_ok else None
+
+        # Apara o áudio gravado antes do 1º frame de vídeo (latência do portal)
+        audio_skip = 0.0
+        if audio_ok:
+            probe = _ffprobe_path(self._ffmpeg_path)
+            if probe:
+                vs = _container_start(probe, str(video))
+                as_ = _container_start(probe, str(audio))
+                if vs is not None and as_ is not None and vs > as_:
+                    audio_skip = vs - as_
+
+        if self._rec_strategy == "disk":
+            cmd = _build_transcode_cmd(
+                self._ffmpeg_path, str(video), audio_arg, str(dest),
+                self._rec_has_x264, audio_skip=audio_skip,
+            )
+        else:
+            cmd = _build_remux_cmd(
+                self._ffmpeg_path, str(video), audio_arg, str(dest),
+                audio_skip=audio_skip,
+            )
         try:
             r = subprocess.run(
                 cmd,
@@ -666,16 +804,14 @@ class ScreenRecorder(QObject):
                 preexec_fn=_lower_priority, timeout=3600,
             )
         except Exception:
-            self.failed.emit(f"Re-encode falhou; captura bruta mantida em {src}")
+            self.failed.emit(f"Montagem do vídeo falhou; captura mantida em {video}")
             return
         if r.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
-            try:
-                src.unlink()
-            except OSError:
-                pass
+            self._cleanup_temp(video)
+            self._cleanup_temp(audio if audio_ok else None)
             self.stopped.emit(str(dest))
         else:
-            self.failed.emit(f"Re-encode falhou; captura bruta mantida em {src}")
+            self.failed.emit(f"Montagem do vídeo falhou; captura mantida em {video}")
 
     def _on_frame(self, frame: QVideoFrame):
         if not self._active:
@@ -730,5 +866,6 @@ class ScreenRecorder(QObject):
                 break
             try:
                 self._proc.stdin.write(data)
-            except (BrokenPipeError, OSError):
+            except (BrokenPipeError, OSError, ValueError):
+                # ValueError: stdin fechado pelo stop() enquanto escrevíamos
                 break

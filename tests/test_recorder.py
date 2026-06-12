@@ -210,7 +210,19 @@ def test_build_x264_contains_fastdecode():
 def test_build_x264_contains_resolution():
     cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1280, 720, 60, "/tmp/out.mp4", True)
     assert "1280x720" in cmd
-    assert "60" in cmd
+
+
+def test_build_uses_millisecond_timebase():
+    """-framerate declarado = 1000 (timebase 1ms): timestamps wallclock em
+    timebase grosso colidem em rajadas e o vsync vfr descarta frames."""
+    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 144, "/tmp/out.mkv", True)
+    idx = cmd.index("-framerate")
+    assert cmd[idx + 1] == "1000"
+
+
+def test_build_video_cmd_has_copyts():
+    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 60, "/tmp/out.mkv", True)
+    assert "-copyts" in cmd
 
 
 def test_build_x264_contains_dest():
@@ -240,14 +252,12 @@ def test_build_x264opts_present():
     assert "threads=0" in opts
 
 
-def test_build_x264_faststart():
-    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True)
-    assert "+faststart" in cmd
-
-
-def test_build_x264_no_audio():
-    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True)
+def test_build_video_cmd_never_muxes_audio():
+    """Vídeo e áudio NUNCA no mesmo processo: mux ao vivo trava o pipe a ~23fps."""
+    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mkv", True)
     assert "-an" in cmd
+    assert "pulse" not in cmd
+    assert "+faststart" not in cmd  # faststart só na montagem final (MP4)
 
 
 def test_build_x264_profile_baseline():
@@ -409,12 +419,11 @@ def test_pick_returns_none_without_ffmpeg(monkeypatch):
     assert rec._pick_ffmpeg() == (None, None, False, False)
 
 
-# ── Áudio: _build_ffmpeg_cmd ──────────────────────────────────────────────────
+# ── Áudio: _build_audio_cmd (processo separado) ──────────────────────────────
 
-def test_build_two_audio_devices_uses_amix():
-    cmd = rec._build_ffmpeg_cmd(
-        "/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True,
-        audio_devices=["mic_dev", "sink_dev.monitor"],
+def test_audio_cmd_two_devices_uses_amix():
+    cmd = rec._build_audio_cmd(
+        "/usr/bin/ffmpeg", ["mic_dev", "sink_dev.monitor"], "/tmp/aud.mka",
     )
     assert cmd.count("pulse") == 2
     assert "mic_dev" in cmd
@@ -422,27 +431,58 @@ def test_build_two_audio_devices_uses_amix():
     fc = cmd[cmd.index("-filter_complex") + 1]
     assert "amix=inputs=2" in fc
     assert "aac" in cmd
-    assert "-an" not in cmd
+    assert "-copyts" in cmd
 
 
-def test_build_one_audio_device_maps_directly():
-    cmd = rec._build_ffmpeg_cmd(
-        "/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True,
-        audio_devices=["mic_dev"],
-    )
+def test_audio_cmd_one_device_maps_directly():
+    cmd = rec._build_audio_cmd("/usr/bin/ffmpeg", ["mic_dev"], "/tmp/aud.mka")
     assert "-filter_complex" not in cmd
-    idx = cmd.index("-map")
-    assert cmd[idx + 1] == "0:v"
-    assert "1:a" in cmd
+    assert cmd[cmd.index("-map") + 1] == "0:a"
     assert "aac" in cmd
-    assert "-an" not in cmd
 
 
-def test_build_no_audio_devices_disables_audio():
-    cmd = rec._build_ffmpeg_cmd("/usr/bin/ffmpeg", 1920, 1080, 30, "/tmp/out.mp4", True)
-    assert "-an" in cmd
-    assert "pulse" not in cmd
-    assert "aac" not in cmd
+def test_audio_cmd_uses_wallclock():
+    cmd = rec._build_audio_cmd("/usr/bin/ffmpeg", ["mic_dev"], "/tmp/aud.mka")
+    assert "-use_wallclock_as_timestamps" in cmd
+
+
+# ── _build_remux_cmd (montagem final) ─────────────────────────────────────────
+
+def test_remux_with_audio_copies_both():
+    cmd = rec._build_remux_cmd("/usr/bin/ffmpeg", "/tmp/v.mkv", "/tmp/a.mka", "/tmp/f.mp4")
+    assert "/tmp/v.mkv" in cmd
+    assert "/tmp/a.mka" in cmd
+    assert cmd[cmd.index("-c:v") + 1] == "copy"
+    assert cmd[cmd.index("-c:a") + 1] == "copy"
+    assert "-copyts" in cmd
+    assert "make_zero" in cmd
+    assert "+faststart" in cmd
+
+
+def test_remux_audio_skip_trims_lead():
+    cmd = rec._build_remux_cmd(
+        "/usr/bin/ffmpeg", "/tmp/v.mkv", "/tmp/a.mka", "/tmp/f.mp4",
+        audio_skip=2.633,
+    )
+    idx = cmd.index("-ss")
+    assert cmd[idx + 1] == "2.633"
+    assert cmd[idx + 2] == "-i"
+    assert cmd[idx + 3] == "/tmp/a.mka"
+
+
+def test_remux_no_skip_when_negligible():
+    cmd = rec._build_remux_cmd(
+        "/usr/bin/ffmpeg", "/tmp/v.mkv", "/tmp/a.mka", "/tmp/f.mp4",
+        audio_skip=0.005,
+    )
+    assert "-ss" not in cmd
+
+
+def test_remux_without_audio():
+    cmd = rec._build_remux_cmd("/usr/bin/ffmpeg", "/tmp/v.mkv", None, "/tmp/f.mp4")
+    assert "/tmp/v.mkv" in cmd
+    assert "-c:a" not in cmd
+    assert "1:a" not in cmd
 
 
 # ── _has_audio_support ────────────────────────────────────────────────────────
@@ -604,7 +644,9 @@ def test_build_no_crop_no_filter_on_cpu():
 # ── _build_transcode_cmd ──────────────────────────────────────────────────────
 
 def test_transcode_uses_x264_veryfast():
-    cmd = rec._build_transcode_cmd("/usr/bin/ffmpeg", "/tmp/cap.nut", "/tmp/out.mp4", True)
+    cmd = rec._build_transcode_cmd(
+        "/usr/bin/ffmpeg", "/tmp/cap.nut", "/tmp/a.mka", "/tmp/out.mp4", True,
+    )
     assert "libx264" in cmd
     assert "veryfast" in cmd
     assert cmd[cmd.index("-c:a") + 1] == "copy"
@@ -612,8 +654,17 @@ def test_transcode_uses_x264_veryfast():
     assert cmd[-1] == "/tmp/out.mp4"
 
 
+def test_transcode_without_audio():
+    cmd = rec._build_transcode_cmd(
+        "/usr/bin/ffmpeg", "/tmp/cap.nut", None, "/tmp/out.mp4", True,
+    )
+    assert "-c:a" not in cmd
+
+
 def test_transcode_falls_back_to_mpeg4():
-    cmd = rec._build_transcode_cmd("/usr/bin/ffmpeg", "/tmp/cap.nut", "/tmp/out.mp4", False)
+    cmd = rec._build_transcode_cmd(
+        "/usr/bin/ffmpeg", "/tmp/cap.nut", None, "/tmp/out.mp4", False,
+    )
     assert "mpeg4" in cmd
     assert "libx264" not in cmd
 

@@ -61,112 +61,197 @@ _STYLE_COLLAPSED = """
 """
 
 
-class _CropArea(QLabel):
-    """Exibe a captura e permite seleção retangular por arrasto (rubber band)."""
+class RegionSelector(QDialog):
+    """Seleção de região estilo Flameshot: tela congelada em fullscreen,
+    arrasto para selecionar com escurecimento ao redor, label de dimensões
+    e botões flutuantes junto à seleção.
+
+    Atalhos: Enter salva (tudo, se não houver seleção), Ctrl+C copia, Esc cancela.
+    result_action(): "save" | "copy" | None.
+    """
+
+    _DIM = QColor(0, 0, 0, 130)
 
     def __init__(self, pixmap, parent=None):
         super().__init__(parent)
-        self.setPixmap(pixmap)
-        self.setFixedSize(pixmap.size())
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog
+        )
         self.setCursor(Qt.CursorShape.CrossCursor)
-        from PyQt6.QtWidgets import QRubberBand
-        self._band = QRubberBand(QRubberBand.Shape.Rectangle, self)
-        self._origin = None
-        self._selection = None  # QRect em coords do pixmap exibido
+        self.setMouseTracking(True)
+        self._px = pixmap
+        self._sel = None          # QRect em coords do widget
+        self._origin = None       # arrasto criando seleção
+        self._moving = None       # offset do arrasto movendo a seleção
+        self._action = None
+
+        from PyQt6.QtCore import QRect  # noqa: F401 (usado nos handlers)
+        self._btns = QFrame(self)
+        self._btns.setStyleSheet(
+            "QFrame { background: rgba(30,30,30,235); border-radius: 7px; }"
+            "QPushButton { background: transparent; border: none; color: white;"
+            "  padding: 6px 14px; font-size: 13px; border-radius: 5px; }"
+            "QPushButton:hover { background: rgba(255,255,255,40); }"
+        )
+        row = QHBoxLayout(self._btns)
+        row.setContentsMargins(4, 2, 4, 2)
+        row.setSpacing(2)
+        for label, slot in (
+            ("Copiar", self._do_copy),
+            ("Salvar", self._do_save),
+            ("Cancelar", self.reject),
+        ):
+            b = QPushButton(label)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(slot)
+            row.addWidget(b)
+        self._btns.adjustSize()
+        self._btns.hide()
+
+    # ── resultado ─────────────────────────────────────────────────────────
+
+    def result_action(self):
+        return self._action
+
+    def result_pixmap(self):
+        """Recorte em pixels do pixmap original, ou a imagem inteira."""
+        if self._sel is None or self.width() < 1 or self.height() < 1:
+            return self._px
+        from PyQt6.QtCore import QRect
+        fx = self._px.width() / self.width()
+        fy = self._px.height() / self.height()
+        rect = QRect(
+            round(self._sel.x() * fx), round(self._sel.y() * fy),
+            round(self._sel.width() * fx), round(self._sel.height() * fy),
+        ).intersected(self._px.rect())
+        if rect.width() < 1 or rect.height() < 1:
+            return self._px
+        return self._px.copy(rect)
+
+    def _do_save(self):
+        self._action = "save"
+        self.accept()
+
+    def _do_copy(self):
+        self._action = "copy"
+        self.accept()
+
+    # ── interação ─────────────────────────────────────────────────────────
 
     def mousePressEvent(self, event):
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        from PyQt6.QtCore import QRect, QSize
-        self._origin = event.pos()
-        self._selection = None
-        self._band.setGeometry(QRect(self._origin, QSize()))
-        self._band.show()
+        pos = event.pos()
+        if self._sel is not None and self._sel.contains(pos):
+            self._moving = pos - self._sel.topLeft()
+        else:
+            self._origin = pos
+            self._sel = None
+        self._btns.hide()
+        self.update()
 
     def mouseMoveEvent(self, event):
-        if self._origin is None:
-            return
         from PyQt6.QtCore import QRect
-        self._band.setGeometry(QRect(self._origin, event.pos()).normalized())
+        pos = event.pos()
+        if self._moving is not None and self._sel is not None:
+            tl = pos - self._moving
+            r = QRect(tl, self._sel.size())
+            # mantém dentro da tela
+            r.moveLeft(max(0, min(r.left(), self.width() - r.width())))
+            r.moveTop(max(0, min(r.top(), self.height() - r.height())))
+            self._sel = r
+            self.update()
+        elif self._origin is not None:
+            self._sel = QRect(self._origin, pos).normalized()
+            self.update()
+        elif self._sel is not None:
+            self.setCursor(
+                Qt.CursorShape.SizeAllCursor if self._sel.contains(pos)
+                else Qt.CursorShape.CrossCursor
+            )
 
     def mouseReleaseEvent(self, event):
-        if self._origin is None:
+        if event.button() != Qt.MouseButton.LeftButton:
             return
-        from PyQt6.QtCore import QRect
-        rect = QRect(self._origin, event.pos()).normalized()
-        rect = rect.intersected(self.rect())
+        if self._origin is not None and self._sel is not None:
+            if self._sel.width() < 4 or self._sel.height() < 4:
+                self._sel = None
         self._origin = None
-        if rect.width() >= 4 and rect.height() >= 4:
-            self._selection = rect
+        self._moving = None
+        if self._sel is not None:
+            self._place_buttons()
+            self._btns.show()
+        self.update()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.reject()
+        elif event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._do_save()
+        elif (event.key() == Qt.Key.Key_C
+              and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self._do_copy()
         else:
-            self._selection = None
-            self._band.hide()
+            super().keyPressEvent(event)
 
-    def selection(self):
-        return self._selection
+    def _place_buttons(self):
+        """Botões logo abaixo da seleção; acima dela se não couber."""
+        bw, bh = self._btns.width(), self._btns.height()
+        x = min(max(0, self._sel.right() - bw), self.width() - bw)
+        y = self._sel.bottom() + 8
+        if y + bh > self.height():
+            y = max(0, self._sel.top() - bh - 8)
+        self._btns.move(x, y)
 
-    def clear_selection(self):
-        self._selection = None
-        self._band.hide()
+    # ── pintura ───────────────────────────────────────────────────────────
 
-
-class CropDialog(QDialog):
-    """Pré-visualização da captura com recorte opcional por arrasto."""
-
-    def __init__(self, pixmap, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("EpicPen — Captura")
-        self._original = pixmap
-
-        from PyQt6.QtWidgets import QApplication
-        screen = QApplication.primaryScreen()
-        avail = screen.availableGeometry() if screen else None
-        max_w = int(avail.width() * 0.65) if avail else 1000
-        max_h = int(avail.height() * 0.65) if avail else 650
-        scaled = pixmap.scaled(
-            max_w, max_h,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        # Fatores para mapear a seleção de volta às coords originais
-        self._fx = pixmap.width() / max(1, scaled.width())
-        self._fy = pixmap.height() / max(1, scaled.height())
-
-        lay = QVBoxLayout(self)
-        lay.setSpacing(6)
-        hint = QLabel("Arraste sobre a imagem para recortar (opcional)")
-        hint.setStyleSheet("color: #bbb;")
-        lay.addWidget(hint)
-        self._area = _CropArea(scaled)
-        lay.addWidget(self._area)
-
-        row = QHBoxLayout()
-        btn_full = QPushButton("Sem recorte")
-        btn_full.clicked.connect(self._area.clear_selection)
-        btn_cancel = QPushButton("Cancelar")
-        btn_cancel.clicked.connect(self.reject)
-        btn_save = QPushButton("Salvar")
-        btn_save.setDefault(True)
-        btn_save.clicked.connect(self.accept)
-        row.addWidget(btn_full)
-        row.addStretch(1)
-        row.addWidget(btn_cancel)
-        row.addWidget(btn_save)
-        lay.addLayout(row)
-
-    def result_pixmap(self):
-        """Pixmap final: o recorte selecionado ou a imagem inteira."""
-        sel = self._area.selection()
-        if sel is None:
-            return self._original
+    def paintEvent(self, _event):
+        from PyQt6.QtGui import QPainter, QPen
         from PyQt6.QtCore import QRect
-        rect = QRect(
-            round(sel.x() * self._fx), round(sel.y() * self._fy),
-            round(sel.width() * self._fx), round(sel.height() * self._fy),
-        ).intersected(self._original.rect())
-        if rect.width() < 1 or rect.height() < 1:
-            return self._original
-        return self._original.copy(rect)
+        p = QPainter(self)
+        p.drawPixmap(self.rect(), self._px)
+
+        if self._sel is None:
+            p.fillRect(self.rect(), self._DIM)
+            p.setPen(QPen(QColor(255, 255, 255, 220)))
+            f = p.font()
+            f.setPointSize(13)
+            p.setFont(f)
+            p.drawText(
+                self.rect(), Qt.AlignmentFlag.AlignCenter,
+                "Arraste para selecionar a região\n"
+                "Enter salva tudo  •  Ctrl+C copia  •  Esc cancela",
+            )
+        else:
+            s = self._sel
+            # escurece as 4 faixas ao redor da seleção
+            p.fillRect(QRect(0, 0, self.width(), s.top()), self._DIM)
+            p.fillRect(QRect(0, s.bottom() + 1, self.width(),
+                             self.height() - s.bottom() - 1), self._DIM)
+            p.fillRect(QRect(0, s.top(), s.left(), s.height()), self._DIM)
+            p.fillRect(QRect(s.right() + 1, s.top(),
+                             self.width() - s.right() - 1, s.height()), self._DIM)
+            # borda + alças de canto
+            p.setPen(QPen(QColor(80, 170, 255), 2))
+            p.drawRect(s)
+            p.setBrush(QColor(80, 170, 255))
+            r = 4
+            for cx, cy in (
+                (s.left(), s.top()), (s.right(), s.top()),
+                (s.left(), s.bottom()), (s.right(), s.bottom()),
+            ):
+                p.drawEllipse(QPoint(cx, cy), r, r)
+            # label WxH em pixels reais
+            fx = self._px.width() / max(1, self.width())
+            fy = self._px.height() / max(1, self.height())
+            label = f"{round(s.width() * fx)} × {round(s.height() * fy)}"
+            p.setPen(QPen(QColor(255, 255, 255, 230)))
+            ly = s.top() - 8
+            flags = Qt.AlignmentFlag.AlignLeft
+            if ly < 16:
+                ly = s.top() + 18
+            p.drawText(s.left() + 2, ly, label)
+        p.end()
 
 
 class TextDialog(QDialog):
@@ -818,21 +903,34 @@ class ToolbarWindow(QWidget):
                 )
                 return
             ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
-            dlg = CropDialog(px, parent=self._overlay if ov_lsw else self)
+            dlg = RegionSelector(px, parent=self._overlay if ov_lsw else self)
             if ov_lsw:
+                # Popup fullscreen sobre o overlay layer-shell (mesma técnica
+                # do TextDialog; cabe porque o overlay já cobre o monitor)
                 dlg.setWindowFlags(Qt.WindowType.Popup)
-                dlg.adjustSize()
-                geo = self._overlay.geometry()
-                dlg.move(
-                    geo.x() + (geo.width() - dlg.width()) // 2,
-                    geo.y() + (geo.height() - dlg.height()) // 2,
-                )
+                dlg.setFixedSize(self._overlay.size())
+                dlg.move(0, 0)
+            else:
+                target = self._current_screen
+                if target is not None and dlg.windowHandle() is None:
+                    dlg.setScreen(target)
+                dlg.setWindowState(Qt.WindowState.WindowFullScreen)
             if dlg.exec() != QDialog.DialogCode.Accepted:
-                return  # cancelado — sem feedback de erro
+                return  # Esc/Cancelar — sem feedback de erro
             final = dlg.result_pixmap()
-            if clipboard:
+            copy_it = clipboard or dlg.result_action() == "copy"
+            save_it = dlg.result_action() != "copy"
+            if copy_it:
                 from PyQt6.QtWidgets import QApplication
                 QApplication.clipboard().setPixmap(final)
+            if not save_it:
+                if self._tray:
+                    self._tray.showMessage(
+                        "EpicPen — Screenshot",
+                        "Copiada para a área de transferência.",
+                        self._tray.icon(), 3000,
+                    )
+                return
             dest = sc.save_pixmap(final)
             if dest is None:
                 self._show_rec_dialog(
@@ -845,7 +943,7 @@ class ToolbarWindow(QWidget):
                 msg = f"~/{dest.relative_to(_P.home())}"
             except ValueError:
                 msg = str(dest)
-            if clipboard:
+            if copy_it:
                 msg += "\n(copiada para a área de transferência)"
             if self._tray:
                 self._tray.showMessage(
@@ -867,7 +965,8 @@ class ToolbarWindow(QWidget):
 
     def _toggle_record(self, checked: bool):
         if checked:
-            if not self._recorder.start():
+            # Grava o monitor selecionado na toolbar (não o de maior Hz)
+            if not self._recorder.start(screen=self._current_screen):
                 self._btn_record.setChecked(False)
         else:
             self._recorder.stop()
