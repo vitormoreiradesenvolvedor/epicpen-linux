@@ -55,6 +55,7 @@ def _install_qt_stubs():
 
     qtc.QObject = _FakeQObject
     qtc.pyqtSignal = _pyqtSignal
+    qtc.QTimer = MagicMock
 
     # Multimedia stubs
     qtm = _mod("PyQt6.QtMultimedia")
@@ -751,32 +752,32 @@ def test_transcode_falls_back_to_mpeg4():
     assert "libx264" not in cmd
 
 
-# ── Deduplicação de frames (encode-on-change) ─────────────────────────────────
+# ── Deduplicação de frames (encode-on-change, no capture_helper) ─────────────
 
-def test_is_duplicate_false_for_new_data():
-    recorder = rec.ScreenRecorder()
-    recorder._last_data = b"aaaa"
-    recorder._last_sent_ts = 100.0
-    assert recorder._is_duplicate(b"bbbb", 100.1) is False
+import capture_helper as ch  # noqa: E402  (após stubs Qt)
 
 
-def test_is_duplicate_true_for_same_data_within_interval():
-    recorder = rec.ScreenRecorder()
-    recorder._last_data = b"aaaa"
-    recorder._last_sent_ts = 100.0
-    assert recorder._is_duplicate(b"aaaa", 100.5) is True
+def test_should_send_new_data():
+    assert ch.should_send(b"bbbb", b"aaaa", 100.1, 100.0) is True
 
 
-def test_is_duplicate_false_after_resend_interval():
-    recorder = rec.ScreenRecorder()
-    recorder._last_data = b"aaaa"
-    recorder._last_sent_ts = 100.0
-    assert recorder._is_duplicate(b"aaaa", 101.5) is False
+def test_should_send_false_for_same_data_within_interval():
+    assert ch.should_send(b"aaaa", b"aaaa", 100.5, 100.0) is False
 
 
-def test_is_duplicate_false_when_no_previous_frame():
-    recorder = rec.ScreenRecorder()
-    assert recorder._is_duplicate(b"aaaa", 100.0) is False
+def test_should_send_after_resend_interval():
+    assert ch.should_send(b"aaaa", b"aaaa", 101.5, 100.0) is True
+
+
+def test_should_send_when_no_previous_frame():
+    assert ch.should_send(b"aaaa", None, 100.0, 0.0) is True
+
+
+def test_helper_cmd_uses_same_interpreter():
+    cmd = rec._helper_cmd("eDP-1")
+    assert cmd[0] == sys.executable
+    assert cmd[1].endswith("capture_helper.py")
+    assert cmd[2] == "eDP-1"
 
 
 # ── _build_ffmpeg_cmd (sem x264, fallback mpeg4) ─────────────────────────────
@@ -820,18 +821,6 @@ def test_start_returns_true_when_already_recording(monkeypatch):
 
 # ── ScreenRecorder._start_ffmpeg: falha no Popen ─────────────────────────────
 
-def _fake_frame(w=1920, h=1080, stride=None):
-    frame = MagicMock()
-    size = MagicMock()
-    size.width.return_value = w
-    size.height.return_value = h
-    frame.size.return_value = size
-    frame.map.return_value = stride is not None
-    frame.bytesPerLine.return_value = stride if stride is not None else 0
-    frame.pixelFormat.return_value = "Format_RGBA8888"
-    return frame
-
-
 def test_start_ffmpeg_emits_failed_on_popen_error(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "subprocess.Popen", MagicMock(side_effect=OSError("permission denied"))
@@ -843,9 +832,9 @@ def test_start_ffmpeg_emits_failed_on_popen_error(tmp_path, monkeypatch):
     recorder._rec_fps = 30
     recorder._rec_has_x264 = True
     recorder._dest = tmp_path / "out.mp4"
-    recorder._capture_dest = tmp_path / "out.mp4"
+    recorder._capture_dest = tmp_path / "out.mkv"
     recorder.failed = MagicMock()
-    assert recorder._start_ffmpeg(_fake_frame()) is False
+    assert recorder._start_ffmpeg(1920, 1080, 7680, "bgra") is False
     recorder.failed.emit.assert_called_once()
 
 

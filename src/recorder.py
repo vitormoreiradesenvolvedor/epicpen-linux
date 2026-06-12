@@ -1,18 +1,18 @@
 import glob
+import json
 import os
-import queue
 import shutil
+import sys
 import signal
 import subprocess
 import threading
-import time
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtMultimedia import QMediaCaptureSession, QScreenCapture, QVideoSink, QVideoFrame
+from PyQt6.QtMultimedia import QVideoFrame
 from PyQt6.QtGui import QImage
 
 from hostenv import host_env
@@ -349,7 +349,7 @@ def _build_ffmpeg_cmd(
     e os dois são montados no final com timestamps absolutos (-copyts).
 
     -vsync vfr preserva os timestamps wallclock sem duplicar frames — é o que
-    permite a deduplicação no _on_frame: tela estática gera zero trabalho de
+    permite a deduplicação no capture_helper: tela estática gera zero trabalho de
     encode e o player simplesmente segura o último frame.
 
     raw_intermediate: estratégia disk — copia rawvideo para .nut sem encodar.
@@ -633,6 +633,14 @@ def _build_transcode_cmd(ffmpeg: str, video: str, audio: Optional[str],
     ]
 
 
+def _helper_cmd(screen_name: str) -> list[str]:
+    """Comando do processo auxiliar de captura (mesmo intérprete/ambiente)."""
+    helper = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "capture_helper.py",
+    )
+    return [sys.executable, helper, screen_name]
+
+
 def _lower_priority():
     """preexec_fn: reduz niceness do ffmpeg para não roubar CPU do UI."""
     try:
@@ -648,24 +656,20 @@ class ScreenRecorder(QObject):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        # Sessão de captura criada POR GRAVAÇÃO (_setup_capture) e destruída
-        # no stop: reusar/abandonar a QScreenCapture deixa a sessão de
-        # ScreenCast do portal viva — um ícone de transmissão pendurado no
-        # KDE para cada gravação.
-        self._capture: Optional[QScreenCapture] = None
-        self._sink: Optional[QVideoSink] = None
-        self._session: Optional[QMediaCaptureSession] = None
+        # A captura roda num PROCESSO auxiliar (capture_helper.py): o Qt
+        # nunca fecha a sessão de ScreenCast do portal enquanto o processo
+        # vive (deleteLater/sip.delete não encerram o stream PipeWire —
+        # medido com pw-dump). O fim do helper derruba a conexão DBus e o
+        # portal fecha a sessão — sem ícone de transmissão pendurado no KDE.
+        self._helper: Optional[subprocess.Popen] = None
+        self._pump_thread: Optional[threading.Thread] = None
 
         self._proc: Optional[subprocess.Popen] = None
         self._dest: Optional[Path] = None
         self._active = False
-        # Profundidade real definida no _start_ffmpeg via _queue_frames (RAM)
-        self._frame_queue: queue.Queue[Optional[bytes]] = queue.Queue(maxsize=4)
-        self._writer_thread: Optional[threading.Thread] = None
-        self._start_lock = threading.Lock()
 
-        # Configurados em start(); _rec_w/_rec_h são refinados no primeiro
-        # frame real (resolução física do compositor, não a lógica do Qt)
+        # Configurados em start(); _rec_w/_rec_h são refinados pelo header
+        # do helper (resolução física do compositor, não a lógica do Qt)
         self._ffmpeg_path: Optional[str] = None
         self._rec_w = 0
         self._rec_h = 0
@@ -679,47 +683,10 @@ class ScreenRecorder(QObject):
         self._audio_proc: Optional[subprocess.Popen] = None
         self._audio_helpers: list[subprocess.Popen] = []  # parec(s)
         self._frame_nbytes = 0                     # stride×h — fatia exata p/ pipe
-        self._detected_fmt: Optional[str] = None
-
-        # Deduplicação de frames (encode-on-change): frames idênticos ao último
-        # enviado não vão para o encoder. bytes == bytes é memcmp em C com
-        # early-exit — em tela estática o custo é ~1 leitura de memória e o
-        # encoder fica 100% ocioso. Reenvio periódico limita o corte no fim.
-        self._last_data: Optional[bytes] = None
-        self._last_sent_ts = 0.0
-        self._dup_resend_interval = 1.0
 
     @property
     def is_recording(self) -> bool:
         return self._active
-
-    def _setup_capture(self):
-        """Cria a sessão de captura desta gravação."""
-        self._capture = QScreenCapture()
-        self._sink = QVideoSink()
-        self._session = QMediaCaptureSession()
-        self._session.setScreenCapture(self._capture)
-        self._session.setVideoSink(self._sink)
-        self._sink.videoFrameChanged.connect(self._on_frame)
-
-    def _teardown_capture(self):
-        """Encerra a sessão de ScreenCast de verdade (libera o ícone do KDE)."""
-        if self._sink is not None:
-            try:
-                self._sink.videoFrameChanged.disconnect(self._on_frame)
-            except TypeError:
-                pass
-        if self._capture is not None:
-            self._capture.stop()
-        if self._session is not None:
-            self._session.setScreenCapture(None)
-            self._session.setVideoSink(None)
-        for obj in (self._capture, self._sink, self._session):
-            if obj is not None:
-                obj.deleteLater()
-        self._capture = None
-        self._sink = None
-        self._session = None
 
     def start(self, screen=None) -> bool:
         """Inicia a gravação. screen: monitor a capturar (default: maior Hz)."""
@@ -752,10 +719,7 @@ class ScreenRecorder(QObject):
         self._rec_has_x264 = has_x264
         self._rec_vaapi_dev = vaapi_dev
         self._rec_audio_devs = _default_audio_devices() if audio_mode else []
-        self._detected_fmt = None
         self._proc = None
-        self._last_data = None
-        self._last_sent_ts = 0.0
         self._frame_nbytes = 0
 
         save_dir = _save_dir()
@@ -809,30 +773,72 @@ class ScreenRecorder(QObject):
                 self._audio_dest = None
                 self._audio_helpers = []
 
-        self._active = True
+        # Processo auxiliar de captura: a sessão de portal morre com ele
+        try:
+            self._helper = subprocess.Popen(
+                _helper_cmd(screen.name()),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as e:
+            self._stop_audio()
+            self._cleanup_temp(self._audio_dest)
+            self.failed.emit(f"Falha ao iniciar captura: {e}")
+            return False
 
-        self._setup_capture()
-        self._capture.setScreen(screen)
-        self._capture.start()
+        self._active = True
+        self._pump_thread = threading.Thread(
+            target=self._pump_loop, daemon=True, name="epicpen-pump",
+        )
+        self._pump_thread.start()
         self.started.emit()
         return True
 
-    def _start_ffmpeg(self, frame: QVideoFrame) -> bool:
-        """Inicia o processo ffmpeg. Chamado na primeira frame (thread multimedia).
+    def _pump_loop(self):
+        """Thread: lê o header + frames do helper e bombeia para o ffmpeg.
 
-        Lê do frame real a resolução física e o stride: o comando usa
-        stride/4 como largura (rawvideo é empacotado) e um filtro crop
-        devolve a área visível quando o compositor adiciona padding.
+        read/write de pipes liberam a GIL — o custo por frame na UI é zero.
+        A deduplicação acontece no helper; aqui é cópia cega de bytes.
         """
-        pix_fmt = _native_pix_fmt(frame)
-        size = frame.size()
-        w, h = size.width(), size.height()
-        stride = 0
-        if frame.map(QVideoFrame.MapMode.ReadOnly):
+        helper = self._helper
+        try:
+            header_line = helper.stdout.readline()
+            header = json.loads(header_line)
+            w = int(header["w"])
+            h = int(header["h"])
+            stride = int(header["stride"])
+            pix_fmt = str(header["pix_fmt"])
+        except Exception:
+            return  # helper morreu antes do 1º frame — stop() reporta
+
+        if not self._active:
+            return
+        if not self._start_ffmpeg(w, h, stride, pix_fmt):
+            return
+
+        n = self._frame_nbytes
+        read = helper.stdout.read
+        write = self._proc.stdin.write
+        while True:
+            data = read(n)
+            if not data or len(data) < n:
+                break  # EOF — helper terminou
             try:
-                stride = frame.bytesPerLine(0)
-            finally:
-                frame.unmap()
+                write(data)
+            except (BrokenPipeError, OSError, ValueError):
+                break
+        try:
+            self._proc.stdin.close()
+        except (OSError, ValueError):
+            pass
+
+    def _start_ffmpeg(self, w: int, h: int, stride: int, pix_fmt: str) -> bool:
+        """Inicia o processo ffmpeg com a geometria do header do helper.
+
+        O comando usa stride/4 como largura (rawvideo é empacotado) e um
+        filtro crop devolve a área visível quando há padding no stride.
+        """
         if w <= 0 or h <= 0:
             w, h = self._rec_w, self._rec_h
         if stride <= 0:
@@ -865,73 +871,41 @@ class ScreenRecorder(QObject):
             self.failed.emit(f"Falha ao iniciar ffmpeg: {e}")
             return False
 
-        # Pipe de 1MB: menos syscalls a 100+ MB/s de rawvideo
+        # Pipes de 1MB: menos syscalls a 100+ MB/s de rawvideo
         try:
             import fcntl
             F_SETPIPE_SZ = 1031  # Linux
             fcntl.fcntl(self._proc.stdin.fileno(), F_SETPIPE_SZ, 1 << 20)
+            if self._helper is not None:
+                fcntl.fcntl(self._helper.stdout.fileno(), F_SETPIPE_SZ, 1 << 20)
         except Exception:
             pass
-
-        # Fila dimensionada pela RAM disponível: amortece picos do encoder
-        depth = _queue_frames(self._frame_nbytes, _mem_available_bytes())
-        self._frame_queue = queue.Queue(maxsize=depth)
-
-        self._detected_fmt = pix_fmt
-        self._writer_thread = threading.Thread(
-            target=self._writer_loop, daemon=True, name="epicpen-recorder",
-        )
-        self._writer_thread.start()
         return True
 
     def stop(self):
         if not self._active:
             return
         self._active = False
-        self._teardown_capture()
-        self._last_data = None  # libera o frame retido pela deduplicação
 
-        if self._writer_thread:
-            # Esvazia a fila antes do sentinela: put() numa fila cheia
-            # bloquearia a UI; frames restantes já não interessam
+        # Encerra o helper de captura: o processo morre → portal fecha a
+        # sessão de ScreenCast → ícone de transmissão some do KDE
+        if self._helper is not None:
             try:
-                while True:
-                    self._frame_queue.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self._frame_queue.put_nowait(None)
-            except queue.Full:
-                pass
-            self._writer_thread.join(timeout=5)
-            self._writer_thread = None
-
-        # Áudio: para os parec primeiro (EOF nos pipes finaliza o ffmpeg
-        # graciosamente); sem helpers, SIGINT (input ao vivo nunca termina só)
-        for h in self._audio_helpers:
-            try:
-                h.terminate()
+                self._helper.terminate()
             except (ProcessLookupError, OSError):
                 pass
-        if self._audio_proc is not None:
-            if not self._audio_helpers:
-                try:
-                    self._audio_proc.send_signal(signal.SIGINT)
-                except (ProcessLookupError, OSError):
-                    pass
+        if self._pump_thread is not None:
+            self._pump_thread.join(timeout=5)
+            self._pump_thread = None
+        if self._helper is not None:
             try:
-                self._audio_proc.wait(timeout=10)
+                self._helper.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                self._audio_proc.kill()
-                self._audio_proc.wait()
-            self._audio_proc = None
-        for h in self._audio_helpers:
-            try:
-                h.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                h.kill()
-                h.wait()
-        self._audio_helpers = []
+                self._helper.kill()
+                self._helper.wait()
+            self._helper = None
+
+        self._stop_audio()
 
         if self._proc is not None:
             try:
@@ -962,6 +936,35 @@ class ScreenRecorder(QObject):
         else:
             self._cleanup_temp(self._audio_dest)
             self.failed.emit("Nenhum frame capturado.")
+
+    def _stop_audio(self):
+        """Encerra a captura de áudio: parec primeiro (EOF nos pipes finaliza
+        o ffmpeg graciosamente); sem helpers, SIGINT (input ao vivo nunca
+        termina sozinho)."""
+        for h in self._audio_helpers:
+            try:
+                h.terminate()
+            except (ProcessLookupError, OSError):
+                pass
+        if self._audio_proc is not None:
+            if not self._audio_helpers:
+                try:
+                    self._audio_proc.send_signal(signal.SIGINT)
+                except (ProcessLookupError, OSError):
+                    pass
+            try:
+                self._audio_proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self._audio_proc.kill()
+                self._audio_proc.wait()
+            self._audio_proc = None
+        for h in self._audio_helpers:
+            try:
+                h.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                h.kill()
+                h.wait()
+        self._audio_helpers = []
 
     @staticmethod
     def _cleanup_temp(path: Optional[Path]):
@@ -1011,60 +1014,3 @@ class ScreenRecorder(QObject):
             self.stopped.emit(str(dest))
         else:
             self.failed.emit(f"Montagem do vídeo falhou; captura mantida em {video}")
-
-    def _on_frame(self, frame: QVideoFrame):
-        if not self._active:
-            return
-
-        # Sem throttle: o compositor já entrega no máximo o Hz do monitor e a
-        # deduplicação corta o que não mudou. (O throttle antigo derrubava
-        # frames legítimos por jitter — até metade do FPS em rajadas regulares.)
-        now = time.monotonic()
-
-        # Lazy start: detecta formato/resolução reais e inicia o FFmpeg na 1ª frame
-        if self._proc is None:
-            with self._start_lock:
-                if self._proc is None:
-                    if not self._start_ffmpeg(frame):
-                        self._active = False
-                        return
-
-        data = _frame_to_bytes(frame, self._detected_fmt)
-        if data is None:
-            return
-        if self._frame_nbytes and len(data) > self._frame_nbytes:
-            data = data[:self._frame_nbytes]  # padding além de stride×h
-
-        # Encode-on-change: frame idêntico ao anterior não vai para o encoder.
-        if self._is_duplicate(data, now):
-            return
-        self._last_data = data
-        self._last_sent_ts = now
-
-        try:
-            self._frame_queue.put_nowait(data)
-        except queue.Full:
-            pass  # frame descartado — encoder não acompanha
-
-    def _is_duplicate(self, data: bytes, now: float) -> bool:
-        """True se o frame é idêntico ao último enviado e ainda não é hora do
-        reenvio periódico (que limita o corte de cauda do vídeo a ≤1s)."""
-        if data != self._last_data:
-            return False
-        return (now - self._last_sent_ts) < self._dup_resend_interval
-
-    def _writer_loop(self):
-        """Thread dedicada: lê frames da fila e escreve no stdin do ffmpeg.
-        Sem flush() — o pipe do SO gerencia o buffering.
-        """
-        while True:
-            data = self._frame_queue.get()
-            if data is None:
-                break
-            if self._proc is None or self._proc.poll() is not None:
-                break
-            try:
-                self._proc.stdin.write(data)
-            except (BrokenPipeError, OSError, ValueError):
-                # ValueError: stdin fechado pelo stop() enquanto escrevíamos
-                break
