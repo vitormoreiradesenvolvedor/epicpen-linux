@@ -139,6 +139,18 @@ def _has_libx264(ffmpeg: str) -> bool:
         return False
 
 
+def _has_aac(ffmpeg: str) -> bool:
+    """True se este ffmpeg inclui o encoder AAC."""
+    try:
+        r = subprocess.run(
+            [ffmpeg, "-encoders"],
+            capture_output=True, text=True, timeout=5, env=host_env(),
+        )
+        return " aac " in r.stdout
+    except Exception:
+        return False
+
+
 def _has_audio_support(ffmpeg: str) -> bool:
     """True se este ffmpeg captura PulseAudio/PipeWire E encoda AAC."""
     try:
@@ -148,13 +160,23 @@ def _has_audio_support(ffmpeg: str) -> bool:
         )
         if "pulse" not in r.stdout:
             return False
-        r = subprocess.run(
-            [ffmpeg, "-encoders"],
-            capture_output=True, text=True, timeout=5, env=host_env(),
-        )
-        return " aac " in r.stdout
     except Exception:
         return False
+    return _has_aac(ffmpeg)
+
+
+def _audio_mode(ffmpeg: str) -> Optional[str]:
+    """Como capturar áudio com este ffmpeg: 'pulse', 'parec' ou None.
+
+    pulse — o ffmpeg lê os devices diretamente (builds de distro).
+    parec — o ffmpeg não tem entrada pulse (build estático bundlado no
+    AppImage), mas o parec do sistema captura e entrega PCM cru via pipe.
+    """
+    if _has_audio_support(ffmpeg):
+        return "pulse"
+    if shutil.which("parec") and _has_aac(ffmpeg):
+        return "parec"
+    return None
 
 
 def _default_audio_devices() -> list[str]:
@@ -223,8 +245,8 @@ def _probe_vaapi(ffmpeg: str) -> Optional[str]:
     return found
 
 
-def _pick_ffmpeg() -> tuple[Optional[str], Optional[str], bool, bool]:
-    """Escolhe o melhor ffmpeg: (path, vaapi_device, has_x264, has_audio).
+def _pick_ffmpeg() -> tuple[Optional[str], Optional[str], bool, Optional[str]]:
+    """Escolhe o melhor ffmpeg: (path, vaapi_device, has_x264, audio_mode).
 
     Pontuação por capacidade: áudio (mic+alto-falantes) pesa mais que VAAPI,
     que pesa mais que libx264. O bundled do AppImage não tem pulse nem VAAPI,
@@ -232,13 +254,13 @@ def _pick_ffmpeg() -> tuple[Optional[str], Optional[str], bool, bool]:
     """
     cands = _ffmpeg_candidates()
     if not cands:
-        return None, None, False, False
+        return None, None, False, None
 
     best = None
     best_score = -1
     for c in cands:
         vaapi = _probe_vaapi(c)
-        audio = _has_audio_support(c)
+        audio = _audio_mode(c)
         x264 = _has_libx264(c)
         score = (4 if audio else 0) + (2 if vaapi else 0) + (1 if x264 else 0)
         if score > best_score:
@@ -482,6 +504,92 @@ def _audio_inputs(audio: Optional[str], audio_skip: float) -> list[str]:
     return pre + ["-i", audio]
 
 
+def _build_audio_cmd_parec(ffmpeg: str, fds: list[int], dest: str,
+                           duck: bool = False) -> list[str]:
+    """Comando do ffmpeg lendo PCM cru do parec via fds → .mka.
+
+    Para builds de ffmpeg sem entrada pulse (estático bundlado): um parec
+    por device entrega s16le/48k/stereo num pipe; o ffmpeg lê pipe:N.
+    fds[0] = mic, fds[1] = monitor (mesma ordem de _default_audio_devices).
+    """
+    base = [ffmpeg]
+    for fd in fds:
+        base += [
+            "-use_wallclock_as_timestamps", "1",
+            "-f", "s16le", "-ar", "48000", "-ac", "2",
+            "-thread_queue_size", "1024",
+            "-i", f"pipe:{fd}",
+        ]
+    if len(fds) >= 2:
+        if duck:
+            graph = (
+                "[0:a]asplit=2[mic][sc];"
+                "[1:a][sc]sidechaincompress="
+                "threshold=0.05:ratio=8:attack=50:release=400[game];"
+                "[mic][game]amix=inputs=2:duration=longest:normalize=0[aout]"
+            )
+        else:
+            graph = "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0[aout]"
+        maps = ["-filter_complex", graph, "-map", "[aout]"]
+    else:
+        maps = ["-map", "0:a"]
+    return base + maps + [
+        "-c:a", "aac", "-b:a", "160k", "-ac", "2",
+        "-copyts", "-y", dest,
+    ]
+
+
+def _spawn_parec_audio(ffmpeg: str, devices: list[str], dest: str,
+                       duck: bool):
+    """Sobe parec(s) + ffmpeg encadeados por pipes para capturar áudio.
+
+    Retorna (proc_ffmpeg, [procs_parec]) ou (None, []) em falha. Os parec
+    são terminados primeiro no stop — o EOF nos pipes finaliza o ffmpeg
+    graciosamente, sem sinal.
+    """
+    read_fds: list[int] = []
+    helpers: list[subprocess.Popen] = []
+    try:
+        for dev in devices:
+            r, w = os.pipe()
+            helper = subprocess.Popen(
+                ["parec", "--raw", "--format=s16le", "--rate=48000",
+                 "--channels=2", f"--device={dev}"],
+                stdin=subprocess.DEVNULL,
+                stdout=w,
+                stderr=subprocess.DEVNULL,
+                env=host_env(),
+            )
+            os.close(w)
+            read_fds.append(r)
+            helpers.append(helper)
+
+        cmd = _build_audio_cmd_parec(ffmpeg, read_fds, dest, duck=duck)
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            pass_fds=read_fds,
+            preexec_fn=_lower_priority,
+            env=host_env(),
+        )
+        return proc, helpers
+    except OSError:
+        for h in helpers:
+            try:
+                h.kill()
+            except OSError:
+                pass
+        return None, []
+    finally:
+        for r in read_fds:
+            try:
+                os.close(r)
+            except OSError:
+                pass
+
+
 def _build_remux_cmd(ffmpeg: str, video: str, audio: Optional[str],
                      dest: str, audio_skip: float = 0.0) -> list[str]:
     """Montagem final sem re-encode: vídeo .mkv (+ áudio .mka) → MP4.
@@ -540,12 +648,13 @@ class ScreenRecorder(QObject):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._capture = QScreenCapture()
-        self._sink = QVideoSink()
-        self._session = QMediaCaptureSession()
-        self._session.setScreenCapture(self._capture)
-        self._session.setVideoSink(self._sink)
-        self._sink.videoFrameChanged.connect(self._on_frame)
+        # Sessão de captura criada POR GRAVAÇÃO (_setup_capture) e destruída
+        # no stop: reusar/abandonar a QScreenCapture deixa a sessão de
+        # ScreenCast do portal viva — um ícone de transmissão pendurado no
+        # KDE para cada gravação.
+        self._capture: Optional[QScreenCapture] = None
+        self._sink: Optional[QVideoSink] = None
+        self._session: Optional[QMediaCaptureSession] = None
 
         self._proc: Optional[subprocess.Popen] = None
         self._dest: Optional[Path] = None
@@ -568,6 +677,7 @@ class ScreenRecorder(QObject):
         self._capture_dest: Optional[Path] = None  # .mkv (ou .nut em disk)
         self._audio_dest: Optional[Path] = None    # .mka do processo de áudio
         self._audio_proc: Optional[subprocess.Popen] = None
+        self._audio_helpers: list[subprocess.Popen] = []  # parec(s)
         self._frame_nbytes = 0                     # stride×h — fatia exata p/ pipe
         self._detected_fmt: Optional[str] = None
 
@@ -583,12 +693,40 @@ class ScreenRecorder(QObject):
     def is_recording(self) -> bool:
         return self._active
 
+    def _setup_capture(self):
+        """Cria a sessão de captura desta gravação."""
+        self._capture = QScreenCapture()
+        self._sink = QVideoSink()
+        self._session = QMediaCaptureSession()
+        self._session.setScreenCapture(self._capture)
+        self._session.setVideoSink(self._sink)
+        self._sink.videoFrameChanged.connect(self._on_frame)
+
+    def _teardown_capture(self):
+        """Encerra a sessão de ScreenCast de verdade (libera o ícone do KDE)."""
+        if self._sink is not None:
+            try:
+                self._sink.videoFrameChanged.disconnect(self._on_frame)
+            except TypeError:
+                pass
+        if self._capture is not None:
+            self._capture.stop()
+        if self._session is not None:
+            self._session.setScreenCapture(None)
+            self._session.setVideoSink(None)
+        for obj in (self._capture, self._sink, self._session):
+            if obj is not None:
+                obj.deleteLater()
+        self._capture = None
+        self._sink = None
+        self._session = None
+
     def start(self, screen=None) -> bool:
         """Inicia a gravação. screen: monitor a capturar (default: maior Hz)."""
         if self._active:
             return True
 
-        ffmpeg, vaapi_dev, has_x264, has_audio = _pick_ffmpeg()
+        ffmpeg, vaapi_dev, has_x264, audio_mode = _pick_ffmpeg()
         if not ffmpeg:
             self.failed.emit(
                 "ffmpeg não encontrado.\n"
@@ -613,7 +751,7 @@ class ScreenRecorder(QObject):
         self._ffmpeg_path = ffmpeg
         self._rec_has_x264 = has_x264
         self._rec_vaapi_dev = vaapi_dev
-        self._rec_audio_devs = _default_audio_devices() if has_audio else []
+        self._rec_audio_devs = _default_audio_devices() if audio_mode else []
         self._detected_fmt = None
         self._proc = None
         self._last_data = None
@@ -642,28 +780,38 @@ class ScreenRecorder(QObject):
         # timestamp absoluto, não por ordem de partida
         self._audio_dest = None
         self._audio_proc = None
-        if self._rec_audio_devs:
+        self._audio_helpers = []
+        if self._rec_audio_devs and audio_mode:
             self._audio_dest = save_dir / f".epicpen_rec_{ts}.mka"
             duck = (len(self._rec_audio_devs) >= 2
                     and _has_filter(ffmpeg, "sidechaincompress"))
-            acmd = _build_audio_cmd(
-                ffmpeg, self._rec_audio_devs, str(self._audio_dest),
-                duck=duck,
-            )
-            try:
-                self._audio_proc = subprocess.Popen(
-                    acmd,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    preexec_fn=_lower_priority,
+            if audio_mode == "parec":
+                self._audio_proc, self._audio_helpers = _spawn_parec_audio(
+                    ffmpeg, self._rec_audio_devs, str(self._audio_dest), duck,
                 )
-            except OSError:
-                self._audio_proc = None
+            else:
+                acmd = _build_audio_cmd(
+                    ffmpeg, self._rec_audio_devs, str(self._audio_dest),
+                    duck=duck,
+                )
+                try:
+                    self._audio_proc = subprocess.Popen(
+                        acmd,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        preexec_fn=_lower_priority,
+                        env=host_env(),
+                    )
+                except OSError:
+                    self._audio_proc = None
+            if self._audio_proc is None:
                 self._audio_dest = None
+                self._audio_helpers = []
 
         self._active = True
 
+        self._setup_capture()
         self._capture.setScreen(screen)
         self._capture.start()
         self.started.emit()
@@ -740,7 +888,7 @@ class ScreenRecorder(QObject):
         if not self._active:
             return
         self._active = False
-        self._capture.stop()
+        self._teardown_capture()
         self._last_data = None  # libera o frame retido pela deduplicação
 
         if self._writer_thread:
@@ -758,18 +906,32 @@ class ScreenRecorder(QObject):
             self._writer_thread.join(timeout=5)
             self._writer_thread = None
 
-        # Áudio: SIGINT gracioso (input ao vivo nunca termina sozinho)
-        if self._audio_proc is not None:
+        # Áudio: para os parec primeiro (EOF nos pipes finaliza o ffmpeg
+        # graciosamente); sem helpers, SIGINT (input ao vivo nunca termina só)
+        for h in self._audio_helpers:
             try:
-                self._audio_proc.send_signal(signal.SIGINT)
+                h.terminate()
             except (ProcessLookupError, OSError):
                 pass
+        if self._audio_proc is not None:
+            if not self._audio_helpers:
+                try:
+                    self._audio_proc.send_signal(signal.SIGINT)
+                except (ProcessLookupError, OSError):
+                    pass
             try:
                 self._audio_proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 self._audio_proc.kill()
                 self._audio_proc.wait()
             self._audio_proc = None
+        for h in self._audio_helpers:
+            try:
+                h.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                h.kill()
+                h.wait()
+        self._audio_helpers = []
 
         if self._proc is not None:
             try:

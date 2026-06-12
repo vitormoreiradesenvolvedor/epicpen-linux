@@ -370,19 +370,19 @@ def test_pick_prefers_vaapi(monkeypatch):
         lambda f: "/dev/dri/renderD128" if f == "/usr/bin/ffmpeg" else None,
     )
     monkeypatch.setattr(rec, "_has_libx264", lambda f: True)
-    monkeypatch.setattr(rec, "_has_audio_support", lambda f: False)
+    monkeypatch.setattr(rec, "_audio_mode", lambda f: None)
     path, dev, x264, audio = rec._pick_ffmpeg()
     assert path == "/usr/bin/ffmpeg"
     assert dev == "/dev/dri/renderD128"
     assert x264 is True
-    assert audio is False
+    assert audio is None
 
 
 def test_pick_falls_back_to_x264(monkeypatch):
     monkeypatch.setattr(rec, "_ffmpeg_candidates", lambda: ["/app/ffmpeg", "/usr/bin/ffmpeg"])
     monkeypatch.setattr(rec, "_probe_vaapi", lambda f: None)
     monkeypatch.setattr(rec, "_has_libx264", lambda f: f == "/app/ffmpeg")
-    monkeypatch.setattr(rec, "_has_audio_support", lambda f: False)
+    monkeypatch.setattr(rec, "_audio_mode", lambda f: None)
     path, dev, x264, audio = rec._pick_ffmpeg()
     assert path == "/app/ffmpeg"
     assert dev is None
@@ -393,7 +393,7 @@ def test_pick_last_resort_mpeg4(monkeypatch):
     monkeypatch.setattr(rec, "_ffmpeg_candidates", lambda: ["/usr/bin/ffmpeg"])
     monkeypatch.setattr(rec, "_probe_vaapi", lambda f: None)
     monkeypatch.setattr(rec, "_has_libx264", lambda f: False)
-    monkeypatch.setattr(rec, "_has_audio_support", lambda f: False)
+    monkeypatch.setattr(rec, "_audio_mode", lambda f: None)
     path, dev, x264, audio = rec._pick_ffmpeg()
     assert path == "/usr/bin/ffmpeg"
     assert dev is None
@@ -408,15 +408,16 @@ def test_pick_audio_outweighs_vaapi(monkeypatch):
         lambda f: "/dev/dri/renderD128" if f == "/app/ffmpeg" else None,
     )
     monkeypatch.setattr(rec, "_has_libx264", lambda f: True)
-    monkeypatch.setattr(rec, "_has_audio_support", lambda f: f == "/usr/bin/ffmpeg")
+    monkeypatch.setattr(rec, "_audio_mode",
+                    lambda f: "pulse" if f == "/usr/bin/ffmpeg" else None)
     path, dev, x264, audio = rec._pick_ffmpeg()
     assert path == "/usr/bin/ffmpeg"
-    assert audio is True
+    assert audio == "pulse"
 
 
 def test_pick_returns_none_without_ffmpeg(monkeypatch):
     monkeypatch.setattr(rec, "_ffmpeg_candidates", lambda: [])
-    assert rec._pick_ffmpeg() == (None, None, False, False)
+    assert rec._pick_ffmpeg() == (None, None, False, None)
 
 
 # ── Áudio: _build_audio_cmd (processo separado) ──────────────────────────────
@@ -482,6 +483,49 @@ def test_has_filter_false_and_cached(monkeypatch):
     assert rec._has_filter("/usr/bin/ffmpeg", "sidechaincompress") is False
     rec._has_filter("/usr/bin/ffmpeg", "sidechaincompress")
     assert run.call_count == 1
+
+
+# ── _audio_mode / _build_audio_cmd_parec ──────────────────────────────────────
+
+def test_audio_mode_pulse_when_ffmpeg_has_it(monkeypatch):
+    monkeypatch.setattr(rec, "_has_audio_support", lambda f: True)
+    assert rec._audio_mode("/usr/bin/ffmpeg") == "pulse"
+
+
+def test_audio_mode_parec_fallback(monkeypatch):
+    monkeypatch.setattr(rec, "_has_audio_support", lambda f: False)
+    monkeypatch.setattr("shutil.which", lambda t: "/usr/bin/parec")
+    monkeypatch.setattr(rec, "_has_aac", lambda f: True)
+    assert rec._audio_mode("/app/ffmpeg") == "parec"
+
+
+def test_audio_mode_none_without_parec(monkeypatch):
+    monkeypatch.setattr(rec, "_has_audio_support", lambda f: False)
+    monkeypatch.setattr("shutil.which", lambda t: None)
+    assert rec._audio_mode("/app/ffmpeg") is None
+
+
+def test_parec_cmd_two_fds_amix():
+    cmd = rec._build_audio_cmd_parec("/app/ffmpeg", [3, 4], "/tmp/a.mka")
+    assert "pipe:3" in cmd
+    assert "pipe:4" in cmd
+    assert cmd.count("s16le") == 2
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert "amix=inputs=2" in fc
+    assert "-copyts" in cmd
+
+
+def test_parec_cmd_duck():
+    cmd = rec._build_audio_cmd_parec("/app/ffmpeg", [3, 4], "/tmp/a.mka", duck=True)
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert "sidechaincompress" in fc
+
+
+def test_parec_cmd_single_fd():
+    cmd = rec._build_audio_cmd_parec("/app/ffmpeg", [5], "/tmp/a.mka")
+    assert "pipe:5" in cmd
+    assert "-filter_complex" not in cmd
+    assert cmd[cmd.index("-map") + 1] == "0:a"
 
 
 # ── _build_remux_cmd (montagem final) ─────────────────────────────────────────
