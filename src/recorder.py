@@ -392,11 +392,38 @@ def _build_ffmpeg_cmd(
     return base + encode + ["-an", "-vsync", "vfr", "-copyts", "-y", dest]
 
 
-def _build_audio_cmd(ffmpeg: str, devices: list[str], dest: str) -> list[str]:
+# Cache de filtros disponíveis por binário ffmpeg
+_FILTER_CACHE: dict[tuple[str, str], bool] = {}
+
+
+def _has_filter(ffmpeg: str, name: str) -> bool:
+    """True se este build do ffmpeg inclui o filtro de áudio/vídeo dado."""
+    key = (ffmpeg, name)
+    cached = _FILTER_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        r = subprocess.run(
+            [ffmpeg, "-filters"],
+            capture_output=True, text=True, timeout=5,
+        )
+        ok = f" {name} " in r.stdout
+    except Exception:
+        ok = False
+    _FILTER_CACHE[key] = ok
+    return ok
+
+
+def _build_audio_cmd(ffmpeg: str, devices: list[str], dest: str,
+                     duck: bool = False) -> list[str]:
     """Comando do processo de ÁUDIO: pulse (mic e/ou monitor) → .mka.
 
     Processo separado do vídeo de propósito; timestamps wallclock + -copyts
     preservam a época real de captura para o sync exato na montagem.
+
+    duck: com mic (input 0) + alto-falantes (input 1), o áudio do sistema é
+    comprimido pelo sinal do mic (sidechain ducking) — a voz nunca é
+    abafada pelo som do jogo, como em mesas de streaming.
     """
     base = [ffmpeg]
     for dev in devices:
@@ -405,12 +432,17 @@ def _build_audio_cmd(ffmpeg: str, devices: list[str], dest: str) -> list[str]:
             "-f", "pulse", "-thread_queue_size", "1024", "-i", dev,
         ]
     if len(devices) >= 2:
-        # Mic + alto-falantes mixados; normalize=0 evita cortar o volume pela metade
-        maps = [
-            "-filter_complex",
-            "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0[aout]",
-            "-map", "[aout]",
-        ]
+        if duck:
+            graph = (
+                "[0:a]asplit=2[mic][sc];"
+                "[1:a][sc]sidechaincompress="
+                "threshold=0.05:ratio=8:attack=50:release=400[game];"
+                "[mic][game]amix=inputs=2:duration=longest:normalize=0[aout]"
+            )
+        else:
+            # normalize=0 evita cortar o volume dos dois pela metade
+            graph = "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0[aout]"
+        maps = ["-filter_complex", graph, "-map", "[aout]"]
     else:
         maps = ["-map", "0:a"]
     return base + maps + [
@@ -610,8 +642,11 @@ class ScreenRecorder(QObject):
         self._audio_proc = None
         if self._rec_audio_devs:
             self._audio_dest = save_dir / f".epicpen_rec_{ts}.mka"
+            duck = (len(self._rec_audio_devs) >= 2
+                    and _has_filter(ffmpeg, "sidechaincompress"))
             acmd = _build_audio_cmd(
                 ffmpeg, self._rec_audio_devs, str(self._audio_dest),
+                duck=duck,
             )
             try:
                 self._audio_proc = subprocess.Popen(

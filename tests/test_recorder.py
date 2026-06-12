@@ -446,6 +446,44 @@ def test_audio_cmd_uses_wallclock():
     assert "-use_wallclock_as_timestamps" in cmd
 
 
+def test_audio_cmd_duck_uses_sidechain():
+    """Ducking: o som do sistema é comprimido pelo sinal do mic."""
+    cmd = rec._build_audio_cmd(
+        "/usr/bin/ffmpeg", ["mic_dev", "sink.monitor"], "/tmp/aud.mka",
+        duck=True,
+    )
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert "sidechaincompress" in fc
+    assert "amix=inputs=2" in fc
+    assert fc.startswith("[0:a]asplit")  # mic alimenta o sidechain
+
+
+def test_audio_cmd_duck_ignored_with_one_device():
+    cmd = rec._build_audio_cmd(
+        "/usr/bin/ffmpeg", ["mic_dev"], "/tmp/aud.mka", duck=True,
+    )
+    assert "-filter_complex" not in cmd
+
+
+def test_has_filter_true(monkeypatch):
+    monkeypatch.setattr(rec, "_FILTER_CACHE", {})
+    r = MagicMock()
+    r.stdout = " ..C sidechaincompress AA->A  Sidechain compressor."
+    monkeypatch.setattr("subprocess.run", MagicMock(return_value=r))
+    assert rec._has_filter("/usr/bin/ffmpeg", "sidechaincompress") is True
+
+
+def test_has_filter_false_and_cached(monkeypatch):
+    monkeypatch.setattr(rec, "_FILTER_CACHE", {})
+    r = MagicMock()
+    r.stdout = " ..C amix  N->A  Mix."
+    run = MagicMock(return_value=r)
+    monkeypatch.setattr("subprocess.run", run)
+    assert rec._has_filter("/usr/bin/ffmpeg", "sidechaincompress") is False
+    rec._has_filter("/usr/bin/ffmpeg", "sidechaincompress")
+    assert run.call_count == 1
+
+
 # ── _build_remux_cmd (montagem final) ─────────────────────────────────────────
 
 def test_remux_with_audio_copies_both():

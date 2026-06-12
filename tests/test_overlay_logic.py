@@ -141,6 +141,7 @@ _cursors_mod = _types.ModuleType("cursors")
 _cursors_mod.make_pen_cursor       = MagicMock(return_value=MagicMock())
 _cursors_mod.make_eraser_cursor    = MagicMock(return_value=MagicMock())
 _cursors_mod.make_crosshair_cursor = MagicMock(return_value=MagicMock())
+_cursors_mod.make_arrow_cursor     = MagicMock(return_value=MagicMock())
 sys.modules["cursors"] = _cursors_mod
 
 # Agora podemos importar overlay sem PyQt6 real

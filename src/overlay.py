@@ -6,7 +6,10 @@ from PyQt6.QtGui import (
     QPainter, QPen, QColor, QScreen, QPainterPath,
     QRadialGradient, QBrush, QPixmap, QFont, QFontMetrics,
 )
-from cursors import make_pen_cursor, make_eraser_cursor, make_crosshair_cursor
+from cursors import (
+    make_pen_cursor, make_eraser_cursor, make_crosshair_cursor,
+    make_arrow_cursor,
+)
 
 LASER_TRAIL_LEN = 18
 
@@ -158,7 +161,8 @@ class OverlayWindow(QWidget):
         elif self._tool == "eraser":
             self.setCursor(make_eraser_cursor(self._size))
         elif self._tool in ("line", "rect", "circle"):
-            self.setCursor(make_crosshair_cursor())
+            # Seta de alta visibilidade — a mira fina sumia em telas claras
+            self.setCursor(make_arrow_cursor(self._color))
         elif self._tool == "drag":
             self.setCursor(Qt.CursorShape.OpenHandCursor)
         elif self._tool == "text":
@@ -186,6 +190,8 @@ class OverlayWindow(QWidget):
         self._color = color
         if self._tool in ("pen", "highlighter"):
             self.setCursor(make_pen_cursor(color))
+        elif self._tool in ("line", "rect", "circle"):
+            self.setCursor(make_arrow_cursor(color))
 
     def set_size(self, size: int):
         self._size = size
@@ -1095,6 +1101,18 @@ class OverlayWindow(QWidget):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
             return
+
+        # Botão direito com ferramenta de criação: Limpar a tela
+        # (ignorado sobre a toolbar embutida — lá o clique é da UI)
+        if (event.button() == Qt.MouseButton.RightButton and self._active
+                and not self._drawing
+                and self._tool in ("pen", "highlighter", "line",
+                                   "rect", "circle", "text")):
+            tb = self._toolbar_widget
+            if tb is None or not tb.geometry().contains(event.pos()):
+                self.clear()
+                event.accept()
+                return
 
         if not self._active or event.button() != Qt.MouseButton.LeftButton:
             return
