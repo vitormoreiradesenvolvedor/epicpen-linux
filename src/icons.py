@@ -103,31 +103,24 @@ def laser() -> QIcon:
 # ── Ações ─────────────────────────────────────────────────────────────────────
 
 def undo() -> QIcon:
+    """Seta reta ← estilo botão 'voltar' de navegador."""
     def draw(p):
-        p.setPen(QPen(_W, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+        p.setPen(QPen(_W, 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
                       Qt.PenJoinStyle.RoundJoin))
-        path = QPainterPath()
-        path.moveTo(16, 7); path.arcTo(QRectF(5, 7, 12, 10), 60, 200)
-        p.drawPath(path)
-        # Ponta da seta
-        p.setBrush(QBrush(_W)); p.setPen(Qt.PenStyle.NoPen)
-        arr = QPainterPath()
-        arr.moveTo(5, 6); arr.lineTo(9, 6); arr.lineTo(7, 10)
-        arr.closeSubpath(); p.drawPath(arr)
+        p.drawLine(QPointF(4.5, 11), QPointF(18.5, 11))
+        p.drawLine(QPointF(4.5, 11), QPointF(10.5, 5))
+        p.drawLine(QPointF(4.5, 11), QPointF(10.5, 17))
     return _make(draw)
 
 
 def redo() -> QIcon:
+    """Seta reta → estilo botão 'avançar' de navegador."""
     def draw(p):
-        p.setPen(QPen(_W, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+        p.setPen(QPen(_W, 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
                       Qt.PenJoinStyle.RoundJoin))
-        path = QPainterPath()
-        path.moveTo(6, 7); path.arcTo(QRectF(5, 7, 12, 10), 120, -200)
-        p.drawPath(path)
-        p.setBrush(QBrush(_W)); p.setPen(Qt.PenStyle.NoPen)
-        arr = QPainterPath()
-        arr.moveTo(17, 6); arr.lineTo(13, 6); arr.lineTo(15, 10)
-        arr.closeSubpath(); p.drawPath(arr)
+        p.drawLine(QPointF(3.5, 11), QPointF(17.5, 11))
+        p.drawLine(QPointF(17.5, 11), QPointF(11.5, 5))
+        p.drawLine(QPointF(17.5, 11), QPointF(11.5, 17))
     return _make(draw)
 
 
@@ -334,6 +327,28 @@ def exit_btn(hover: bool = False) -> QIcon:
         p.drawLine(QPointF(11, 2), QPointF(11, 11))
     return _make(draw)
 
+
+
+def record() -> QIcon:
+    def draw(p):
+        # Círculo vermelho sólido — ícone universal de "gravar"
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(QColor(220, 60, 60)))
+        p.drawEllipse(QRectF(4, 4, 14, 14))
+        # Anel externo branco tênue
+        p.setPen(QPen(QColor(230, 230, 230, 120), 1.2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(QRectF(2, 2, 18, 18))
+    return _make(draw)
+
+
+def record_stop() -> QIcon:
+    def draw(p):
+        # Quadrado branco sólido — ícone universal de "parar"
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(QColor(230, 230, 230)))
+        p.drawRoundedRect(QRectF(5, 5, 12, 12), 1.5, 1.5)
+    return _make(draw)
 
 
 def logo() -> QIcon:
