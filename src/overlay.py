@@ -28,6 +28,9 @@ class OverlayWindow(QWidget):
     text_placement_requested = pyqtSignal(QPoint)
     # Emitido quando duplo-clique num texto existente em drag mode (int = índice do stroke).
     text_edit_requested = pyqtSignal(int)
+    # Posição do cursor (coords locais do overlay) a cada movimento. A lupa
+    # usa isto no Wayland: QCursor.pos() global não é confiável com layer-shell.
+    cursor_moved = pyqtSignal(QPoint)
 
     def __init__(self):
         super().__init__()
@@ -59,6 +62,7 @@ class OverlayWindow(QWidget):
         # modos de fundo
         self._whiteboard = False
         self._spotlight = False
+        self._magnifier_tracking = False   # lupa ativa: rastreia hover
         self._spotlight_pos: QPoint | None = None
         self._spotlight_radius = 150
 
@@ -1285,6 +1289,7 @@ class OverlayWindow(QWidget):
 
     def mouseMoveEvent(self, event):
         pos = event.pos()
+        self.cursor_moved.emit(pos)
 
         # Pan whiteboard com botão do meio
         if self._wb_panning and self._wb_pan_start_mouse is not None:
@@ -1782,4 +1787,10 @@ class OverlayWindow(QWidget):
         self.setMouseTracking(
             (self._tool == "laser") or self._spotlight
             or self._whiteboard or (self._tool == "drag")
+            or self._magnifier_tracking
         )
+
+    def set_magnifier_tracking(self, on: bool):
+        """Lupa ativa: liga o hover tracking para alimentar cursor_moved."""
+        self._magnifier_tracking = on
+        self._update_tracking()

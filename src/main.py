@@ -53,10 +53,15 @@ import layershell
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("EpicPen")
-    app.setApplicationVersion("1.0.11")
+    app.setApplicationVersion("1.0.12")
     app.setQuitOnLastWindowClosed(False)
 
     settings = cfg.load()
+
+    # KDE Wayland: autoriza a captura silenciosa via KWin ScreenShot2
+    # (lupa/screenshot sem diálogo de portal). Só tem efeito no AppImage.
+    import kwinshot
+    kwinshot.ensure_authorization()
 
     overlay = OverlayWindow()
     toolbar = ToolbarWindow(overlay, config=settings)
@@ -127,6 +132,16 @@ def main():
     toolbar._lsw_ptr = _lsw_t
     toolbar._lsw_pos = _tb_abs  # coordenadas absolutas — referência interna
 
+    # Lupa → Layer::Overlay no mesmo monitor. Janela comum não se move
+    # sozinha no Wayland (move() é ignorado pelo compositor); com layer-shell
+    # ela segue o cursor via margens (move_to). O apply acontece dentro da
+    # lupa, na 1ª ativação — nunca no arranque (ver magnifier.py).
+    if _lsw_o:
+        toolbar._magnifier.enable_layershell(_tb_screen)
+
+    # Ao sair: descarrega o script de cursor do KWin e o helper de captura
+    app.aboutToQuit.connect(lambda: toolbar._magnifier.set_active(False))
+
     overlay._layer_shell_active = bool(_lsw_o)
     overlay._lsw_ptr = _lsw_o   # ponteiro para mudança dinâmica de layer
 
@@ -172,6 +187,15 @@ def main():
         QGuiApplication.instance().focusWindowChanged.connect(
             lambda _: _ka_timer.start()
         )
+
+    # Arranca já em modo apresentação: toolbar auto-oculta com reveal na
+    # borda e sobe para Layer::Overlay (acima de apps fullscreen). O
+    # singleShot deixa as superfícies mapearem antes do set_layer — mesmo
+    # caminho do F11 em runtime.
+    def _start_presentation():
+        toolbar._btn_present.setChecked(True)
+        toolbar._toggle_presentation(True)
+    QTimer.singleShot(300, _start_presentation)
 
     # Iniciar oculto se a opção estiver activa
     if settings.get("start_hidden", False):
