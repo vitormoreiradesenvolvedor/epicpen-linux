@@ -65,6 +65,51 @@ def make_eraser_cursor(brush_size: int = 3) -> QCursor:
     return QCursor(px, side // 2, side // 2)   # hot-spot = centro
 
 
+def make_arrow_cursor(color: QColor | None = None) -> QCursor:
+    """Seta de mouse de alta visibilidade para ferramentas de forma.
+
+    Seta clássica branca com contorno preto espesso e sombra — visível
+    sobre qualquer fundo (a mira fina sumia em telas claras/escuras).
+    Um ponto colorido junto à base indica a cor da forma ativa.
+    """
+    SIZE = 30
+    px = QPixmap(SIZE, SIZE)
+    px.fill(Qt.GlobalColor.transparent)
+    p = QPainter(px)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    def _arrow_path(dx: float, dy: float) -> QPainterPath:
+        a = QPainterPath()
+        a.moveTo(1 + dx, 1 + dy)
+        a.lineTo(1 + dx, 21 + dy)
+        a.lineTo(6 + dx, 16 + dy)
+        a.lineTo(10 + dx, 25 + dy)
+        a.lineTo(14 + dx, 23 + dy)
+        a.lineTo(10 + dx, 14.5 + dy)
+        a.lineTo(17 + dx, 14.5 + dy)
+        a.closeSubpath()
+        return a
+
+    # Sombra deslocada — descola a seta do fundo
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(QColor(0, 0, 0, 90)))
+    p.drawPath(_arrow_path(2.0, 2.0))
+
+    # Corpo branco com contorno preto espesso
+    p.setPen(QPen(QColor(0, 0, 0, 235), 2.0))
+    p.setBrush(QBrush(QColor(255, 255, 255)))
+    p.drawPath(_arrow_path(0.0, 0.0))
+
+    # Ponto com a cor da ferramenta
+    if color is not None:
+        p.setPen(QPen(QColor(255, 255, 255), 1.5))
+        p.setBrush(QBrush(color))
+        p.drawEllipse(19, 19, 9, 9)
+
+    p.end()
+    return QCursor(px, 1, 1)   # hot-spot = ponta da seta
+
+
 def make_crosshair_cursor() -> QCursor:
     """Mira fina para ferramentas de forma (linha, rect, elipse)."""
     SIZE = 24

@@ -69,11 +69,28 @@ jobs:
           path: tools/appimagetool
           key: appimagetool-continuous-x86_64
 
+      - name: Cache — ffmpeg GPL (libx264, screen recording)
+        uses: actions/cache@v4
+        with:
+          path: tools/ffmpeg-gpl
+          key: ffmpeg-gpl-x264-7.1-ubuntu22-v1
+
+      - name: Cache — grim (captura de região wlroots)
+        uses: actions/cache@v4
+        with:
+          path: |
+            tools/grim
+            tools/wayland-protocols
+          key: grim-1.5.0-ubuntu22-v1
+
       - name: Instalar dependências de sistema
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            curl binutils tar libfuse2
+            curl binutils tar libfuse2 \
+            nasm pkg-config \
+            meson ninja-build libwayland-dev libwayland-bin \
+            libpixman-1-dev libpng-dev
 
       - name: Descarregar appimagetool
         if: steps.cache-appimagetool.outputs.cache-hit != 'true'

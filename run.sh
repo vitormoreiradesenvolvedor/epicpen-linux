@@ -12,7 +12,8 @@ export QT_ACCESSIBILITY=0
 
 PYTHON="$SCRIPT_DIR/.venv/bin/python"
 if [ ! -x "$PYTHON" ]; then
-    echo "[run.sh] venv não encontrado em .venv/ — rode: python3 -m venv .venv --system-site-packages && .venv/bin/pip install 'PyQt6==6.10.1'"
+    echo "[run.sh] venv não encontrado em .venv/ — rode: python3 -m venv --copies .venv --system-site-packages && .venv/bin/pip install 'PyQt6==6.10.1'"
+    echo "         (--copies: intérprete próprio → captura silenciosa via KWin autorizável)"
     exit 1
 fi
 
