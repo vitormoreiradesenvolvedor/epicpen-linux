@@ -16,6 +16,12 @@ OUTPUT="$ROOT/EpicPen-${VERSION}-${ARCH}.AppImage"
 FFMPEG_GPL_CACHE="$ROOT/tools/ffmpeg-gpl"
 FFMPEG_GPL_BIN="$FFMPEG_GPL_CACHE/ffmpeg"
 
+# Cache do grim compilado — captura de região para a lupa/screenshot em
+# compositores wlroots (Hyprland, Sway...) sem depender do sistema
+GRIM_VERSION="1.5.0"
+GRIM_CACHE="$ROOT/tools/grim"
+GRIM_BIN="$GRIM_CACHE/grim"
+
 echo "══════════════════════════════════════════"
 echo "  EpicPen Linux — Build AppImage v${VERSION}"
 echo "══════════════════════════════════════════"
@@ -169,6 +175,101 @@ build_recorder_ffmpeg() {
   cp "$FFMPEG_GPL_BIN" "$APPDIR/usr/bin/ffmpeg"
 }
 
+# ── 0c. Compila grim para captura de região (lupa) em wlroots ────────────────
+# Binário pequeno (~50 KB) cacheado em tools/grim/. O grim só funciona em
+# compositores com wlr-screencopy/ext-image-copy-capture (Hyprland, Sway...);
+# no KDE a captura silenciosa é via KWin ScreenShot2 (kwinshot.py) e no GNOME
+# via portal (livegrab.py). Em caso de falha avisa e continua.
+build_bundled_grim() {
+  if [ -x "$GRIM_BIN" ]; then
+    echo "→ grim em cache ($(du -sh "$GRIM_BIN" | cut -f1))."
+    cp "$GRIM_BIN" "$APPDIR/usr/bin/grim"
+    return
+  fi
+
+  echo "→ Compilando grim ${GRIM_VERSION} (captura de região wlroots)..."
+
+  for dep in gcc pkg-config git curl; do
+    if ! command -v "$dep" &>/dev/null; then
+      echo "  AVISO: '$dep' não encontrado — grim não será bundlado."
+      return
+    fi
+  done
+  for pc in wayland-client wayland-scanner pixman-1 libpng; do
+    if ! pkg-config --exists "$pc" 2>/dev/null; then
+      echo "  AVISO: falta o pacote dev de '$pc' — grim não será bundlado."
+      return
+    fi
+  done
+
+  # meson + ninja: usa os do sistema; senão venv cacheado com o Python standalone
+  local MESON_DIR=""
+  if ! command -v meson &>/dev/null || ! command -v ninja &>/dev/null; then
+    local MVENV="$ROOT/tools/meson-venv"
+    if [ ! -x "$MVENV/bin/meson" ]; then
+      echo "  meson/ninja ausentes — a instalar em tools/meson-venv..."
+      "$PYTHON_BIN" -m venv "$MVENV"
+      "$MVENV/bin/pip" install --quiet meson ninja
+    fi
+    MESON_DIR="$MVENV/bin"
+  fi
+
+  # wayland-protocols >= 1.37 (Ubuntu 22.04 traz 1.25) — vendorizado em tools/
+  local WP_PKGCONFIG=""
+  if ! pkg-config --atleast-version=1.37 wayland-protocols 2>/dev/null; then
+    local WP_VERSION="1.45"
+    local WP_PREFIX="$ROOT/tools/wayland-protocols"
+    if [ ! -f "$WP_PREFIX/share/pkgconfig/wayland-protocols.pc" ]; then
+      echo "  wayland-protocols do sistema < 1.37 — a vendorizar ${WP_VERSION}..."
+      local WP_TMP
+      WP_TMP=$(mktemp -d -t epicpen-wp-XXXXXX)
+      if ! (
+        set -euo pipefail
+        curl -fsSL --connect-timeout 30 \
+          "https://gitlab.freedesktop.org/wayland/wayland-protocols/-/releases/${WP_VERSION}/downloads/wayland-protocols-${WP_VERSION}.tar.xz" \
+          -o "$WP_TMP/wp.tar.xz"
+        tar -xf "$WP_TMP/wp.tar.xz" -C "$WP_TMP"
+        cd "$WP_TMP/wayland-protocols-${WP_VERSION}"
+        PATH="${MESON_DIR:+$MESON_DIR:}$PATH" \
+          meson setup build --prefix="$WP_PREFIX" -Dtests=false > /dev/null
+        PATH="${MESON_DIR:+$MESON_DIR:}$PATH" \
+          meson install -C build > /dev/null
+      ); then
+        echo "  AVISO: vendorização do wayland-protocols falhou — grim não será bundlado."
+        rm -rf "$WP_TMP"
+        return
+      fi
+      rm -rf "$WP_TMP"
+    fi
+    WP_PKGCONFIG="$WP_PREFIX/share/pkgconfig"
+  fi
+
+  local BUILD_TMP
+  BUILD_TMP=$(mktemp -d -t epicpen-grim-XXXXXX)
+  if ! (
+    set -euo pipefail
+    git clone --depth 1 -q --branch "v${GRIM_VERSION}" \
+      "https://gitlab.freedesktop.org/emersion/grim.git" "$BUILD_TMP/grim"
+    cd "$BUILD_TMP/grim"
+    PATH="${MESON_DIR:+$MESON_DIR:}$PATH" \
+    PKG_CONFIG_PATH="${WP_PKGCONFIG}${WP_PKGCONFIG:+:}${PKG_CONFIG_PATH:-}" \
+      meson setup build --buildtype=release -Djpeg=disabled -Dwerror=false \
+      > /dev/null
+    PATH="${MESON_DIR:+$MESON_DIR:}$PATH" ninja -C build > /dev/null
+    strip --strip-unneeded build/grim
+    mkdir -p "$GRIM_CACHE"
+    cp build/grim "$GRIM_BIN"
+    chmod +x "$GRIM_BIN"
+  ); then
+    echo "  AVISO: compilação do grim falhou — captura usará ferramentas do sistema."
+    rm -rf "$BUILD_TMP"
+    return
+  fi
+  rm -rf "$BUILD_TMP"
+  cp "$GRIM_BIN" "$APPDIR/usr/bin/grim"
+  echo "  → grim bundlado: $(du -sh "$GRIM_BIN" | cut -f1)"
+}
+
 # ── 1. Gera ícone PNG ──────────────────────────────────────────────────
 echo "→ Gerando ícone..."
 python3 "$SCRIPT_DIR/generate_icon.py"
@@ -187,6 +288,9 @@ mkdir -p \
 
 # ── 2b. ffmpeg GPL (libx264) para screen recording ───────────────────
 build_recorder_ffmpeg
+
+# ── 2c. grim para captura de região (lupa) em wlroots ────────────────
+build_bundled_grim
 
 # ── 3. Copia Python standalone para AppDir e instala PyQt6 ────────────
 # PyQt6==6.10.1 → Qt 6.10.0 bundled: mesma série minor da lib sistema (6.10.x)

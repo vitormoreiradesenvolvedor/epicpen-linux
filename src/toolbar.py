@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QDialog, QLabel, QLineEdit, QPlainTextEdit, QSpinBox, QFontComboBox, QDialogButtonBox,
     QMessageBox,
 )
-from PyQt6.QtCore import Qt, QPoint, QTimer, QSize, QEvent
+from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QSize, QEvent
 from PyQt6.QtGui import QColor, QCursor
 
 import icons
@@ -380,6 +380,10 @@ class ToolbarWindow(QWidget):
         self._drawing_active    = True
         self._passthrough_active = False  # True quando no modo seta (visível + sem input)
         self._magnifier = MagnifierWindow()
+        # Wayland: a lupa segue o cursor pelos eventos do overlay
+        overlay.cursor_moved.connect(self._magnifier.on_overlay_cursor)
+        # A lupa nunca cobre nem amplia a própria toolbar
+        self._magnifier.set_avoid_provider(self._toolbar_rect)
         self._cfg       = config or {}
         self._tray      = None
 
@@ -985,6 +989,10 @@ class ToolbarWindow(QWidget):
         self._btn_record.setStyleSheet(
             "background: rgba(200, 30, 30, 140); border: 1px solid rgba(255,80,80,160);"
         )
+        # Gravação começou: entra no modo seta — o usuário interage com os
+        # apps sendo gravados; desenhos existentes continuam visíveis
+        if not self._passthrough_active:
+            self._activate_arrow_mode()
 
     def _on_rec_stopped(self, path: str):
         self._btn_record.setChecked(False)
@@ -1085,6 +1093,7 @@ class ToolbarWindow(QWidget):
         self.adjustSize()
 
     def _toggle_magnifier(self, checked: bool):
+        self._overlay.set_magnifier_tracking(checked)
         self._magnifier.set_active(checked)
         self._zoom_slider.setVisible(checked)
         self.adjustSize()
@@ -1298,6 +1307,12 @@ class ToolbarWindow(QWidget):
 
     # ── Multi-monitor ─────────────────────────────────────────────────────────
 
+    def _toolbar_rect(self) -> QRect:
+        """Retângulo absoluto da toolbar na tela. self.pos() é lixo em
+        layer-shell — usa o _lsw_pos rastreado (padrão do edge reveal)."""
+        ref = self._lsw_pos if self._lsw_ptr is not None else self.pos()
+        return QRect(ref, self.size())
+
     def _screen_at(self, pos: QPoint):
         """Retorna o QScreen que contém pos (coords absolutas), ou None."""
         from PyQt6.QtWidgets import QApplication
@@ -1353,6 +1368,7 @@ class ToolbarWindow(QWidget):
         origin = screen.geometry().topLeft()
         rel = self._lsw_pos - origin
         self._overlay.change_screen(screen)
+        self._magnifier.change_screen(screen)
         wh = self.windowHandle()
         if wh:
             wh.setScreen(screen)

@@ -438,16 +438,15 @@ def _has_filter(ffmpeg: str, name: str) -> bool:
     return ok
 
 
-def _build_audio_cmd(ffmpeg: str, devices: list[str], dest: str,
-                     duck: bool = False) -> list[str]:
+def _build_audio_cmd(ffmpeg: str, devices: list[str], dest: str) -> list[str]:
     """Comando do processo de ÁUDIO: pulse (mic e/ou monitor) → .mka.
 
     Processo separado do vídeo de propósito; timestamps wallclock + -copyts
     preservam a época real de captura para o sync exato na montagem.
 
-    duck: com mic (input 0) + alto-falantes (input 1), o áudio do sistema é
-    comprimido pelo sinal do mic (sidechain ducking) — a voz nunca é
-    abafada pelo som do jogo, como em mesas de streaming.
+    Mix sem ducking: mic e som do sistema entram em volume integral
+    (normalize=0). Sidechain ducking abafava a voz quando outro software
+    (YouTube etc.) tocava — captação fiel dos dois é o comportamento certo.
     """
     base = [ffmpeg]
     for dev in devices:
@@ -456,16 +455,8 @@ def _build_audio_cmd(ffmpeg: str, devices: list[str], dest: str,
             "-f", "pulse", "-thread_queue_size", "1024", "-i", dev,
         ]
     if len(devices) >= 2:
-        if duck:
-            graph = (
-                "[0:a]asplit=2[mic][sc];"
-                "[1:a][sc]sidechaincompress="
-                "threshold=0.05:ratio=8:attack=50:release=400[game];"
-                "[mic][game]amix=inputs=2:duration=longest:normalize=0[aout]"
-            )
-        else:
-            # normalize=0 evita cortar o volume dos dois pela metade
-            graph = "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0[aout]"
+        # normalize=0 evita cortar o volume dos dois pela metade
+        graph = "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0[aout]"
         maps = ["-filter_complex", graph, "-map", "[aout]"]
     else:
         maps = ["-map", "0:a"]
@@ -504,13 +495,13 @@ def _audio_inputs(audio: Optional[str], audio_skip: float) -> list[str]:
     return pre + ["-i", audio]
 
 
-def _build_audio_cmd_parec(ffmpeg: str, fds: list[int], dest: str,
-                           duck: bool = False) -> list[str]:
+def _build_audio_cmd_parec(ffmpeg: str, fds: list[int], dest: str) -> list[str]:
     """Comando do ffmpeg lendo PCM cru do parec via fds → .mka.
 
     Para builds de ffmpeg sem entrada pulse (estático bundlado): um parec
     por device entrega s16le/48k/stereo num pipe; o ffmpeg lê pipe:N.
     fds[0] = mic, fds[1] = monitor (mesma ordem de _default_audio_devices).
+    Mix sem ducking — ver _build_audio_cmd.
     """
     base = [ffmpeg]
     for fd in fds:
@@ -521,15 +512,7 @@ def _build_audio_cmd_parec(ffmpeg: str, fds: list[int], dest: str,
             "-i", f"pipe:{fd}",
         ]
     if len(fds) >= 2:
-        if duck:
-            graph = (
-                "[0:a]asplit=2[mic][sc];"
-                "[1:a][sc]sidechaincompress="
-                "threshold=0.05:ratio=8:attack=50:release=400[game];"
-                "[mic][game]amix=inputs=2:duration=longest:normalize=0[aout]"
-            )
-        else:
-            graph = "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0[aout]"
+        graph = "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0[aout]"
         maps = ["-filter_complex", graph, "-map", "[aout]"]
     else:
         maps = ["-map", "0:a"]
@@ -539,8 +522,7 @@ def _build_audio_cmd_parec(ffmpeg: str, fds: list[int], dest: str,
     ]
 
 
-def _spawn_parec_audio(ffmpeg: str, devices: list[str], dest: str,
-                       duck: bool):
+def _spawn_parec_audio(ffmpeg: str, devices: list[str], dest: str):
     """Sobe parec(s) + ffmpeg encadeados por pipes para capturar áudio.
 
     Retorna (proc_ffmpeg, [procs_parec]) ou (None, []) em falha. Os parec
@@ -564,7 +546,7 @@ def _spawn_parec_audio(ffmpeg: str, devices: list[str], dest: str,
             read_fds.append(r)
             helpers.append(helper)
 
-        cmd = _build_audio_cmd_parec(ffmpeg, read_fds, dest, duck=duck)
+        cmd = _build_audio_cmd_parec(ffmpeg, read_fds, dest)
         proc = subprocess.Popen(
             cmd,
             stdin=subprocess.DEVNULL,
@@ -747,16 +729,13 @@ class ScreenRecorder(QObject):
         self._audio_helpers = []
         if self._rec_audio_devs and audio_mode:
             self._audio_dest = save_dir / f".epicpen_rec_{ts}.mka"
-            duck = (len(self._rec_audio_devs) >= 2
-                    and _has_filter(ffmpeg, "sidechaincompress"))
             if audio_mode == "parec":
                 self._audio_proc, self._audio_helpers = _spawn_parec_audio(
-                    ffmpeg, self._rec_audio_devs, str(self._audio_dest), duck,
+                    ffmpeg, self._rec_audio_devs, str(self._audio_dest),
                 )
             else:
                 acmd = _build_audio_cmd(
                     ffmpeg, self._rec_audio_devs, str(self._audio_dest),
-                    duck=duck,
                 )
                 try:
                     self._audio_proc = subprocess.Popen(

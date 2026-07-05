@@ -448,23 +448,18 @@ def test_audio_cmd_uses_wallclock():
     assert "-use_wallclock_as_timestamps" in cmd
 
 
-def test_audio_cmd_duck_uses_sidechain():
-    """Ducking: o som do sistema é comprimido pelo sinal do mic."""
+def test_audio_cmd_never_ducks():
+    """Sem ducking: mic e sistema em volume integral (sem sidechain).
+
+    O sidechaincompress abafava a voz quando outro software tocava —
+    a captação fiel dos dois é o comportamento esperado."""
     cmd = rec._build_audio_cmd(
         "/usr/bin/ffmpeg", ["mic_dev", "sink.monitor"], "/tmp/aud.mka",
-        duck=True,
     )
     fc = cmd[cmd.index("-filter_complex") + 1]
-    assert "sidechaincompress" in fc
+    assert "sidechaincompress" not in fc
     assert "amix=inputs=2" in fc
-    assert fc.startswith("[0:a]asplit")  # mic alimenta o sidechain
-
-
-def test_audio_cmd_duck_ignored_with_one_device():
-    cmd = rec._build_audio_cmd(
-        "/usr/bin/ffmpeg", ["mic_dev"], "/tmp/aud.mka", duck=True,
-    )
-    assert "-filter_complex" not in cmd
+    assert "normalize=0" in fc
 
 
 def test_has_filter_true(monkeypatch):
@@ -516,10 +511,11 @@ def test_parec_cmd_two_fds_amix():
     assert "-copyts" in cmd
 
 
-def test_parec_cmd_duck():
-    cmd = rec._build_audio_cmd_parec("/app/ffmpeg", [3, 4], "/tmp/a.mka", duck=True)
+def test_parec_cmd_never_ducks():
+    cmd = rec._build_audio_cmd_parec("/app/ffmpeg", [3, 4], "/tmp/a.mka")
     fc = cmd[cmd.index("-filter_complex") + 1]
-    assert "sidechaincompress" in fc
+    assert "sidechaincompress" not in fc
+    assert "normalize=0" in fc
 
 
 def test_parec_cmd_single_fd():

@@ -103,31 +103,24 @@ def laser() -> QIcon:
 # ── Ações ─────────────────────────────────────────────────────────────────────
 
 def undo() -> QIcon:
+    """Seta reta ← estilo botão 'voltar' de navegador."""
     def draw(p):
-        p.setPen(QPen(_W, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+        p.setPen(QPen(_W, 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
                       Qt.PenJoinStyle.RoundJoin))
-        path = QPainterPath()
-        path.moveTo(16, 7); path.arcTo(QRectF(5, 7, 12, 10), 60, 200)
-        p.drawPath(path)
-        # Ponta da seta
-        p.setBrush(QBrush(_W)); p.setPen(Qt.PenStyle.NoPen)
-        arr = QPainterPath()
-        arr.moveTo(5, 6); arr.lineTo(9, 6); arr.lineTo(7, 10)
-        arr.closeSubpath(); p.drawPath(arr)
+        p.drawLine(QPointF(4.5, 11), QPointF(18.5, 11))
+        p.drawLine(QPointF(4.5, 11), QPointF(10.5, 5))
+        p.drawLine(QPointF(4.5, 11), QPointF(10.5, 17))
     return _make(draw)
 
 
 def redo() -> QIcon:
+    """Seta reta → estilo botão 'avançar' de navegador."""
     def draw(p):
-        p.setPen(QPen(_W, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+        p.setPen(QPen(_W, 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
                       Qt.PenJoinStyle.RoundJoin))
-        path = QPainterPath()
-        path.moveTo(6, 7); path.arcTo(QRectF(5, 7, 12, 10), 120, -200)
-        p.drawPath(path)
-        p.setBrush(QBrush(_W)); p.setPen(Qt.PenStyle.NoPen)
-        arr = QPainterPath()
-        arr.moveTo(17, 6); arr.lineTo(13, 6); arr.lineTo(15, 10)
-        arr.closeSubpath(); p.drawPath(arr)
+        p.drawLine(QPointF(3.5, 11), QPointF(17.5, 11))
+        p.drawLine(QPointF(17.5, 11), QPointF(11.5, 5))
+        p.drawLine(QPointF(17.5, 11), QPointF(11.5, 17))
     return _make(draw)
 
 
