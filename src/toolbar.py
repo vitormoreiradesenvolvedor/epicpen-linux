@@ -2,14 +2,16 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QSlider, QColorDialog, QFrame, QLayout,
     QDialog, QLabel, QLineEdit, QPlainTextEdit, QSpinBox, QFontComboBox, QDialogButtonBox,
+    QMessageBox,
 )
-from PyQt6.QtCore import Qt, QPoint, QTimer, QSize, QEvent
+from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QSize, QEvent
 from PyQt6.QtGui import QColor, QCursor
 
 import icons
 import layershell
 from hotkeys import GlobalHotkeyListener
 from magnifier import MagnifierWindow
+from recorder import ScreenRecorder
 
 _ICON = QSize(16, 16)
 _BTN  = 25   # button side (px) — 30% menor que o original 36px
@@ -57,6 +59,199 @@ _STYLE_COLLAPSED = """
     }
     QPushButton:hover { background: rgba(255,255,255,20); }
 """
+
+
+class RegionSelector(QDialog):
+    """Seleção de região estilo Flameshot: tela congelada em fullscreen,
+    arrasto para selecionar com escurecimento ao redor, label de dimensões
+    e botões flutuantes junto à seleção.
+
+    Atalhos: Enter salva (tudo, se não houver seleção), Ctrl+C copia, Esc cancela.
+    result_action(): "save" | "copy" | None.
+    """
+
+    _DIM = QColor(0, 0, 0, 130)
+
+    def __init__(self, pixmap, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog
+        )
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.setMouseTracking(True)
+        self._px = pixmap
+        self._sel = None          # QRect em coords do widget
+        self._origin = None       # arrasto criando seleção
+        self._moving = None       # offset do arrasto movendo a seleção
+        self._action = None
+
+        from PyQt6.QtCore import QRect  # noqa: F401 (usado nos handlers)
+        self._btns = QFrame(self)
+        self._btns.setStyleSheet(
+            "QFrame { background: rgba(30,30,30,235); border-radius: 7px; }"
+            "QPushButton { background: transparent; border: none; color: white;"
+            "  padding: 6px 14px; font-size: 13px; border-radius: 5px; }"
+            "QPushButton:hover { background: rgba(255,255,255,40); }"
+        )
+        row = QHBoxLayout(self._btns)
+        row.setContentsMargins(4, 2, 4, 2)
+        row.setSpacing(2)
+        for label, slot in (
+            ("Copiar", self._do_copy),
+            ("Salvar", self._do_save),
+            ("Cancelar", self.reject),
+        ):
+            b = QPushButton(label)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(slot)
+            row.addWidget(b)
+        self._btns.adjustSize()
+        self._btns.hide()
+
+    # ── resultado ─────────────────────────────────────────────────────────
+
+    def result_action(self):
+        return self._action
+
+    def result_pixmap(self):
+        """Recorte em pixels do pixmap original, ou a imagem inteira."""
+        if self._sel is None or self.width() < 1 or self.height() < 1:
+            return self._px
+        from PyQt6.QtCore import QRect
+        fx = self._px.width() / self.width()
+        fy = self._px.height() / self.height()
+        rect = QRect(
+            round(self._sel.x() * fx), round(self._sel.y() * fy),
+            round(self._sel.width() * fx), round(self._sel.height() * fy),
+        ).intersected(self._px.rect())
+        if rect.width() < 1 or rect.height() < 1:
+            return self._px
+        return self._px.copy(rect)
+
+    def _do_save(self):
+        self._action = "save"
+        self.accept()
+
+    def _do_copy(self):
+        self._action = "copy"
+        self.accept()
+
+    # ── interação ─────────────────────────────────────────────────────────
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        pos = event.pos()
+        if self._sel is not None and self._sel.contains(pos):
+            self._moving = pos - self._sel.topLeft()
+        else:
+            self._origin = pos
+            self._sel = None
+        self._btns.hide()
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        from PyQt6.QtCore import QRect
+        pos = event.pos()
+        if self._moving is not None and self._sel is not None:
+            tl = pos - self._moving
+            r = QRect(tl, self._sel.size())
+            # mantém dentro da tela
+            r.moveLeft(max(0, min(r.left(), self.width() - r.width())))
+            r.moveTop(max(0, min(r.top(), self.height() - r.height())))
+            self._sel = r
+            self.update()
+        elif self._origin is not None:
+            self._sel = QRect(self._origin, pos).normalized()
+            self.update()
+        elif self._sel is not None:
+            self.setCursor(
+                Qt.CursorShape.SizeAllCursor if self._sel.contains(pos)
+                else Qt.CursorShape.CrossCursor
+            )
+
+    def mouseReleaseEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if self._origin is not None and self._sel is not None:
+            if self._sel.width() < 4 or self._sel.height() < 4:
+                self._sel = None
+        self._origin = None
+        self._moving = None
+        if self._sel is not None:
+            self._place_buttons()
+            self._btns.show()
+        self.update()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.reject()
+        elif event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._do_save()
+        elif (event.key() == Qt.Key.Key_C
+              and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self._do_copy()
+        else:
+            super().keyPressEvent(event)
+
+    def _place_buttons(self):
+        """Botões logo abaixo da seleção; acima dela se não couber."""
+        bw, bh = self._btns.width(), self._btns.height()
+        x = min(max(0, self._sel.right() - bw), self.width() - bw)
+        y = self._sel.bottom() + 8
+        if y + bh > self.height():
+            y = max(0, self._sel.top() - bh - 8)
+        self._btns.move(x, y)
+
+    # ── pintura ───────────────────────────────────────────────────────────
+
+    def paintEvent(self, _event):
+        from PyQt6.QtGui import QPainter, QPen
+        from PyQt6.QtCore import QRect
+        p = QPainter(self)
+        p.drawPixmap(self.rect(), self._px)
+
+        if self._sel is None:
+            p.fillRect(self.rect(), self._DIM)
+            p.setPen(QPen(QColor(255, 255, 255, 220)))
+            f = p.font()
+            f.setPointSize(13)
+            p.setFont(f)
+            p.drawText(
+                self.rect(), Qt.AlignmentFlag.AlignCenter,
+                "Arraste para selecionar a região\n"
+                "Enter salva tudo  •  Ctrl+C copia  •  Esc cancela",
+            )
+        else:
+            s = self._sel
+            # escurece as 4 faixas ao redor da seleção
+            p.fillRect(QRect(0, 0, self.width(), s.top()), self._DIM)
+            p.fillRect(QRect(0, s.bottom() + 1, self.width(),
+                             self.height() - s.bottom() - 1), self._DIM)
+            p.fillRect(QRect(0, s.top(), s.left(), s.height()), self._DIM)
+            p.fillRect(QRect(s.right() + 1, s.top(),
+                             self.width() - s.right() - 1, s.height()), self._DIM)
+            # borda + alças de canto
+            p.setPen(QPen(QColor(80, 170, 255), 2))
+            p.drawRect(s)
+            p.setBrush(QColor(80, 170, 255))
+            r = 4
+            for cx, cy in (
+                (s.left(), s.top()), (s.right(), s.top()),
+                (s.left(), s.bottom()), (s.right(), s.bottom()),
+            ):
+                p.drawEllipse(QPoint(cx, cy), r, r)
+            # label WxH em pixels reais
+            fx = self._px.width() / max(1, self.width())
+            fy = self._px.height() / max(1, self.height())
+            label = f"{round(s.width() * fx)} × {round(s.height() * fy)}"
+            p.setPen(QPen(QColor(255, 255, 255, 230)))
+            ly = s.top() - 8
+            flags = Qt.AlignmentFlag.AlignLeft
+            if ly < 16:
+                ly = s.top() + 18
+            p.drawText(s.left() + 2, ly, label)
+        p.end()
 
 
 class TextDialog(QDialog):
@@ -173,10 +368,22 @@ class ToolbarWindow(QWidget):
         self._drag_start_screen = None   # cursor em coords de ecrã no press
         self._drag_start_pos    = None   # _lsw_pos snapshot no início do drag
         self._dragging          = False  # True após exceder o threshold
+        # Moves do drag coalescidos num tick de ~60Hz com amortecimento:
+        # um move_to por evento entra em oscilação quando os eventos chegam
+        # atrasados sob carga (gravação) — evento gerado com a superfície na
+        # posição antiga somado ao _lsw_pos novo sobrecorrige a cada passo.
+        self._drag_target: QPoint | None = None
+        self._drag_move_timer = QTimer(self)
+        self._drag_move_timer.setInterval(16)
+        self._drag_move_timer.timeout.connect(self._apply_drag_move)
         self._lsw_ptr           = None   # LayerShellQt::Window* se layer-shell ativo
         self._drawing_active    = True
         self._passthrough_active = False  # True quando no modo seta (visível + sem input)
         self._magnifier = MagnifierWindow()
+        # Wayland: a lupa segue o cursor pelos eventos do overlay
+        overlay.cursor_moved.connect(self._magnifier.on_overlay_cursor)
+        # A lupa nunca cobre nem amplia a própria toolbar
+        self._magnifier.set_avoid_provider(self._toolbar_rect)
         self._cfg       = config or {}
         self._tray      = None
 
@@ -210,6 +417,11 @@ class ToolbarWindow(QWidget):
 
         overlay.text_placement_requested.connect(self._on_text_placement_requested)
         overlay.text_edit_requested.connect(self._on_text_edit_requested)
+
+        self._recorder = ScreenRecorder(parent=self)
+        self._recorder.started.connect(self._on_rec_started)
+        self._recorder.stopped.connect(self._on_rec_stopped)
+        self._recorder.failed.connect(self._on_rec_failed)
 
         # Tooltip interno: QLabel filho da janela, posicionado à direita da coluna
         # de botões. Não depende de popup Qt — funciona em wlr-layer-shell.
@@ -377,6 +589,11 @@ class ToolbarWindow(QWidget):
         self._btn_screenshot.setIcon(icons.screenshot())
         self._btn_screenshot.clicked.connect(lambda: self._do_screenshot(clipboard=False))
         lay.addWidget(self._btn_screenshot, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        self._btn_record = self._mk_btn("Gravar tela (Ctrl+R)")
+        self._btn_record.setIcon(icons.record())
+        self._btn_record.clicked.connect(self._toggle_record)
+        lay.addWidget(self._btn_record, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         self._add_sep(lay)
 
@@ -688,8 +905,159 @@ class ToolbarWindow(QWidget):
 
     def _do_screenshot(self, clipboard: bool = False):
         import screenshot as sc
-        sc.capture(self, tray_icon=self._tray, copy_to_clipboard=clipboard,
-                   screen=self._current_screen)
+
+        def _on_result(px, hint):
+            if px is None:
+                self._show_rec_dialog(
+                    "Screenshot falhou",
+                    hint or "Não foi possível capturar a tela.",
+                    error=True,
+                )
+                return
+            ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
+            dlg = RegionSelector(px, parent=self._overlay if ov_lsw else self)
+            if ov_lsw:
+                # Popup fullscreen sobre o overlay layer-shell (mesma técnica
+                # do TextDialog; cabe porque o overlay já cobre o monitor)
+                dlg.setWindowFlags(Qt.WindowType.Popup)
+                dlg.setFixedSize(self._overlay.size())
+                dlg.move(0, 0)
+            else:
+                target = self._current_screen
+                if target is not None and dlg.windowHandle() is None:
+                    dlg.setScreen(target)
+                dlg.setWindowState(Qt.WindowState.WindowFullScreen)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return  # Esc/Cancelar — sem feedback de erro
+            final = dlg.result_pixmap()
+            copy_it = clipboard or dlg.result_action() == "copy"
+            save_it = dlg.result_action() != "copy"
+            if copy_it:
+                from PyQt6.QtWidgets import QApplication
+                QApplication.clipboard().setPixmap(final)
+            if not save_it:
+                if self._tray:
+                    self._tray.showMessage(
+                        "EpicPen — Screenshot",
+                        "Copiada para a área de transferência.",
+                        self._tray.icon(), 3000,
+                    )
+                return
+            dest = sc.save_pixmap(final)
+            if dest is None:
+                self._show_rec_dialog(
+                    "Screenshot falhou", "Não foi possível salvar a imagem.",
+                    error=True,
+                )
+                return
+            from pathlib import Path as _P
+            try:
+                msg = f"~/{dest.relative_to(_P.home())}"
+            except ValueError:
+                msg = str(dest)
+            if copy_it:
+                msg += "\n(copiada para a área de transferência)"
+            if self._tray:
+                self._tray.showMessage(
+                    "EpicPen — Screenshot", f"Salva em:\n{msg}",
+                    self._tray.icon(), 4000,
+                )
+            clicked = self._show_rec_dialog(
+                "Screenshot salva", f"Imagem salva em:\n{msg}",
+                extra_button="Abrir pasta",
+            )
+            if clicked == "Abrir pasta":
+                import subprocess
+                subprocess.Popen(["xdg-open", str(dest.parent)])
+
+        sc.capture_for_edit(self, screen=self._current_screen,
+                            on_result=_on_result)
+
+    # ── Screen recorder ───────────────────────────────────────────────────────
+
+    def _toggle_record(self, checked: bool):
+        if checked:
+            # Grava o monitor selecionado na toolbar (não o de maior Hz)
+            if not self._recorder.start(screen=self._current_screen):
+                self._btn_record.setChecked(False)
+        else:
+            self._recorder.stop()
+
+    def _on_rec_started(self):
+        self._btn_record.setChecked(True)
+        self._btn_record.setIcon(icons.record_stop())
+        self._btn_record.setStyleSheet(
+            "background: rgba(200, 30, 30, 140); border: 1px solid rgba(255,80,80,160);"
+        )
+        # Gravação começou: entra no modo seta — o usuário interage com os
+        # apps sendo gravados; desenhos existentes continuam visíveis
+        if not self._passthrough_active:
+            self._activate_arrow_mode()
+
+    def _on_rec_stopped(self, path: str):
+        self._btn_record.setChecked(False)
+        self._btn_record.setIcon(icons.record())
+        self._btn_record.setStyleSheet("")
+        from pathlib import Path as _P
+        try:
+            rel = _P(path).relative_to(_P.home())
+            msg = f"~/{rel}"
+        except ValueError:
+            msg = path
+        if self._tray:
+            self._tray.showMessage(
+                "EpicPen — Gravação", f"Salva em:\n{msg}",
+                self._tray.icon(), 5000,
+            )
+        clicked = self._show_rec_dialog(
+            "Gravação concluída",
+            f"Vídeo salvo em:\n{msg}",
+            extra_button="Abrir pasta",
+        )
+        if clicked == "Abrir pasta":
+            import subprocess
+            subprocess.Popen(["xdg-open", str(_P(path).parent)])
+
+    def _on_rec_failed(self, msg: str):
+        self._btn_record.setChecked(False)
+        self._btn_record.setIcon(icons.record())
+        self._btn_record.setStyleSheet("")
+        if self._tray:
+            self._tray.showMessage("EpicPen — Gravação falhou", msg, self._tray.icon(), 5000)
+        self._show_rec_dialog("Gravação falhou", msg, error=True)
+
+    def _show_rec_dialog(self, title: str, text: str,
+                         extra_button: str | None = None,
+                         error: bool = False) -> str | None:
+        """Modal de fim de gravação. Retorna o texto do botão extra se clicado.
+
+        Em layer-shell o diálogo abre como Popup parented ao overlay (mesmo
+        padrão do TextDialog) — notificações de tray não são garantidas em
+        todos os ambientes, o modal é o feedback primário.
+        """
+        was_drawing = self._pre_dialog()
+        ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
+        box = QMessageBox(self._overlay if ov_lsw else self)
+        box.setWindowTitle(f"EpicPen — {title}")
+        box.setText(text)
+        box.setIcon(QMessageBox.Icon.Critical if error
+                    else QMessageBox.Icon.Information)
+        extra = None
+        if extra_button:
+            extra = box.addButton(extra_button, QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Ok)
+        if ov_lsw:
+            box.setWindowFlags(Qt.WindowType.Popup)
+            box.adjustSize()
+            geo = self._overlay.geometry()
+            box.move(
+                geo.x() + (geo.width() - box.width()) // 2,
+                geo.y() + (geo.height() - box.height()) // 2,
+            )
+        box.exec()
+        clicked = extra_button if (extra is not None and box.clickedButton() is extra) else None
+        self._post_dialog(was_drawing)
+        return clicked
 
     # ── Mode toggles ──────────────────────────────────────────────────────────
 
@@ -725,6 +1093,7 @@ class ToolbarWindow(QWidget):
         self.adjustSize()
 
     def _toggle_magnifier(self, checked: bool):
+        self._overlay.set_magnifier_tracking(checked)
         self._magnifier.set_active(checked)
         self._zoom_slider.setVisible(checked)
         self.adjustSize()
@@ -938,6 +1307,12 @@ class ToolbarWindow(QWidget):
 
     # ── Multi-monitor ─────────────────────────────────────────────────────────
 
+    def _toolbar_rect(self) -> QRect:
+        """Retângulo absoluto da toolbar na tela. self.pos() é lixo em
+        layer-shell — usa o _lsw_pos rastreado (padrão do edge reveal)."""
+        ref = self._lsw_pos if self._lsw_ptr is not None else self.pos()
+        return QRect(ref, self.size())
+
     def _screen_at(self, pos: QPoint):
         """Retorna o QScreen que contém pos (coords absolutas), ou None."""
         from PyQt6.QtWidgets import QApplication
@@ -993,6 +1368,7 @@ class ToolbarWindow(QWidget):
         origin = screen.geometry().topLeft()
         rel = self._lsw_pos - origin
         self._overlay.change_screen(screen)
+        self._magnifier.change_screen(screen)
         wh = self.windowHandle()
         if wh:
             wh.setScreen(screen)
@@ -1081,14 +1457,15 @@ class ToolbarWindow(QWidget):
                 new_pos = self._clamp_to_screen(self._drag_start_pos + cursor_delta,
                                                 self._current_screen)
                 if self.parent() is not None:
+                    # Embed: move síncrono de child widget, sem compositor
                     self.move(new_pos)
+                    self._lsw_pos = new_pos
                 else:
-                    scr = self._current_screen
-                    origin = scr.geometry().topLeft() if scr else QPoint(0, 0)
-                    rel = new_pos - origin
-                    layershell.move_to(self._lsw_ptr, rel.x(), rel.y())
-                    self.update()
-                self._lsw_pos = new_pos
+                    # Layer-shell: só registra o alvo; o timer aplica
+                    # coalescido (1 move por frame) com amortecimento
+                    self._drag_target = new_pos
+                    if not self._drag_move_timer.isActive():
+                        self._drag_move_timer.start()
                 return True
             if self._dragging:
                 # startSystemMove() ativo — compositor move; consumir eventos residuais
@@ -1099,6 +1476,11 @@ class ToolbarWindow(QWidget):
             self._drag_start  = None
             self._dragging    = False
             if was_dragging:
+                self._drag_move_timer.stop()
+                if self._lsw_ptr and self._drag_target is not None:
+                    # Aplica a posição final pendente sem amortecimento
+                    self._move_lsw_to(self._drag_target)
+                self._drag_target = None
                 if self._lsw_ptr:
                     cursor_abs = event.scenePosition().toPoint() + self._lsw_pos
                     new_screen = self._screen_at(cursor_abs)
@@ -1114,6 +1496,39 @@ class ToolbarWindow(QWidget):
                 return True  # consome release → botão não dispara click após drag
 
         return False  # passa todos os demais eventos adiante
+
+    # ── Drag coalescido (layer-shell) ─────────────────────────────────────────
+
+    def _move_lsw_to(self, pos: QPoint):
+        """Move a superfície layer-shell para pos (coords de ecrã) e atualiza
+        o tracking. self.update() mantém move_to em sincronia com o compositor
+        (sem ele o overshoot acumula em arrasto rápido)."""
+        scr = self._current_screen
+        origin = scr.geometry().topLeft() if scr else QPoint(0, 0)
+        rel = pos - origin
+        layershell.move_to(self._lsw_ptr, rel.x(), rel.y())
+        self._lsw_pos = pos
+        self.update()
+
+    def _apply_drag_move(self):
+        """Tick do drag: aplica o alvo mais recente com amortecimento.
+
+        O passo parcial (60%) converge rápido mas absorve a sobrecorreção
+        causada por eventos atrasados — sem ele a toolbar treme quando a
+        gravação carrega a CPU e os MouseMove chegam em rajadas."""
+        if self._drag_target is None or not self._lsw_ptr:
+            self._drag_move_timer.stop()
+            return
+        cur = self._lsw_pos
+        dx = self._drag_target.x() - cur.x()
+        dy = self._drag_target.y() - cur.y()
+        if dx == 0 and dy == 0:
+            return
+        if abs(dx) <= 2 and abs(dy) <= 2:
+            new_pos = QPoint(self._drag_target)
+        else:
+            new_pos = QPoint(cur.x() + round(dx * 0.6), cur.y() + round(dy * 0.6))
+        self._move_lsw_to(new_pos)
 
     # ── Tab override via event() (segunda camada de segurança) ────────────────
 
@@ -1140,6 +1555,9 @@ class ToolbarWindow(QWidget):
                 self._overlay.redo()
             elif key == Qt.Key.Key_S:
                 self._do_screenshot(clipboard=bool(shift))
+            elif key == Qt.Key.Key_R:
+                self._btn_record.toggle()
+                self._toggle_record(self._btn_record.isChecked())
             return
 
         tool_keys = {
