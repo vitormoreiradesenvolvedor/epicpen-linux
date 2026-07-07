@@ -31,6 +31,9 @@ class OverlayWindow(QWidget):
     # Posição do cursor (coords locais do overlay) a cada movimento. A lupa
     # usa isto no Wayland: QCursor.pos() global não é confiável com layer-shell.
     cursor_moved = pyqtSignal(QPoint)
+    # Emitido ao concluir um traço. Na apresentação overlay e toolbar coexistem
+    # em LAYER_OVERLAY; a toolbar se re-eleva ao topo aqui para o traço não a cobrir.
+    stroke_finished = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -136,11 +139,25 @@ class OverlayWindow(QWidget):
         self._setup_window()
         self._refresh_cursor()
 
+    @staticmethod
+    def _virtual_geometry():
+        """União da geometria de todos os monitores vivos, robusta a
+        primaryScreen() None (transitório durante hotplug). None se não há
+        nenhuma tela — o chamador pula o setGeometry nesse caso."""
+        screens = QApplication.screens()
+        if not screens:
+            return None
+        primary = QApplication.primaryScreen()
+        virtual_geo = (primary.virtualGeometry() if primary is not None
+                       else screens[0].geometry())
+        for s in screens:
+            virtual_geo = virtual_geo.united(s.geometry())
+        return virtual_geo
+
     def _setup_window(self):
-        virtual_geo = QApplication.primaryScreen().virtualGeometry()
-        for screen in QApplication.screens():
-            virtual_geo = virtual_geo.united(screen.geometry())
-        self.setGeometry(virtual_geo)
+        geo = self._virtual_geometry()
+        if geo is not None:
+            self.setGeometry(geo)
 
         flags = (
             Qt.WindowType.FramelessWindowHint
@@ -152,15 +169,26 @@ class OverlayWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
 
+        # Hotplug dispara screenAdded/Removed em rajada; recriar geometria e
+        # superfície a cada evento é o gatilho de crash. Debounce coalesce a
+        # rajada num único ajuste.
+        from PyQt6.QtCore import QTimer
+        self._screens_debounce = QTimer(self)
+        self._screens_debounce.setSingleShot(True)
+        self._screens_debounce.setInterval(150)
+        self._screens_debounce.timeout.connect(self._apply_screens_changed)
+
         app = QApplication.instance()
         app.screenAdded.connect(self._on_screens_changed)
         app.screenRemoved.connect(self._on_screens_changed)
 
     def _on_screens_changed(self, _screen=None):
-        virtual_geo = QApplication.primaryScreen().virtualGeometry()
-        for s in QApplication.screens():
-            virtual_geo = virtual_geo.united(s.geometry())
-        self.setGeometry(virtual_geo)
+        self._screens_debounce.start()
+
+    def _apply_screens_changed(self):
+        geo = self._virtual_geometry()
+        if geo is not None:
+            self.setGeometry(geo)
         self._apply_input_mask()
 
     # ── Cursores ──────────────────────────────────────────────────────────
@@ -443,6 +471,10 @@ class OverlayWindow(QWidget):
         Não dispara _on_remapped (que é reservado para toggle de modo de desenho).
         """
         if not self._layer_shell_active:
+            return
+        from screens import safe_screen
+        screen = safe_screen(screen)   # QScreen pendente → setScreen segfaulta
+        if screen is None:
             return
         qwindow = self.windowHandle()
         if qwindow is None:
@@ -1409,6 +1441,7 @@ class OverlayWindow(QWidget):
                 self._wb_canvas = None
                 self._invalidate_erased_cache()  # posições mudaram durante o drag
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
+                self.stroke_finished.emit()
             return
         if self._tool == "laser" or not self._drawing:
             return
@@ -1441,6 +1474,7 @@ class OverlayWindow(QWidget):
                 self._commit_stroke(stroke)
         self._current_stroke = []
         self.update()
+        self.stroke_finished.emit()
 
     def mouseDoubleClickEvent(self, event):
         if (self._tool == "drag"

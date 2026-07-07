@@ -136,6 +136,19 @@ def main() -> int:
             pass  # consumidor não acompanha — descarta
 
     sink.videoFrameChanged.connect(_on_frame)
+
+    # Stream ScreenCast pode cair sozinho (renegociação de formato ao cruzar
+    # monitores de resolução/refresh diferentes, revogação de permissão do
+    # portal). Sem este handler o helper ficava vivo entregando zero frames e
+    # o KDE mantinha a "câmera" pendurada. errorOccurred → encerra limpo: o
+    # EOF no pipe faz o recorder reportar a falha em vez de travar mudo.
+    def _on_error(*_):
+        app.quit()
+    try:
+        capture.errorOccurred.connect(_on_error)
+    except (AttributeError, TypeError):
+        pass  # binding sem o signal (Qt antigo) — segue sem o handler
+
     capture.start()
 
     # Handlers Python só rodam entre bytecodes — o timer ocioso garante

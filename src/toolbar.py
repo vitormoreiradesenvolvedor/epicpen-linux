@@ -417,6 +417,7 @@ class ToolbarWindow(QWidget):
 
         overlay.text_placement_requested.connect(self._on_text_placement_requested)
         overlay.text_edit_requested.connect(self._on_text_edit_requested)
+        overlay.stroke_finished.connect(self._reaffirm_toolbar_top)
 
         self._recorder = ScreenRecorder(parent=self)
         self._recorder.started.connect(self._on_rec_started)
@@ -763,11 +764,23 @@ class ToolbarWindow(QWidget):
         keepabove.set_keepabove()
         self._reaffirm_top()
 
+    def _reaffirm_toolbar_top(self):
+        """Re-eleva só a toolbar ao fim de um traço (barato: raise_() sem
+        hide/show). Na apresentação overlay e toolbar dividem LAYER_OVERLAY;
+        sem isto o compositor pode deixar o último traço acima da barra.
+        Não age fora da apresentação (lá a toolbar já está numa camada acima)."""
+        if self._presentation_mode and not self._dragging:
+            self.raise_()
+
     def _reaffirm_top(self):
-        self.raise_()
-        self.activateWindow()
+        # Ordem importa: dentro da mesma camada (na apresentação overlay e
+        # toolbar coexistem em LAYER_OVERLAY) quem faz raise_() por último fica
+        # no topo. A toolbar tem de ser sempre a ÚLTIMA — antes o overlay era
+        # levantado por último e os traços cobriam a barra.
         if self._drawing_active:
             self._overlay.raise_()
+        self.raise_()
+        self.activateWindow()
 
     # ── Tool selection ────────────────────────────────────────────────────────
 
@@ -1365,6 +1378,11 @@ class ToolbarWindow(QWidget):
         """
         if not self._lsw_ptr:
             return
+        from screens import safe_screen
+        screen = safe_screen(screen)   # QScreen pendente → geometry()/setScreen segfaultam
+        if screen is None:
+            return
+        self._current_screen = screen
         origin = screen.geometry().topLeft()
         rel = self._lsw_pos - origin
         self._overlay.change_screen(screen)
