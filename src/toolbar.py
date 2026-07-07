@@ -958,6 +958,24 @@ class ToolbarWindow(QWidget):
 
     # ── Screenshot ────────────────────────────────────────────────────────────
 
+    def _set_capture_hidden(self, hidden: bool):
+        """Oculta/restaura a coluna durante a seleção de região do screenshot.
+
+        No wlr-layer-shell a coluna (LAYER_TOP/OVERLAY) fica acima do seletor e
+        o usuário não consegue arrastá-la para fora da área a capturar. hide()/
+        show() recria a wl_layer_surface (mesmo mecanismo de
+        _change_toolbar_screen); ao voltar, reaplica camada e posição."""
+        if hidden:
+            self.hide()
+            return
+        self.show()
+        if self._lsw_ptr:
+            layer = (layershell.LAYER_OVERLAY if self._presentation_mode
+                     else layershell.LAYER_TOP)
+            layershell.set_layer(self._lsw_ptr, layer)
+            self._move_lsw_to(self._lsw_pos)
+        self.raise_()
+
     def _do_screenshot(self, clipboard: bool = False):
         import screenshot as sc
 
@@ -969,19 +987,28 @@ class ToolbarWindow(QWidget):
                 )
                 return
             ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
-            dlg = RegionSelector(px, parent=self._overlay if ov_lsw else self)
-            if ov_lsw:
-                # Popup fullscreen sobre o overlay layer-shell (mesma técnica
-                # do TextDialog; cabe porque o overlay já cobre o monitor)
-                dlg.setWindowFlags(Qt.WindowType.Popup)
-                dlg.setFixedSize(self._overlay.size())
-                dlg.move(0, 0)
-            else:
-                target = self._current_screen
-                if target is not None and dlg.windowHandle() is None:
-                    dlg.setScreen(target)
-                dlg.setWindowState(Qt.WindowState.WindowFullScreen)
-            if dlg.exec() != QDialog.DialogCode.Accepted:
+            # Oculta a coluna durante a seleção: no layer-shell ela fica acima
+            # do seletor e o usuário não consegue tirá-la da área a capturar.
+            # (Já não aparece na foto — o pixmap é capturado antes disto.)
+            # Restaurada no finally, aconteça o que acontecer.
+            self._set_capture_hidden(True)
+            try:
+                dlg = RegionSelector(px, parent=self._overlay if ov_lsw else self)
+                if ov_lsw:
+                    # Popup fullscreen sobre o overlay layer-shell (mesma técnica
+                    # do TextDialog; cabe porque o overlay já cobre o monitor)
+                    dlg.setWindowFlags(Qt.WindowType.Popup)
+                    dlg.setFixedSize(self._overlay.size())
+                    dlg.move(0, 0)
+                else:
+                    target = self._current_screen
+                    if target is not None and dlg.windowHandle() is None:
+                        dlg.setScreen(target)
+                    dlg.setWindowState(Qt.WindowState.WindowFullScreen)
+                accepted = dlg.exec() == QDialog.DialogCode.Accepted
+            finally:
+                self._set_capture_hidden(False)
+            if not accepted:
                 return  # Esc/Cancelar — sem feedback de erro
             final = dlg.result_pixmap()
             copy_it = clipboard or dlg.result_action() == "copy"
