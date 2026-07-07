@@ -679,7 +679,7 @@ class ToolbarWindow(QWidget):
         # Em modo apresentação o ícone colapsado deve permanecer visível
         if self._presentation_mode:
             self._hide_timer.stop()
-            self.setWindowOpacity(1.0)
+            self._apply_opacity(1.0)
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         QTimer.singleShot(0, self._sync_overlay_mask)
         QTimer.singleShot(0, self._update_input_region)
@@ -1187,7 +1187,7 @@ class ToolbarWindow(QWidget):
             self._edge_timer.stop()
             self._hide_timer.stop()
             self.show()
-            self.setWindowOpacity(1.0)
+            self._apply_opacity(1.0)
             # Volta a LAYER_TOP quando sai do modo apresentação
             if self._lsw_ptr:
                 layershell.set_layer(self._lsw_ptr, layershell.LAYER_TOP)
@@ -1195,10 +1195,20 @@ class ToolbarWindow(QWidget):
             if _ov_lsw:
                 layershell.set_layer(_ov_lsw, layershell.LAYER_TOP)
 
+    def _apply_opacity(self, value: float):
+        """setWindowOpacity só funciona em X11. No wlr-layer-shell o QtWayland
+        ignora e emite 'This plugin does not support setting window opacity' a
+        cada chamada — o edge-reveal disparava isso dezenas de vezes, poluindo
+        o log. No-op silencioso em layer-shell; o click-through da apresentação
+        já é garantido por WA_TransparentForMouseEvents."""
+        if self._lsw_ptr:
+            return
+        self.setWindowOpacity(value)
+
     def _presentation_auto_hide(self):
         # Colapsado = ícone mínimo já visível; não esconder
         if self._presentation_mode and not self._collapsed:
-            self.setWindowOpacity(0.0)
+            self._apply_opacity(0.0)
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
     def _check_edge_reveal(self):
@@ -1214,7 +1224,7 @@ class ToolbarWindow(QWidget):
         near_y = ty - 20 <= cursor.y() <= ty + th + 20
         if near_x and near_y:
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
-            self.setWindowOpacity(1.0)
+            self._apply_opacity(1.0)
             self.raise_()
             if not self._lsw_ptr:
                 import keepabove
@@ -1224,7 +1234,7 @@ class ToolbarWindow(QWidget):
     def enterEvent(self, event):
         if self._presentation_mode:
             self._hide_timer.stop()
-            self.setWindowOpacity(1.0)
+            self._apply_opacity(1.0)
         # Wayland: puxa foco de teclado ao entrar na toolbar (não durante drag)
         if not self._dragging:
             self.raise_()
