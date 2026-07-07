@@ -56,6 +56,9 @@ def _install_qt_stubs():
     qtc.QObject = _FakeQObject
     qtc.pyqtSignal = _pyqtSignal
     qtc.QTimer = MagicMock
+    # capture_helper importa estes; só precisam existir para o import resolver
+    qtc.QMetaObject = MagicMock()
+    qtc.Qt = MagicMock()
 
     # Multimedia stubs
     qtm = _mod("PyQt6.QtMultimedia")
