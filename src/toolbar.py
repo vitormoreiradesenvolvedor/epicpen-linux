@@ -2,7 +2,6 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QSlider, QColorDialog, QFrame, QLayout,
     QDialog, QLabel, QLineEdit, QPlainTextEdit, QSpinBox, QFontComboBox, QDialogButtonBox,
-    QMessageBox,
 )
 from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QSize, QEvent
 from PyQt6.QtGui import QColor, QCursor
@@ -398,6 +397,8 @@ class ToolbarWindow(QWidget):
         self._current_color = QColor(color_hex)
 
         self._presentation_mode = False
+        # Pasta a abrir quando a notificação da tray for clicada (ver _notify_saved)
+        self._pending_folder = None
         # True enquanto o menu da tray está aberto (ver enter/exit_menu_mode)
         self._menu_mode = False
         self._menu_saved_passthrough = False
@@ -962,10 +963,9 @@ class ToolbarWindow(QWidget):
 
         def _on_result(px, hint):
             if px is None:
-                self._show_rec_dialog(
-                    "Screenshot falhou",
+                self._notify_saved(
+                    "EpicPen — Screenshot falhou",
                     hint or "Não foi possível capturar a tela.",
-                    error=True,
                 )
                 return
             ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
@@ -999,9 +999,9 @@ class ToolbarWindow(QWidget):
                 return
             dest = sc.save_pixmap(final)
             if dest is None:
-                self._show_rec_dialog(
-                    "Screenshot falhou", "Não foi possível salvar a imagem.",
-                    error=True,
+                self._notify_saved(
+                    "EpicPen — Screenshot falhou",
+                    "Não foi possível salvar a imagem.",
                 )
                 return
             from pathlib import Path as _P
@@ -1011,18 +1011,10 @@ class ToolbarWindow(QWidget):
                 msg = str(dest)
             if copy_it:
                 msg += "\n(copiada para a área de transferência)"
-            if self._tray:
-                self._tray.showMessage(
-                    "EpicPen — Screenshot", f"Salva em:\n{msg}",
-                    self._tray.icon(), 4000,
-                )
-            def _open_folder():
-                import subprocess
-                subprocess.Popen(["xdg-open", str(dest.parent)])
-            self._show_rec_dialog(
-                "Screenshot salva", f"Imagem salva em:\n{msg}",
-                extra_button="Abrir pasta",
-                on_extra=_open_folder,
+            self._notify_saved(
+                "EpicPen — Screenshot",
+                f"Salva em:\n{msg}\n(clique para abrir a pasta)",
+                folder=dest.parent,
             )
 
         sc.capture_for_edit(self, screen=self._current_screen,
@@ -1055,79 +1047,50 @@ class ToolbarWindow(QWidget):
         self._btn_record.setStyleSheet("")
         from pathlib import Path as _P
         try:
-            rel = _P(path).relative_to(_P.home())
-            msg = f"~/{rel}"
+            msg = f"~/{_P(path).relative_to(_P.home())}"
         except ValueError:
             msg = path
-        if self._tray:
-            self._tray.showMessage(
-                "EpicPen — Gravação", f"Salva em:\n{msg}",
-                self._tray.icon(), 5000,
-            )
-        def _open_folder():
-            import subprocess
-            subprocess.Popen(["xdg-open", str(_P(path).parent)])
-        self._show_rec_dialog(
-            "Gravação concluída",
-            f"Vídeo salvo em:\n{msg}",
-            extra_button="Abrir pasta",
-            on_extra=_open_folder,
+        self._notify_saved(
+            "EpicPen — Gravação",
+            f"Salva em:\n{msg}\n(clique para abrir a pasta)",
+            folder=_P(path).parent,
         )
 
     def _on_rec_failed(self, msg: str):
         self._btn_record.setChecked(False)
         self._btn_record.setIcon(icons.record())
         self._btn_record.setStyleSheet("")
-        if self._tray:
-            self._tray.showMessage("EpicPen — Gravação falhou", msg, self._tray.icon(), 5000)
-        self._show_rec_dialog("Gravação falhou", msg, error=True)
+        self._notify_saved("EpicPen — Gravação falhou", msg)
 
-    def _show_rec_dialog(self, title: str, text: str,
-                         extra_button: str | None = None,
-                         error: bool = False,
-                         on_extra=None) -> None:
-        """Notificação de fim de gravação/screenshot — NÃO-BLOQUEANTE.
+    def _notify_saved(self, title: str, body: str, folder=None):
+        """Notificação via tray (Plasma) — NUNCA um popup Qt próprio.
 
-        Antes usava box.exec() (loop modal aninhado). No wlr-layer-shell o
-        popup às vezes não recebe input e o exec() NUNCA retornava, congelando
-        toda a GUI — comprovado por gdb no processo travado: QDialog::exec()
-        preso dentro do event loop principal, disparado por um signal em fila
-        (stopped/failed emitido da thread de teardown). Agora usa show() + o
-        sinal buttonClicked; a app nunca trava. on_extra() é chamado se o
-        utilizador clicar no botão extra (ex.: "Abrir pasta").
+        Popups Qt.Popup no wlr-layer-shell grabam o input; ao fechar
+        abruptamente (foco perdido, usuário sai da janela) deixavam a toolbar
+        sem foco e fora da camada de topo — confirmado por gdb (event loop
+        normal, estado de superfície corrompido). A notificação da tray é
+        renderizada pelo Plasma, não interfere nas nossas superfícies. Se
+        `folder` for dado, clicar na notificação abre a pasta."""
+        if not self._tray:
+            return
+        self._pending_folder = str(folder) if folder else None
+        try:
+            self._tray.messageClicked.disconnect(self._on_notify_clicked)
+        except (TypeError, RuntimeError):
+            pass
+        if self._pending_folder:
+            self._tray.messageClicked.connect(self._on_notify_clicked)
+        self._tray.showMessage(title, body, self._tray.icon(), 5000)
 
-        A notificação da tray (Plasma) continua sendo o feedback primário e
-        sempre visível; este diálogo é complementar.
-        """
-        ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
-        box = QMessageBox(self._overlay if ov_lsw else self)
-        box.setWindowTitle(f"EpicPen — {title}")
-        box.setText(text)
-        box.setIcon(QMessageBox.Icon.Critical if error
-                    else QMessageBox.Icon.Information)
-        box.setModal(False)
-        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        extra = None
-        if extra_button:
-            extra = box.addButton(extra_button, QMessageBox.ButtonRole.ActionRole)
-        box.addButton(QMessageBox.StandardButton.Ok)
-
-        def _on_click(btn):
-            if extra is not None and btn is extra and on_extra is not None:
-                on_extra()
-        box.buttonClicked.connect(_on_click)
-
-        if ov_lsw:
-            box.setWindowFlags(Qt.WindowType.Popup)
-            box.adjustSize()
-            geo = self._overlay.geometry()
-            box.move(
-                geo.x() + (geo.width() - box.width()) // 2,
-                geo.y() + (geo.height() - box.height()) // 2,
-            )
-        box.show()
-        box.raise_()
-        box.activateWindow()
+    def _on_notify_clicked(self):
+        folder = getattr(self, "_pending_folder", None)
+        try:
+            self._tray.messageClicked.disconnect(self._on_notify_clicked)
+        except (TypeError, RuntimeError):
+            pass
+        if folder:
+            import subprocess
+            subprocess.Popen(["xdg-open", folder])
 
     # ── Mode toggles ──────────────────────────────────────────────────────────
 
