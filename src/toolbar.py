@@ -398,6 +398,10 @@ class ToolbarWindow(QWidget):
         self._current_color = QColor(color_hex)
 
         self._presentation_mode = False
+        # True enquanto o menu da tray está aberto (ver enter/exit_menu_mode)
+        self._menu_mode = False
+        self._menu_saved_passthrough = False
+        self._menu_saved_drawing = True
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
         self._hide_timer.setInterval(1500)
@@ -771,6 +775,43 @@ class ToolbarWindow(QWidget):
         Não age fora da apresentação (lá a toolbar já está numa camada acima)."""
         if self._presentation_mode and not self._dragging:
             self.raise_()
+
+    # ── Modo menu da tray ─────────────────────────────────────────────────────
+
+    def enter_menu_mode(self):
+        """Menu da tray aberto: garante o menu acima da coluna e entra em modo
+        seta enquanto ele está visível.
+
+        No wlr-layer-shell a coluna vive em LAYER_TOP/OVERLAY, acima do popup
+        do Plasma — por isso baixamos a superfície para LAYER_BOTTOM para o
+        menu ficar por cima. Entrar em modo seta (passthrough) evita que a
+        coluna/overlay capturem o clique destinado ao menu. exit_menu_mode
+        restaura o estado exato de antes."""
+        if self._menu_mode:
+            return
+        self._menu_mode = True
+        self._menu_saved_passthrough = self._passthrough_active
+        self._menu_saved_drawing = self._drawing_active
+        if self._drawing_active and not self._passthrough_active:
+            self._btn_toggle.setChecked(True)
+            self._toggle_passthrough(True)
+        if self._lsw_ptr:
+            layershell.set_layer(self._lsw_ptr, layershell.LAYER_BOTTOM)
+
+    def exit_menu_mode(self):
+        """Menu da tray fechado: restaura camada e modo de desenho anteriores."""
+        if not self._menu_mode:
+            return
+        self._menu_mode = False
+        if self._lsw_ptr:
+            layer = (layershell.LAYER_OVERLAY if self._presentation_mode
+                     else layershell.LAYER_TOP)
+            layershell.set_layer(self._lsw_ptr, layer)
+            self.raise_()
+        # Só volta a desenhar se estava desenhando antes de abrir o menu
+        if self._menu_saved_drawing and not self._menu_saved_passthrough:
+            self._btn_toggle.setChecked(False)
+            self._toggle_passthrough(False)
 
     def _reaffirm_top(self):
         # Ordem importa: dentro da mesma camada (na apresentação overlay e

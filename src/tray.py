@@ -94,6 +94,12 @@ class TrayIcon(QSystemTrayIcon):
         self._menu = menu
         self.setContextMenu(menu)
 
+        # Menu aberto → coluna baixa de camada (menu fica acima dela) e o app
+        # entra em modo seta; menu fechado → restaura. aboutToShow/aboutToHide
+        # são emitidos mesmo com o menu renderizado pelo Plasma via DBusMenu.
+        menu.aboutToShow.connect(self._toolbar.enter_menu_mode)
+        menu.aboutToHide.connect(self._toolbar.exit_menu_mode)
+
     # ── State ──────────────────────────────────────────────────────────────
 
     def get_state(self) -> dict:
@@ -102,9 +108,16 @@ class TrayIcon(QSystemTrayIcon):
     # ── Slots ─────────────────────────────────────────────────────────────
 
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason):
-        # O KDE/SNI abre o menu para qualquer clique quando setContextMenu está
-        # registado. Para cliques que não devem abrir o menu (esquerdo,
-        # duplo-clique, scroll), fechamos imediatamente.
+        # Clique esquerdo (Trigger) → alterna ocultar/mostrar as janelas.
+        # O KDE/SNI pode abrir o menu para qualquer clique quando setContextMenu
+        # está registado; fechamo-lo antes de alternar para não sobrar aberto.
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            m = self.contextMenu()
+            if m is not None:
+                m.hide()
+            self._toggle_visibility()
+            return
+        # Duplo-clique / scroll: não abrem menu — fecha se o SNI o tiver aberto.
         if reason != QSystemTrayIcon.ActivationReason.Context:
             m = self.contextMenu()
             if m is not None:
