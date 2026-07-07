@@ -85,6 +85,10 @@ class MagnifierWindow(QWidget):
         recria a wl_layer_surface no novo output — padrão da toolbar)."""
         if not self._ls_wanted and self._lsw_ptr is None:
             return
+        from screens import safe_screen
+        screen = safe_screen(screen)   # QScreen pendente → setScreen segfaulta
+        if screen is None:
+            return
         self._ls_screen = screen
         self._ext_pos = None
         if self._lsw_ptr is None:

@@ -649,6 +649,11 @@ class ScreenRecorder(QObject):
         self._proc: Optional[subprocess.Popen] = None
         self._dest: Optional[Path] = None
         self._active = False
+        # True enquanto o teardown (join/wait do ffmpeg) roda em background.
+        # start() recusa reentrada aqui: sem isso um novo helper subiria antes
+        # de a sessão de ScreenCast anterior fechar (KDE empilha "câmeras").
+        self._stopping = False
+        self._stop_thread: Optional[threading.Thread] = None
 
         # Configurados em start(); _rec_w/_rec_h são refinados pelo header
         # do helper (resolução física do compositor, não a lógica do Qt)
@@ -674,6 +679,11 @@ class ScreenRecorder(QObject):
         """Inicia a gravação. screen: monitor a capturar (default: maior Hz)."""
         if self._active:
             return True
+        if self._stopping:
+            # Gravação anterior ainda finalizando (ffmpeg flush): iniciar agora
+            # subiria um 2º stream ScreenCast antes de o 1º fechar.
+            self.failed.emit("Aguarde: finalizando a gravação anterior…")
+            return False
 
         ffmpeg, vaapi_dev, has_x264, audio_mode = _pick_ffmpeg()
         if not ffmpeg:
@@ -684,6 +694,9 @@ class ScreenRecorder(QObject):
             )
             return False
 
+        from screens import screen_alive
+        if screen is not None and not screen_alive(screen):
+            screen = None   # QScreen pendente (troca de monitor) — recalcula
         if screen is None:
             screen = _best_screen()
         if screen is None:
@@ -862,10 +875,30 @@ class ScreenRecorder(QObject):
         return True
 
     def stop(self):
+        """Encerra a gravação sem bloquear a thread da GUI.
+
+        O teardown (terminate + join do pump + wait do ffmpeg/áudio, até
+        dezenas de segundos numa gravação longa) roda numa thread própria —
+        antes rodava na thread da GUI e congelava a toolbar ao salvar. Os
+        signals started/stopped/failed já são entregues via QueuedConnection
+        quando emitidos de outra thread (o QObject vive na thread da GUI).
+        """
         if not self._active:
             return
         self._active = False
+        self._stopping = True
+        self._stop_thread = threading.Thread(
+            target=self._teardown, daemon=True, name="epicpen-stop",
+        )
+        self._stop_thread.start()
 
+    def _teardown(self):
+        try:
+            self._teardown_impl()
+        finally:
+            self._stopping = False
+
+    def _teardown_impl(self):
         # Encerra o helper de captura: o processo morre → portal fecha a
         # sessão de ScreenCast → ícone de transmissão some do KDE
         if self._helper is not None:
