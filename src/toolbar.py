@@ -2,7 +2,6 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QSlider, QColorDialog, QFrame, QLayout,
     QDialog, QLabel, QLineEdit, QPlainTextEdit, QSpinBox, QFontComboBox, QDialogButtonBox,
-    QMessageBox,
 )
 from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QSize, QEvent
 from PyQt6.QtGui import QColor, QCursor
@@ -398,6 +397,8 @@ class ToolbarWindow(QWidget):
         self._current_color = QColor(color_hex)
 
         self._presentation_mode = False
+        # Pasta a abrir quando a notificação da tray for clicada (ver _notify_saved)
+        self._pending_folder = None
         # True enquanto o menu da tray está aberto (ver enter/exit_menu_mode)
         self._menu_mode = False
         self._menu_saved_passthrough = False
@@ -957,31 +958,57 @@ class ToolbarWindow(QWidget):
 
     # ── Screenshot ────────────────────────────────────────────────────────────
 
+    def _set_capture_hidden(self, hidden: bool):
+        """Oculta/restaura a coluna durante a seleção de região do screenshot.
+
+        No wlr-layer-shell a coluna (LAYER_TOP/OVERLAY) fica acima do seletor e
+        o usuário não consegue arrastá-la para fora da área a capturar. hide()/
+        show() recria a wl_layer_surface (mesmo mecanismo de
+        _change_toolbar_screen); ao voltar, reaplica camada e posição."""
+        if hidden:
+            self.hide()
+            return
+        self.show()
+        if self._lsw_ptr:
+            layer = (layershell.LAYER_OVERLAY if self._presentation_mode
+                     else layershell.LAYER_TOP)
+            layershell.set_layer(self._lsw_ptr, layer)
+            self._move_lsw_to(self._lsw_pos)
+        self.raise_()
+
     def _do_screenshot(self, clipboard: bool = False):
         import screenshot as sc
 
         def _on_result(px, hint):
             if px is None:
-                self._show_rec_dialog(
-                    "Screenshot falhou",
+                self._notify_saved(
+                    "EpicPen — Screenshot falhou",
                     hint or "Não foi possível capturar a tela.",
-                    error=True,
                 )
                 return
             ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
-            dlg = RegionSelector(px, parent=self._overlay if ov_lsw else self)
-            if ov_lsw:
-                # Popup fullscreen sobre o overlay layer-shell (mesma técnica
-                # do TextDialog; cabe porque o overlay já cobre o monitor)
-                dlg.setWindowFlags(Qt.WindowType.Popup)
-                dlg.setFixedSize(self._overlay.size())
-                dlg.move(0, 0)
-            else:
-                target = self._current_screen
-                if target is not None and dlg.windowHandle() is None:
-                    dlg.setScreen(target)
-                dlg.setWindowState(Qt.WindowState.WindowFullScreen)
-            if dlg.exec() != QDialog.DialogCode.Accepted:
+            # Oculta a coluna durante a seleção: no layer-shell ela fica acima
+            # do seletor e o usuário não consegue tirá-la da área a capturar.
+            # (Já não aparece na foto — o pixmap é capturado antes disto.)
+            # Restaurada no finally, aconteça o que acontecer.
+            self._set_capture_hidden(True)
+            try:
+                dlg = RegionSelector(px, parent=self._overlay if ov_lsw else self)
+                if ov_lsw:
+                    # Popup fullscreen sobre o overlay layer-shell (mesma técnica
+                    # do TextDialog; cabe porque o overlay já cobre o monitor)
+                    dlg.setWindowFlags(Qt.WindowType.Popup)
+                    dlg.setFixedSize(self._overlay.size())
+                    dlg.move(0, 0)
+                else:
+                    target = self._current_screen
+                    if target is not None and dlg.windowHandle() is None:
+                        dlg.setScreen(target)
+                    dlg.setWindowState(Qt.WindowState.WindowFullScreen)
+                accepted = dlg.exec() == QDialog.DialogCode.Accepted
+            finally:
+                self._set_capture_hidden(False)
+            if not accepted:
                 return  # Esc/Cancelar — sem feedback de erro
             final = dlg.result_pixmap()
             copy_it = clipboard or dlg.result_action() == "copy"
@@ -999,9 +1026,9 @@ class ToolbarWindow(QWidget):
                 return
             dest = sc.save_pixmap(final)
             if dest is None:
-                self._show_rec_dialog(
-                    "Screenshot falhou", "Não foi possível salvar a imagem.",
-                    error=True,
+                self._notify_saved(
+                    "EpicPen — Screenshot falhou",
+                    "Não foi possível salvar a imagem.",
                 )
                 return
             from pathlib import Path as _P
@@ -1011,18 +1038,11 @@ class ToolbarWindow(QWidget):
                 msg = str(dest)
             if copy_it:
                 msg += "\n(copiada para a área de transferência)"
-            if self._tray:
-                self._tray.showMessage(
-                    "EpicPen — Screenshot", f"Salva em:\n{msg}",
-                    self._tray.icon(), 4000,
-                )
-            clicked = self._show_rec_dialog(
-                "Screenshot salva", f"Imagem salva em:\n{msg}",
-                extra_button="Abrir pasta",
+            self._notify_saved(
+                "EpicPen — Screenshot",
+                f"Salva em:\n{msg}\n(clique para abrir a pasta)",
+                folder=dest.parent,
             )
-            if clicked == "Abrir pasta":
-                import subprocess
-                subprocess.Popen(["xdg-open", str(dest.parent)])
 
         sc.capture_for_edit(self, screen=self._current_screen,
                             on_result=_on_result)
@@ -1054,64 +1074,50 @@ class ToolbarWindow(QWidget):
         self._btn_record.setStyleSheet("")
         from pathlib import Path as _P
         try:
-            rel = _P(path).relative_to(_P.home())
-            msg = f"~/{rel}"
+            msg = f"~/{_P(path).relative_to(_P.home())}"
         except ValueError:
             msg = path
-        if self._tray:
-            self._tray.showMessage(
-                "EpicPen — Gravação", f"Salva em:\n{msg}",
-                self._tray.icon(), 5000,
-            )
-        clicked = self._show_rec_dialog(
-            "Gravação concluída",
-            f"Vídeo salvo em:\n{msg}",
-            extra_button="Abrir pasta",
+        self._notify_saved(
+            "EpicPen — Gravação",
+            f"Salva em:\n{msg}\n(clique para abrir a pasta)",
+            folder=_P(path).parent,
         )
-        if clicked == "Abrir pasta":
-            import subprocess
-            subprocess.Popen(["xdg-open", str(_P(path).parent)])
 
     def _on_rec_failed(self, msg: str):
         self._btn_record.setChecked(False)
         self._btn_record.setIcon(icons.record())
         self._btn_record.setStyleSheet("")
-        if self._tray:
-            self._tray.showMessage("EpicPen — Gravação falhou", msg, self._tray.icon(), 5000)
-        self._show_rec_dialog("Gravação falhou", msg, error=True)
+        self._notify_saved("EpicPen — Gravação falhou", msg)
 
-    def _show_rec_dialog(self, title: str, text: str,
-                         extra_button: str | None = None,
-                         error: bool = False) -> str | None:
-        """Modal de fim de gravação. Retorna o texto do botão extra se clicado.
+    def _notify_saved(self, title: str, body: str, folder=None):
+        """Notificação via tray (Plasma) — NUNCA um popup Qt próprio.
 
-        Em layer-shell o diálogo abre como Popup parented ao overlay (mesmo
-        padrão do TextDialog) — notificações de tray não são garantidas em
-        todos os ambientes, o modal é o feedback primário.
-        """
-        was_drawing = self._pre_dialog()
-        ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
-        box = QMessageBox(self._overlay if ov_lsw else self)
-        box.setWindowTitle(f"EpicPen — {title}")
-        box.setText(text)
-        box.setIcon(QMessageBox.Icon.Critical if error
-                    else QMessageBox.Icon.Information)
-        extra = None
-        if extra_button:
-            extra = box.addButton(extra_button, QMessageBox.ButtonRole.ActionRole)
-        box.addButton(QMessageBox.StandardButton.Ok)
-        if ov_lsw:
-            box.setWindowFlags(Qt.WindowType.Popup)
-            box.adjustSize()
-            geo = self._overlay.geometry()
-            box.move(
-                geo.x() + (geo.width() - box.width()) // 2,
-                geo.y() + (geo.height() - box.height()) // 2,
-            )
-        box.exec()
-        clicked = extra_button if (extra is not None and box.clickedButton() is extra) else None
-        self._post_dialog(was_drawing)
-        return clicked
+        Popups Qt.Popup no wlr-layer-shell grabam o input; ao fechar
+        abruptamente (foco perdido, usuário sai da janela) deixavam a toolbar
+        sem foco e fora da camada de topo — confirmado por gdb (event loop
+        normal, estado de superfície corrompido). A notificação da tray é
+        renderizada pelo Plasma, não interfere nas nossas superfícies. Se
+        `folder` for dado, clicar na notificação abre a pasta."""
+        if not self._tray:
+            return
+        self._pending_folder = str(folder) if folder else None
+        try:
+            self._tray.messageClicked.disconnect(self._on_notify_clicked)
+        except (TypeError, RuntimeError):
+            pass
+        if self._pending_folder:
+            self._tray.messageClicked.connect(self._on_notify_clicked)
+        self._tray.showMessage(title, body, self._tray.icon(), 5000)
+
+    def _on_notify_clicked(self):
+        folder = getattr(self, "_pending_folder", None)
+        try:
+            self._tray.messageClicked.disconnect(self._on_notify_clicked)
+        except (TypeError, RuntimeError):
+            pass
+        if folder:
+            import subprocess
+            subprocess.Popen(["xdg-open", folder])
 
     # ── Mode toggles ──────────────────────────────────────────────────────────
 

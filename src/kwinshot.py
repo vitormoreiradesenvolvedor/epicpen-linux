@@ -117,10 +117,16 @@ def _capture(method: str, args: list) -> QImage | None:
     expected = state["expected"]
     if res is None or not expected or len(data) < expected:
         return None
+    # QImage(bytes, ...) NÃO copia — referencia o buffer Python. QPixmap.fromImage
+    # no backend raster compartilha os dados (copy-on-write), então ao liberar os
+    # bytes o pixmap fica apontando para memória morta → segfault em .save()
+    # (use-after-free comprovado por faulthandler). .copy() aloca buffer próprio.
     img = QImage(bytes(data[:expected]), int(res["width"]),
                  int(res["height"]), int(res["stride"]),
                  QImage.Format(int(res["format"])))
-    return img if not img.isNull() else None
+    if img.isNull():
+        return None
+    return img.copy()
 
 
 # ── API pública ───────────────────────────────────────────────────────────────
