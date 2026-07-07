@@ -25,7 +25,7 @@ import threading
 import time
 
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QTimer, QMetaObject, Qt
 from PyQt6.QtMultimedia import (
     QMediaCaptureSession, QScreenCapture, QVideoSink, QVideoFrame,
 )
@@ -65,6 +65,16 @@ def main() -> int:
     session.setVideoSink(sink)
     capture.setScreen(screen)
 
+    def _request_quit():
+        """Encerra o loop Qt de forma thread-safe.
+
+        app.quit() chamado direto de uma thread ≠ main corrompe o event loop e
+        aborta o processo (SIGBUS/SIGSEGV medido em coredump). Quando o helper
+        morre assim em vez de sair limpo, a sessão ScreenCast/PipeWire cai
+        anormalmente e o KDE avisa "câmera desconectada". invokeMethod com
+        QueuedConnection posta o quit na thread do event loop."""
+        QMetaObject.invokeMethod(app, "quit", Qt.ConnectionType.QueuedConnection)
+
     out = sys.stdout.buffer
     # Fila dimensionada pela RAM disponível (estratégia RAM): amortece
     # picos do consumidor sem travar a thread de captura
@@ -86,7 +96,7 @@ def main() -> int:
             try:
                 out.write(item)
             except (BrokenPipeError, OSError, ValueError):
-                app.quit()
+                _request_quit()   # thread-safe: NÃO chamar app.quit() daqui
                 break
 
     writer = threading.Thread(target=_writer, daemon=True,
@@ -136,6 +146,19 @@ def main() -> int:
             pass  # consumidor não acompanha — descarta
 
     sink.videoFrameChanged.connect(_on_frame)
+
+    # Stream ScreenCast pode cair sozinho (renegociação de formato ao cruzar
+    # monitores de resolução/refresh diferentes, revogação de permissão do
+    # portal). Sem este handler o helper ficava vivo entregando zero frames e
+    # o KDE mantinha a "câmera" pendurada. errorOccurred → encerra limpo: o
+    # EOF no pipe faz o recorder reportar a falha em vez de travar mudo.
+    def _on_error(*_):
+        _request_quit()
+    try:
+        capture.errorOccurred.connect(_on_error)
+    except (AttributeError, TypeError):
+        pass  # binding sem o signal (Qt antigo) — segue sem o handler
+
     capture.start()
 
     # Handlers Python só rodam entre bytecodes — o timer ocioso garante

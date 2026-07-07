@@ -398,6 +398,10 @@ class ToolbarWindow(QWidget):
         self._current_color = QColor(color_hex)
 
         self._presentation_mode = False
+        # True enquanto o menu da tray está aberto (ver enter/exit_menu_mode)
+        self._menu_mode = False
+        self._menu_saved_passthrough = False
+        self._menu_saved_drawing = True
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
         self._hide_timer.setInterval(1500)
@@ -417,6 +421,7 @@ class ToolbarWindow(QWidget):
 
         overlay.text_placement_requested.connect(self._on_text_placement_requested)
         overlay.text_edit_requested.connect(self._on_text_edit_requested)
+        overlay.stroke_finished.connect(self._reaffirm_toolbar_top)
 
         self._recorder = ScreenRecorder(parent=self)
         self._recorder.started.connect(self._on_rec_started)
@@ -678,7 +683,7 @@ class ToolbarWindow(QWidget):
         # Em modo apresentação o ícone colapsado deve permanecer visível
         if self._presentation_mode:
             self._hide_timer.stop()
-            self.setWindowOpacity(1.0)
+            self._apply_opacity(1.0)
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         QTimer.singleShot(0, self._sync_overlay_mask)
         QTimer.singleShot(0, self._update_input_region)
@@ -763,11 +768,60 @@ class ToolbarWindow(QWidget):
         keepabove.set_keepabove()
         self._reaffirm_top()
 
+    def _reaffirm_toolbar_top(self):
+        """Re-eleva só a toolbar ao fim de um traço (barato: raise_() sem
+        hide/show). Na apresentação overlay e toolbar dividem LAYER_OVERLAY;
+        sem isto o compositor pode deixar o último traço acima da barra.
+        Não age fora da apresentação (lá a toolbar já está numa camada acima)."""
+        if self._presentation_mode and not self._dragging:
+            self.raise_()
+
+    # ── Modo menu da tray ─────────────────────────────────────────────────────
+
+    def enter_menu_mode(self):
+        """Menu da tray aberto: garante o menu acima da coluna e entra em modo
+        seta enquanto ele está visível.
+
+        No wlr-layer-shell a coluna vive em LAYER_TOP/OVERLAY, acima do popup
+        do Plasma — por isso baixamos a superfície para LAYER_BOTTOM para o
+        menu ficar por cima. Entrar em modo seta (passthrough) evita que a
+        coluna/overlay capturem o clique destinado ao menu. exit_menu_mode
+        restaura o estado exato de antes."""
+        if self._menu_mode:
+            return
+        self._menu_mode = True
+        self._menu_saved_passthrough = self._passthrough_active
+        self._menu_saved_drawing = self._drawing_active
+        if self._drawing_active and not self._passthrough_active:
+            self._btn_toggle.setChecked(True)
+            self._toggle_passthrough(True)
+        if self._lsw_ptr:
+            layershell.set_layer(self._lsw_ptr, layershell.LAYER_BOTTOM)
+
+    def exit_menu_mode(self):
+        """Menu da tray fechado: restaura camada e modo de desenho anteriores."""
+        if not self._menu_mode:
+            return
+        self._menu_mode = False
+        if self._lsw_ptr:
+            layer = (layershell.LAYER_OVERLAY if self._presentation_mode
+                     else layershell.LAYER_TOP)
+            layershell.set_layer(self._lsw_ptr, layer)
+            self.raise_()
+        # Só volta a desenhar se estava desenhando antes de abrir o menu
+        if self._menu_saved_drawing and not self._menu_saved_passthrough:
+            self._btn_toggle.setChecked(False)
+            self._toggle_passthrough(False)
+
     def _reaffirm_top(self):
-        self.raise_()
-        self.activateWindow()
+        # Ordem importa: dentro da mesma camada (na apresentação overlay e
+        # toolbar coexistem em LAYER_OVERLAY) quem faz raise_() por último fica
+        # no topo. A toolbar tem de ser sempre a ÚLTIMA — antes o overlay era
+        # levantado por último e os traços cobriam a barra.
         if self._drawing_active:
             self._overlay.raise_()
+        self.raise_()
+        self.activateWindow()
 
     # ── Tool selection ────────────────────────────────────────────────────────
 
@@ -1174,7 +1228,7 @@ class ToolbarWindow(QWidget):
             self._edge_timer.stop()
             self._hide_timer.stop()
             self.show()
-            self.setWindowOpacity(1.0)
+            self._apply_opacity(1.0)
             # Volta a LAYER_TOP quando sai do modo apresentação
             if self._lsw_ptr:
                 layershell.set_layer(self._lsw_ptr, layershell.LAYER_TOP)
@@ -1182,10 +1236,20 @@ class ToolbarWindow(QWidget):
             if _ov_lsw:
                 layershell.set_layer(_ov_lsw, layershell.LAYER_TOP)
 
+    def _apply_opacity(self, value: float):
+        """setWindowOpacity só funciona em X11. No wlr-layer-shell o QtWayland
+        ignora e emite 'This plugin does not support setting window opacity' a
+        cada chamada — o edge-reveal disparava isso dezenas de vezes, poluindo
+        o log. No-op silencioso em layer-shell; o click-through da apresentação
+        já é garantido por WA_TransparentForMouseEvents."""
+        if self._lsw_ptr:
+            return
+        self.setWindowOpacity(value)
+
     def _presentation_auto_hide(self):
         # Colapsado = ícone mínimo já visível; não esconder
         if self._presentation_mode and not self._collapsed:
-            self.setWindowOpacity(0.0)
+            self._apply_opacity(0.0)
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
     def _check_edge_reveal(self):
@@ -1201,7 +1265,7 @@ class ToolbarWindow(QWidget):
         near_y = ty - 20 <= cursor.y() <= ty + th + 20
         if near_x and near_y:
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
-            self.setWindowOpacity(1.0)
+            self._apply_opacity(1.0)
             self.raise_()
             if not self._lsw_ptr:
                 import keepabove
@@ -1211,7 +1275,7 @@ class ToolbarWindow(QWidget):
     def enterEvent(self, event):
         if self._presentation_mode:
             self._hide_timer.stop()
-            self.setWindowOpacity(1.0)
+            self._apply_opacity(1.0)
         # Wayland: puxa foco de teclado ao entrar na toolbar (não durante drag)
         if not self._dragging:
             self.raise_()
@@ -1365,6 +1429,11 @@ class ToolbarWindow(QWidget):
         """
         if not self._lsw_ptr:
             return
+        from screens import safe_screen
+        screen = safe_screen(screen)   # QScreen pendente → geometry()/setScreen segfaultam
+        if screen is None:
+            return
+        self._current_screen = screen
         origin = screen.geometry().topLeft()
         rel = self._lsw_pos - origin
         self._overlay.change_screen(screen)

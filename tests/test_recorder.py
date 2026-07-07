@@ -56,6 +56,9 @@ def _install_qt_stubs():
     qtc.QObject = _FakeQObject
     qtc.pyqtSignal = _pyqtSignal
     qtc.QTimer = MagicMock
+    # capture_helper importa estes; só precisam existir para o import resolver
+    qtc.QMetaObject = MagicMock()
+    qtc.Qt = MagicMock()
 
     # Multimedia stubs
     qtm = _mod("PyQt6.QtMultimedia")
@@ -836,11 +839,19 @@ def test_start_ffmpeg_emits_failed_on_popen_error(tmp_path, monkeypatch):
 
 # ── ScreenRecorder.stop: casos de borda ──────────────────────────────────────
 
+def _join_teardown(recorder):
+    """Espera o teardown assíncrono do stop() concluir (roda em thread própria)."""
+    t = recorder._stop_thread
+    if t is not None:
+        t.join(timeout=5)
+
+
 def test_stop_when_not_recording_is_noop():
     recorder = rec.ScreenRecorder()
     recorder.stopped = MagicMock()
     recorder.failed = MagicMock()
     recorder.stop()
+    _join_teardown(recorder)
     recorder.stopped.emit.assert_not_called()
     recorder.failed.emit.assert_not_called()
 
@@ -852,5 +863,30 @@ def test_stop_when_ffmpeg_never_started_emits_failed():
     recorder.stopped = MagicMock()
     recorder.failed = MagicMock()
     recorder.stop()
+    _join_teardown(recorder)
     recorder.failed.emit.assert_called_once()
     recorder.stopped.emit.assert_not_called()
+
+
+def test_stop_is_non_blocking_and_clears_active_immediately():
+    """stop() devolve o controlo na hora (teardown em background) e is_recording
+    fica False de imediato — antes bloqueava a thread da GUI em join/wait."""
+    recorder = rec.ScreenRecorder()
+    recorder._active = True
+    recorder._proc = None
+    recorder.stopped = MagicMock()
+    recorder.failed = MagicMock()
+    recorder.stop()
+    assert recorder.is_recording is False   # _active baixado sincronamente
+    _join_teardown(recorder)
+    assert recorder._stopping is False       # flag liberada no fim do teardown
+
+
+def test_start_refused_while_stopping(monkeypatch):
+    """start() recusa reentrada durante o teardown — evitaria 2 sessões de
+    ScreenCast simultâneas (KDE empilha 'câmeras')."""
+    recorder = rec.ScreenRecorder()
+    recorder._stopping = True
+    recorder.failed = MagicMock()
+    assert recorder.start() is False
+    recorder.failed.emit.assert_called_once()

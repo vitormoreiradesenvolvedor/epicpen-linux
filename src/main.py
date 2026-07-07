@@ -2,6 +2,22 @@
 import os as _os
 import sys
 
+# ── Telemetria de crash ───────────────────────────────────────────────────────
+# Segfault nativo (troca de monitor, superfície layer-shell, QScreen pendente)
+# não deixa traceback Python — o log ficava mudo. faulthandler despeja a stack
+# de TODAS as threads em SIGSEGV/SIGABRT/SIGFPE direto no stderr (→ log).
+import faulthandler as _faulthandler
+_faulthandler.enable(all_threads=True)
+
+# Exceção não tratada num slot/virtual faz o PyQt chamar qFatal() e encerrar
+# em silêncio. Um excepthook próprio garante que o traceback chegue ao log.
+def _log_excepthook(exc_type, exc, tb):
+    import traceback
+    traceback.print_exception(exc_type, exc, tb)
+    sys.stderr.flush()
+
+sys.excepthook = _log_excepthook
+
 import instance_guard
 if not instance_guard.acquire():
     print("[epicpen] Já existe uma instância em execução.", file=sys.stderr)
@@ -53,7 +69,7 @@ import layershell
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("EpicPen")
-    app.setApplicationVersion("1.0.12")
+    app.setApplicationVersion("1.0.13")
     app.setQuitOnLastWindowClosed(False)
 
     settings = cfg.load()
