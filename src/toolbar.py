@@ -1016,13 +1016,14 @@ class ToolbarWindow(QWidget):
                     "EpicPen — Screenshot", f"Salva em:\n{msg}",
                     self._tray.icon(), 4000,
                 )
-            clicked = self._show_rec_dialog(
-                "Screenshot salva", f"Imagem salva em:\n{msg}",
-                extra_button="Abrir pasta",
-            )
-            if clicked == "Abrir pasta":
+            def _open_folder():
                 import subprocess
                 subprocess.Popen(["xdg-open", str(dest.parent)])
+            self._show_rec_dialog(
+                "Screenshot salva", f"Imagem salva em:\n{msg}",
+                extra_button="Abrir pasta",
+                on_extra=_open_folder,
+            )
 
         sc.capture_for_edit(self, screen=self._current_screen,
                             on_result=_on_result)
@@ -1063,14 +1064,15 @@ class ToolbarWindow(QWidget):
                 "EpicPen — Gravação", f"Salva em:\n{msg}",
                 self._tray.icon(), 5000,
             )
-        clicked = self._show_rec_dialog(
+        def _open_folder():
+            import subprocess
+            subprocess.Popen(["xdg-open", str(_P(path).parent)])
+        self._show_rec_dialog(
             "Gravação concluída",
             f"Vídeo salvo em:\n{msg}",
             extra_button="Abrir pasta",
+            on_extra=_open_folder,
         )
-        if clicked == "Abrir pasta":
-            import subprocess
-            subprocess.Popen(["xdg-open", str(_P(path).parent)])
 
     def _on_rec_failed(self, msg: str):
         self._btn_record.setChecked(False)
@@ -1082,24 +1084,39 @@ class ToolbarWindow(QWidget):
 
     def _show_rec_dialog(self, title: str, text: str,
                          extra_button: str | None = None,
-                         error: bool = False) -> str | None:
-        """Modal de fim de gravação. Retorna o texto do botão extra se clicado.
+                         error: bool = False,
+                         on_extra=None) -> None:
+        """Notificação de fim de gravação/screenshot — NÃO-BLOQUEANTE.
 
-        Em layer-shell o diálogo abre como Popup parented ao overlay (mesmo
-        padrão do TextDialog) — notificações de tray não são garantidas em
-        todos os ambientes, o modal é o feedback primário.
+        Antes usava box.exec() (loop modal aninhado). No wlr-layer-shell o
+        popup às vezes não recebe input e o exec() NUNCA retornava, congelando
+        toda a GUI — comprovado por gdb no processo travado: QDialog::exec()
+        preso dentro do event loop principal, disparado por um signal em fila
+        (stopped/failed emitido da thread de teardown). Agora usa show() + o
+        sinal buttonClicked; a app nunca trava. on_extra() é chamado se o
+        utilizador clicar no botão extra (ex.: "Abrir pasta").
+
+        A notificação da tray (Plasma) continua sendo o feedback primário e
+        sempre visível; este diálogo é complementar.
         """
-        was_drawing = self._pre_dialog()
         ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
         box = QMessageBox(self._overlay if ov_lsw else self)
         box.setWindowTitle(f"EpicPen — {title}")
         box.setText(text)
         box.setIcon(QMessageBox.Icon.Critical if error
                     else QMessageBox.Icon.Information)
+        box.setModal(False)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         extra = None
         if extra_button:
             extra = box.addButton(extra_button, QMessageBox.ButtonRole.ActionRole)
         box.addButton(QMessageBox.StandardButton.Ok)
+
+        def _on_click(btn):
+            if extra is not None and btn is extra and on_extra is not None:
+                on_extra()
+        box.buttonClicked.connect(_on_click)
+
         if ov_lsw:
             box.setWindowFlags(Qt.WindowType.Popup)
             box.adjustSize()
@@ -1108,10 +1125,9 @@ class ToolbarWindow(QWidget):
                 geo.x() + (geo.width() - box.width()) // 2,
                 geo.y() + (geo.height() - box.height()) // 2,
             )
-        box.exec()
-        clicked = extra_button if (extra is not None and box.clickedButton() is extra) else None
-        self._post_dialog(was_drawing)
-        return clicked
+        box.show()
+        box.raise_()
+        box.activateWindow()
 
     # ── Mode toggles ──────────────────────────────────────────────────────────
 
