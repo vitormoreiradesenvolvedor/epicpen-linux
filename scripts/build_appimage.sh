@@ -270,6 +270,102 @@ build_bundled_grim() {
   echo "  → grim bundlado: $(du -sh "$GRIM_BIN" | cut -f1)"
 }
 
+# ── GStreamer + PyGObject (captura via portal ScreenCast) ────────────────────
+# Empacota, num diretório ISOLADO (usr/lib/gstreamer-bundle/), o stack usado só
+# pelo subprocesso portal_capture_helper.py: gravar uma janela específica ou
+# ocultar o cursor exigem o portal freedesktop, cujo stream PipeWire é consumido
+# com GStreamer. O isolamento (env dedicado em portalcast.helper_env) evita que
+# o glib do bundle contamine o processo Qt principal.
+#
+# Best-effort e NÃO-FATAL: qualquer falha só desabilita os modos janela/ocultar
+# cursor no AppImage (o recorder cai para o QScreenCapture silencioso). As libs
+# vêm do próprio runner Ubuntu 22.04 (mesma baseline glibc do resto do AppImage).
+bundle_gstreamer() {
+  echo "→ Empacotando GStreamer + PyGObject (captura via portal)..."
+  set +e
+  local GST_BUNDLE="$APPDIR/usr/lib/gstreamer-bundle"
+  local SYS="/usr/lib/$(uname -m)-linux-gnu"
+  [ -d "$SYS" ] || SYS="/usr/lib64"
+  mkdir -p "$GST_BUNDLE/gstreamer-1.0" "$GST_BUNDLE/girepository-1.0"
+
+  # PyGObject no python standalone. glib do Ubuntu 22.04 é 2.72 → girepository-1.0
+  # (PyGObject <3.50); --no-deps evita puxar pycairo (não usamos cairo).
+  "$APPDIR_PYTHON" -m pip install --quiet --no-deps "PyGObject<3.50" 2>/dev/null
+  if ! "$APPDIR_PYTHON" -c "import gi" 2>/dev/null; then
+    echo "  AVISO: PyGObject não instalou — captura de janela/ocultar cursor ficará indisponível no AppImage"
+    rm -rf "$GST_BUNDLE"
+    set -e; return 0
+  fi
+
+  # Copia uma lib do sistema para o bundle (resolve symlink → arquivo real).
+  _gst_cp() {
+    local pat="$1" dst="${2:-$GST_BUNDLE}" f
+    for f in $pat; do
+      [ -f "$f" ] && cp -Lf "$f" "$dst/$(basename "$f")" 2>/dev/null
+    done
+  }
+  # Copia deps transitivas via ldd, exceto libc/loader (ficam do sistema).
+  _gst_deps() {
+    local target="$1" base dep
+    ldd "$target" 2>/dev/null | awk '/=> \// {print $3}' | while read -r dep; do
+      [ -f "$dep" ] || continue
+      base=$(basename "$dep")
+      case "$base" in
+        libc.so.*|libm.so.*|libpthread.so.*|libdl.so.*|librt.so.*|\
+        ld-linux*|libresolv.so.*|libpython*) continue;;
+      esac
+      [ -f "$GST_BUNDLE/$base" ] && continue
+      cp -Lf "$dep" "$GST_BUNDLE/$base" 2>/dev/null
+    done
+  }
+
+  # Bibliotecas GStreamer + GObject-introspection + PipeWire.
+  _gst_cp "$SYS/libgstreamer-1.0.so.0"
+  _gst_cp "$SYS/libgstbase-1.0.so.0"
+  _gst_cp "$SYS/libgstapp-1.0.so.0"
+  _gst_cp "$SYS/libgstvideo-1.0.so.0"
+  _gst_cp "$SYS/libgstaudio-1.0.so.0"
+  _gst_cp "$SYS/libgstpbutils-1.0.so.0"
+  _gst_cp "$SYS/libgsttag-1.0.so.0"
+  _gst_cp "$SYS/libgirepository-1.0.so.1"
+  _gst_cp "$SYS/libpipewire-0.3.so.0"
+  _gst_cp "$SYS/liborc-0.4.so.0"
+
+  # Plugins GStreamer necessários (nomes variam entre 1.20/1.22 — glob cobre).
+  local PDIR="$SYS/gstreamer-1.0"
+  for plug in libgstcoreelements libgstapp libgstvideoconvert libgstvideoscale \
+              libgstvideoconvertscale libgstvideorate libgstvideofilter \
+              libgstpipewire libgstvideotestsrc libgsttypefindfunctions; do
+    _gst_cp "$PDIR/${plug}.so" "$GST_BUNDLE/gstreamer-1.0"
+  done
+
+  # Typelibs (GI): descrições das APIs carregadas pelo gi em runtime.
+  local TDIR="$SYS/girepository-1.0"
+  for tl in GLib-2.0 GObject-2.0 Gio-2.0 GModule-2.0 \
+            Gst-1.0 GstBase-1.0 GstApp-1.0 GstVideo-1.0; do
+    _gst_cp "$TDIR/${tl}.typelib" "$GST_BUNDLE/girepository-1.0"
+  done
+
+  # Deps transitivas (glib→pcre2/ffi, pipewire, orc…). Dois passes cobrem a
+  # cadeia curta; libs já presentes são puladas.
+  local pass f
+  for pass in 1 2; do
+    for f in "$GST_BUNDLE"/*.so* "$GST_BUNDLE"/gstreamer-1.0/*.so; do
+      [ -f "$f" ] && _gst_deps "$f"
+    done
+  done
+
+  local n_lib n_plug n_tl
+  n_lib=$(find "$GST_BUNDLE" -maxdepth 1 -name '*.so*' | wc -l)
+  n_plug=$(find "$GST_BUNDLE/gstreamer-1.0" -name '*.so' | wc -l)
+  n_tl=$(find "$GST_BUNDLE/girepository-1.0" -name '*.typelib' | wc -l)
+  echo "  bundle GStreamer: ${n_lib} libs, ${n_plug} plugins, ${n_tl} typelibs ($(du -sh "$GST_BUNDLE" 2>/dev/null | cut -f1))"
+  if [ "$n_plug" -eq 0 ] || [ "$n_tl" -eq 0 ]; then
+    echo "  AVISO: bundle incompleto (plugins/typelibs) — captura via portal pode não funcionar no AppImage"
+  fi
+  set -e
+}
+
 # ── 1. Gera ícone PNG ──────────────────────────────────────────────────
 echo "→ Gerando ícone..."
 python3 "$SCRIPT_DIR/generate_icon.py"
@@ -277,6 +373,7 @@ python3 "$SCRIPT_DIR/generate_icon.py"
 # ── 2. Prepara AppDir ─────────────────────────────────────────────────
 echo "→ Preparando AppDir..."
 rm -rf "$APPDIR/usr/bin" "$APPDIR/usr/lib/python-standalone" "$APPDIR/usr/lib/epicpen-venv"
+rm -rf "$APPDIR/usr/lib/gstreamer-bundle"
 # Remove libs que possam ter ficado de builds anteriores
 rm -f "$APPDIR/usr/lib/libstdc++.so.6" "$APPDIR/usr/lib/libgcc_s.so.1"
 rm -f "$APPDIR/usr/lib"/libxcb*.so* "$APPDIR/usr/lib"/libxkbcommon*.so* "$APPDIR/usr/lib/libX11-xcb.so.1"
@@ -306,6 +403,9 @@ echo "  Qt version: $("$APPDIR_PYTHON" -c 'from PyQt6.QtCore import QT_VERSION_S
 # Descobre caminho dos plugins do PyQt6 bundled
 PYQT6_PLUGINS=$("$APPDIR_PYTHON" -c \
   "import PyQt6, os; print(os.path.join(os.path.dirname(PyQt6.__file__), 'Qt6', 'plugins'))")
+
+# ── 3b. GStreamer + PyGObject (captura via portal: janela / ocultar cursor) ──
+bundle_gstreamer
 
 # ── 4. Copia fontes e recursos ────────────────────────────────────────
 echo "→ Copiando fontes e recursos..."
