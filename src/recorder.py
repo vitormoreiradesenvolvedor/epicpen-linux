@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import QApplication
 from PyQt6.QtMultimedia import QVideoFrame
 from PyQt6.QtGui import QImage
 
+import portalcast
 from hostenv import host_env
 
 _EXTRA_PATHS = [
@@ -334,13 +335,16 @@ def _queue_frames(frame_bytes: int, mem_available: int) -> int:
 # descartá-los como duplicados — medido: 2/3 dos frames perdidos a 144.
 _VIDEO_TIMEBASE_FPS = 1000
 
+# Sentinela p/ "posição do monitor desconhecida" no sinal region_needed.
+NOPOS = -2147483648
+
 
 def _build_ffmpeg_cmd(
     ffmpeg: str, w: int, h: int, fps: int, dest: str, has_x264: bool,
     pix_fmt: str = "rgba",
     vaapi_device: Optional[str] = None,
     raw_intermediate: bool = False,
-    crop: Optional[tuple[int, int]] = None,
+    crop: Optional[tuple] = None,
 ) -> list[str]:
     """Comando do processo de VÍDEO: rawvideo via stdin → .mkv (ou .nut).
 
@@ -373,7 +377,12 @@ def _build_ffmpeg_cmd(
 
     vf_parts: list[str] = []
     if crop is not None:
-        vf_parts.append(f"crop={crop[0]}:{crop[1]}:0:0")
+        # crop = (w, h[, x, y]) — recorte da área visível. x/y omitidos = 0
+        # (usado para descartar padding de stride); com x/y = recorte de região.
+        cw, ch = crop[0], crop[1]
+        cx = crop[2] if len(crop) > 2 else 0
+        cy = crop[3] if len(crop) > 3 else 0
+        vf_parts.append(f"crop={cw}:{ch}:{cx}:{cy}")
 
     if raw_intermediate:
         # Estratégia disk: zero encode agora; só memcpy pipe → arquivo .nut
@@ -635,6 +644,15 @@ class ScreenRecorder(QObject):
     started = pyqtSignal()
     stopped = pyqtSignal(str)   # path do arquivo salvo
     failed  = pyqtSignal(str)   # mensagem de erro
+    # (source, token): o portal devolveu um restore_token para gravar a mesma
+    # fonte sem novo seletor da próxima vez. A UI persiste no config.
+    restore_token_ready = pyqtSignal(str, str)
+    # Modo região: o 1º frame do MONITOR já capturado (após o seletor do portal)
+    # vai para a UI como fundo da seleção do retângulo. A UI responde com
+    # provide_region(). (data, w, h, stride, pix_fmt, pos_x, pos_y) — pos_* é a
+    # posição do monitor no layout (do portal) p/ a UI achar o monitor certo;
+    # NOPOS quando o backend não fornece.
+    region_needed = pyqtSignal(bytes, int, int, int, str, int, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -665,6 +683,21 @@ class ScreenRecorder(QObject):
         self._rec_vaapi_dev: Optional[str] = None
         self._rec_audio_devs: list[str] = []
         self._rec_strategy = "cpu"
+        # Fonte da captura: "monitor" (QScreenCapture silencioso ou portal) ou
+        # "window" (só portal). show_cursor False força o portal.
+        self._rec_source = "monitor"
+        self._rec_show_cursor = True
+        self._rec_restore_token: Optional[str] = None
+        # Crop do modo "region", em pixels do FRAME: (cw, ch, cx, cy). Definido
+        # pela UI (provide_region) após o seletor do portal e a seleção do
+        # retângulo sobre o 1º frame. None = grava o monitor inteiro.
+        self._rec_crop: Optional[tuple] = None
+        self._region_event = threading.Event()
+        self._region_crop: Optional[tuple] = None
+        self._region_cancelled = False
+        # Fonte real pedida ao portal ("monitor"/"window"); "region" vira monitor.
+        self._portal_source = "monitor"
+        self._use_portal = False
         self._capture_dest: Optional[Path] = None  # .mkv (ou .nut em disk)
         self._audio_dest: Optional[Path] = None    # .mka do processo de áudio
         self._audio_proc: Optional[subprocess.Popen] = None
@@ -675,14 +708,62 @@ class ScreenRecorder(QObject):
     def is_recording(self) -> bool:
         return self._active
 
-    def start(self, screen=None) -> bool:
-        """Inicia a gravação. screen: monitor a capturar (default: maior Hz)."""
+    def provide_region(self, crop: Optional[tuple], cancelled: bool = False):
+        """UI responde ao region_needed: crop = (cw,ch,cx,cy) em px do frame,
+        None = monitor inteiro, cancelled = abortar a gravação. Libera a thread
+        do pump que espera em _region_event."""
+        self._region_crop = crop
+        self._region_cancelled = bool(cancelled)
+        self._region_event.set()
+
+    def start(self, screen=None, source: str = "monitor",
+              show_cursor: bool = True,
+              restore_token: Optional[str] = None,
+              record_mic: bool = True) -> bool:
+        """Inicia a gravação.
+
+        record_mic: False grava só o som do sistema (monitor dos alto-falantes),
+        sem o microfone.
+
+        screen: monitor a capturar no caminho silencioso (default: maior Hz).
+        source: "monitor" (tela), "window" (uma janela) ou "region" (retângulo).
+        show_cursor: False oculta o cursor (exige portal).
+        restore_token: token do portal p/ gravar a mesma fonte sem novo seletor.
+        Modo "region": captura o MONITOR (composto, inclui o overlay do EpicPen)
+        e recorta no retângulo escolhido DEPOIS, sobre o 1º frame (ver
+        region_needed/_pump_loop). Cross-desktop (não usa API de compositor).
+
+        Gravar janela ou ocultar o cursor no Wayland só é possível pelo portal
+        ScreenCast (org.freedesktop.portal.ScreenCast). Monitor com cursor
+        visível continua no QScreenCapture silencioso (sem seletor).
+        """
         if self._active:
             return True
         if self._stopping:
             # Gravação anterior ainda finalizando (ffmpeg flush): iniciar agora
             # subiria um 2º stream ScreenCast antes de o 1º fechar.
             self.failed.emit("Aguarde: finalizando a gravação anterior…")
+            return False
+
+        self._rec_source = source
+        self._rec_show_cursor = show_cursor
+        self._rec_restore_token = restore_token
+        # Modo região: o retângulo é escolhido DEPOIS do seletor do portal,
+        # sobre o 1º frame (ver _pump_loop). Zera o estado da negociação.
+        self._rec_crop = None
+        self._region_crop = None
+        self._region_cancelled = False
+        self._region_event.clear()
+        # "region" captura o MONITOR (composto) e recorta depois — o portal só
+        # conhece monitor/janela, então a fonte real pedida ao portal é monitor.
+        self._portal_source = "monitor" if source == "region" else source
+        self._use_portal = portalcast.needs_portal(source, show_cursor)
+        if self._use_portal and not portalcast.available():
+            self.failed.emit(
+                "Gravar uma janela ou ocultar o cursor precisa do GStreamer "
+                "com plugin PipeWire.\nInstale: gstreamer1-plugins-good, "
+                "gstreamer1-plugin-pipewire e python3-gobject."
+            )
             return False
 
         ffmpeg, vaapi_dev, has_x264, audio_mode = _pick_ffmpeg()
@@ -714,6 +795,11 @@ class ScreenRecorder(QObject):
         self._rec_has_x264 = has_x264
         self._rec_vaapi_dev = vaapi_dev
         self._rec_audio_devs = _default_audio_devices() if audio_mode else []
+        if not record_mic:
+            # Sem microfone: mantém só o monitor dos alto-falantes (som do
+            # sistema). O mic é o default-source (não termina em ".monitor").
+            self._rec_audio_devs = [d for d in self._rec_audio_devs
+                                    if d.endswith(".monitor")]
         self._proc = None
         self._frame_nbytes = 0
 
@@ -765,13 +851,29 @@ class ScreenRecorder(QObject):
                 self._audio_dest = None
                 self._audio_helpers = []
 
-        # Processo auxiliar de captura: a sessão de portal morre com ele
+        # Processo auxiliar de captura: a sessão de portal morre com ele.
+        # Portal (janela/ocultar cursor): portal_capture_helper + GStreamer, com
+        # stderr capturado p/ surfacar o motivo se o seletor for cancelado.
+        # Monitor com cursor: QScreenCapture silencioso (capture_helper).
+        if self._use_portal:
+            cmd = portalcast.helper_cmd(
+                self._portal_source, self._rec_show_cursor,
+                self._rec_restore_token,
+                persist=(self._rec_source == "region"),
+            )
+            helper_stderr = subprocess.PIPE
+            helper_env = portalcast.helper_env()
+        else:
+            cmd = _helper_cmd(screen.name())
+            helper_stderr = subprocess.DEVNULL
+            helper_env = None
         try:
             self._helper = subprocess.Popen(
-                _helper_cmd(screen.name()),
+                cmd,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=helper_stderr,
+                env=helper_env,
             )
         except OSError as e:
             self._stop_audio()
@@ -802,16 +904,56 @@ class ScreenRecorder(QObject):
             stride = int(header["stride"])
             pix_fmt = str(header["pix_fmt"])
         except Exception:
-            return  # helper morreu antes do 1º frame — stop() reporta
+            # Helper morreu antes do 1º frame: seletor do portal cancelado,
+            # portal indisponível ou falha de captura. Reporta e limpa —
+            # sem isto o botão ficava preso em "gravando".
+            self._fail_before_start()
+            return
+
+        # Portal devolveu um restore_token: a UI persiste p/ gravar a mesma
+        # fonte sem novo seletor. Emitido antes de qualquer frame.
+        token = header.get("restore_token")
+        if token:
+            self.restore_token_ready.emit(self._rec_source, str(token))
 
         if not self._active:
             return
+
+        # Modo região: já temos o monitor (seletor do portal passou). Lê o 1º
+        # frame, manda para a UI como fundo, e ESPERA o retângulo. Só então
+        # inicia o ffmpeg com o crop. Ordem final: seletor do portal → desenho
+        # da região → gravação (o que o usuário pediu).
+        first = None
+        if self._rec_source == "region":
+            first = helper.stdout.read(stride * h)
+            if not first or len(first) < stride * h:
+                self._fail_before_start()
+                return
+            self._region_crop = None
+            self._region_cancelled = False
+            self._region_event.clear()
+            px = int(header.get("pos_x", NOPOS))
+            py = int(header.get("pos_y", NOPOS))
+            self.region_needed.emit(bytes(first), w, h, stride, pix_fmt, px, py)
+            got = self._region_event.wait(timeout=180)
+            if not self._active:
+                return
+            if not got or self._region_cancelled:
+                self._abort_region()
+                return
+            self._rec_crop = self._region_crop  # (cw,ch,cx,cy) ou None (inteiro)
+
         if not self._start_ffmpeg(w, h, stride, pix_fmt):
             return
 
         n = self._frame_nbytes
         read = helper.stdout.read
         write = self._proc.stdin.write
+        if first is not None:
+            try:
+                write(first)
+            except (BrokenPipeError, OSError, ValueError):
+                pass
         while True:
             data = read(n)
             if not data or len(data) < n:
@@ -824,6 +966,23 @@ class ScreenRecorder(QObject):
             self._proc.stdin.close()
         except (OSError, ValueError):
             pass
+
+    def _abort_region(self):
+        """Cancela a gravação em modo região (usuário fechou o seletor de área)
+        antes de o ffmpeg iniciar. Encerra helper/áudio e reporta. Roda na
+        thread do pump."""
+        if not self._active:
+            return
+        self._active = False
+        if self._helper is not None:
+            try:
+                self._helper.terminate()
+            except (ProcessLookupError, OSError):
+                pass
+        self._stop_audio()
+        self._cleanup_temp(self._audio_dest)
+        self._audio_dest = None
+        self.failed.emit("Seleção de região cancelada.")
 
     def _start_ffmpeg(self, w: int, h: int, stride: int, pix_fmt: str) -> bool:
         """Inicia o processo ffmpeg com a geometria do header do helper.
@@ -838,6 +997,15 @@ class ScreenRecorder(QObject):
 
         src_w = stride // 4
         crop = (w, h) if src_w != w else None
+        # Modo região: crop já vem em px do FRAME (selecionado sobre o 1º frame).
+        # Só clampa aos limites e força dimensões pares (h264/yuv420p exige).
+        if self._rec_crop is not None:
+            cw, ch, cx, cy = self._rec_crop
+            cx = max(0, min(int(cx), w - 2))
+            cy = max(0, min(int(cy), h - 2))
+            cw = max(2, min(int(cw) & ~1, w - cx))
+            ch = max(2, min(int(ch) & ~1, h - cy))
+            crop = (cw, ch, cx, cy)
         self._rec_w, self._rec_h = w, h
         self._frame_nbytes = stride * h
 
@@ -873,6 +1041,47 @@ class ScreenRecorder(QObject):
         except Exception:
             pass
         return True
+
+    def _fail_before_start(self):
+        """Captura abortada antes do 1º frame (seletor do portal cancelado,
+        portal indisponível, falha de captura). Reporta o motivo e libera
+        áudio/helper. Roda na thread do pump; o guard evita corrida com stop()."""
+        if not self._active:
+            return
+        self._active = False
+
+        reason = ""
+        helper = self._helper
+        if helper is not None:
+            try:
+                if helper.stderr is not None:
+                    err = helper.stderr.read() or b""
+                    if err:
+                        try:
+                            last = err.decode().strip().splitlines()[-1]
+                            reason = json.loads(last).get("error", "")
+                        except Exception:
+                            reason = err.decode(errors="replace").strip()
+            except Exception:
+                pass
+            try:
+                helper.wait(timeout=3)
+            except Exception:
+                try:
+                    helper.kill()
+                except Exception:
+                    pass
+            self._helper = None
+
+        self._stop_audio()
+        self._cleanup_temp(self._audio_dest)
+        self._audio_dest = None
+
+        if not reason:
+            reason = ("Nenhuma janela selecionada."
+                      if self._rec_source == "window"
+                      else "Gravação cancelada.")
+        self.failed.emit(reason)
 
     def stop(self):
         """Encerra a gravação sem bloquear a thread da GUI.
