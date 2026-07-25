@@ -55,6 +55,16 @@ def line() -> QIcon:
     return _make(draw)
 
 
+def arrow() -> QIcon:
+    def draw(p):
+        p.setPen(QPen(_W, 2, Qt.PenStyle.SolidLine,
+                      Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.drawLine(QPointF(3, 19), QPointF(18, 4))          # haste
+        p.drawLine(QPointF(18, 4), QPointF(11, 5))          # farpa 1
+        p.drawLine(QPointF(18, 4), QPointF(17, 11))         # farpa 2
+    return _make(draw)
+
+
 def rect() -> QIcon:
     def draw(p):
         p.setPen(QPen(_W, 1.8)); p.setBrush(Qt.BrushStyle.NoBrush)

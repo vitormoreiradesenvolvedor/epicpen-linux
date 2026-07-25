@@ -12,6 +12,11 @@ DEFAULTS: dict = {
     "magnifier_zoom": 3,
     "whiteboard": False,
     "start_hidden": False,
+    # Gravação: fonte ("monitor"|"window"), cursor visível e tokens de
+    # restauração do portal (por fonte) p/ não repetir o seletor.
+    "rec_source": "monitor",
+    "rec_show_cursor": True,
+    "rec_tokens": {},
 }
 
 

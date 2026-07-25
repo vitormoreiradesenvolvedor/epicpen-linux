@@ -2,8 +2,9 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QSlider, QColorDialog, QFrame, QLayout,
     QDialog, QLabel, QLineEdit, QPlainTextEdit, QSpinBox, QFontComboBox, QDialogButtonBox,
+    QRadioButton, QCheckBox, QButtonGroup,
 )
-from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QSize, QEvent
+from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QSize, QEvent, pyqtSignal
 from PyQt6.QtGui import QColor, QCursor
 
 import icons
@@ -11,6 +12,8 @@ import layershell
 from hotkeys import GlobalHotkeyListener
 from magnifier import MagnifierWindow
 from recorder import ScreenRecorder
+import portalcast
+
 
 _ICON = QSize(16, 16)
 _BTN  = 25   # button side (px) — 30% menor que o original 36px
@@ -256,6 +259,8 @@ class RegionSelector(QDialog):
 class TextDialog(QDialog):
     """Diálogo para configurar texto antes de inserir na tela."""
 
+    preview_changed = pyqtSignal()   # texto/fonte/tamanho/cor mudaram
+
     def __init__(self, default_color, parent=None, *,
                  initial_text: str = "",
                  initial_font: str = "",
@@ -312,6 +317,13 @@ class TextDialog(QDialog):
         lay.addWidget(buttons)
         self._text_edit.installEventFilter(self)
 
+        # Preview ao vivo: emite a cada mudança para o overlay renderizar
+        # o texto na tela conforme o usuário digita/ajusta.
+        self._text_edit.textChanged.connect(self.preview_changed.emit)
+        self._font_combo.currentFontChanged.connect(
+            lambda *_: self.preview_changed.emit())
+        self._size_spin.valueChanged.connect(lambda *_: self.preview_changed.emit())
+
     def _pick_color(self):
         if self.windowFlags() & Qt.WindowType.Popup:
             dlg = QColorDialog(self._color, self)
@@ -322,11 +334,13 @@ class TextDialog(QDialog):
                 if c.isValid():
                     self._color = c
                     self._update_color_preview()
+                    self.preview_changed.emit()
         else:
             c = QColorDialog.getColor(self._color, self, "Cor do texto")
             if c.isValid():
                 self._color = c
                 self._update_color_preview()
+                self.preview_changed.emit()
 
     def eventFilter(self, obj, event):
         if (obj is self._text_edit
@@ -353,6 +367,108 @@ class TextDialog(QDialog):
 
     def color(self):
         return QColor(self._color)
+
+
+class RecordOptionsDialog(QDialog):
+    """Opções pré-gravação: fonte (tela/janela) e cursor visível.
+
+    Gravar uma janela ou ocultar o cursor exige o seletor do portal do
+    sistema (aparece 1x ao iniciar); gravar a tela com o cursor visível
+    segue silencioso. O aviso reflete a escolha em tempo real.
+    """
+
+    def __init__(self, source: str, show_cursor: bool, record_mic: bool = True,
+                 parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Gravar tela")
+        self.setModal(True)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setSpacing(8)
+
+        lay.addWidget(QLabel("<b>O que gravar</b>"))
+        self._rb_monitor = QRadioButton("🖥️  A tela inteira (monitor)")
+        self._rb_window  = QRadioButton("🪟  Uma janela / aplicativo")
+        self._rb_region  = QRadioButton("🔲  Uma região (retângulo) — inclui seus desenhos")
+        grp = QButtonGroup(self)
+        grp.addButton(self._rb_monitor)
+        grp.addButton(self._rb_window)
+        grp.addButton(self._rb_region)
+        {"window": self._rb_window, "region": self._rb_region}.get(
+            source, self._rb_monitor).setChecked(True)
+        lay.addWidget(self._rb_monitor)
+        lay.addWidget(self._rb_window)
+        lay.addWidget(self._rb_region)
+
+        self._cb_cursor = QCheckBox("Mostrar o cursor do mouse na gravação")
+        self._cb_cursor.setChecked(show_cursor)
+        lay.addWidget(self._cb_cursor)
+
+        self._cb_mic = QCheckBox("Gravar o microfone")
+        self._cb_mic.setChecked(record_mic)
+        lay.addWidget(self._cb_mic)
+
+        # Só região: limpa a tela lembrada → o seletor do sistema reaparece
+        # para reescolher o monitor. Escondido nos outros modos.
+        self._cb_repick = QCheckBox("Escolher a tela novamente (mostra o seletor)")
+        self._cb_repick.setChecked(False)
+        lay.addWidget(self._cb_repick)
+
+        self._hint = QLabel()
+        self._hint.setWordWrap(True)
+        self._hint.setStyleSheet("color:#888; font-size:11px;")
+        lay.addWidget(self._hint)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Iniciar gravação")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Cancelar")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+        for w in (self._rb_monitor, self._rb_window, self._rb_region, self._cb_cursor):
+            w.toggled.connect(self._update_hint)
+        self._update_hint()
+
+    def _update_hint(self):
+        # "Reescolher a tela" só faz sentido em região (lembra a tela).
+        self._cb_repick.setVisible(self._rb_region.isChecked())
+        if self._rb_region.isChecked():
+            self._hint.setText(
+                "Você desenha um retângulo na tela atual; grava só aquela área — "
+                "com seus desenhos e o cursor. (Não mova a janela: o retângulo "
+                "é fixo. O seletor do sistema aparece só na 1ª vez.)"
+            )
+            return
+        source = "window" if self._rb_window.isChecked() else "monitor"
+        needs_portal = portalcast.needs_portal(source, self._cb_cursor.isChecked())
+        if self._rb_window.isChecked():
+            self._hint.setText(
+                "Captura só a janela (sem os desenhos do EpicPen — eles ficam "
+                "numa camada separada). Para incluí-los, use região ou monitor. "
+                "O seletor do sistema aparecerá."
+            )
+        elif needs_portal:
+            self._hint.setText(
+                "O seletor de compartilhamento do sistema aparecerá para você "
+                "escolher a fonte."
+            )
+        else:
+            self._hint.setText("Grava o monitor atual, sem diálogos.")
+
+    def result_options(self) -> tuple[str, bool, bool]:
+        if self._rb_window.isChecked():
+            source = "window"
+        elif self._rb_region.isChecked():
+            source = "region"
+        else:
+            source = "monitor"
+        repick = self._rb_region.isChecked() and self._cb_repick.isChecked()
+        return (source, self._cb_cursor.isChecked(), repick,
+                self._cb_mic.isChecked())
 
 
 class ToolbarWindow(QWidget):
@@ -428,6 +544,13 @@ class ToolbarWindow(QWidget):
         self._recorder.started.connect(self._on_rec_started)
         self._recorder.stopped.connect(self._on_rec_stopped)
         self._recorder.failed.connect(self._on_rec_failed)
+        self._recorder.restore_token_ready.connect(self._on_restore_token)
+        self._recorder.region_needed.connect(self._on_region_needed)
+        # Preferências de gravação persistidas
+        self._rec_source = self._cfg.get("rec_source", "monitor")
+        self._rec_show_cursor = bool(self._cfg.get("rec_show_cursor", True))
+        self._rec_mic = bool(self._cfg.get("rec_mic", True))
+        self._rec_tokens = dict(self._cfg.get("rec_tokens", {}))
 
         # Tooltip interno: QLabel filho da janela, posicionado à direita da coluna
         # de botões. Não depende de popup Qt — funciona em wlr-layer-shell.
@@ -529,6 +652,8 @@ class ToolbarWindow(QWidget):
         self._btn_hl.setIcon(icons.highlighter())
         self._btn_line   = self._mk_btn("Linha (L)")
         self._btn_line.setIcon(icons.line())
+        self._btn_arrow  = self._mk_btn("Seta (A)")
+        self._btn_arrow.setIcon(icons.arrow())
         self._btn_rect   = self._mk_btn("Retângulo (R)")
         self._btn_rect.setIcon(icons.rect())
         self._btn_circle = self._mk_btn("Elipse (E)")
@@ -543,7 +668,7 @@ class ToolbarWindow(QWidget):
         self._btn_text.setIcon(icons.text_tool())
 
         self._tool_buttons = [
-            self._btn_pen, self._btn_hl, self._btn_line,
+            self._btn_pen, self._btn_hl, self._btn_line, self._btn_arrow,
             self._btn_rect, self._btn_circle, self._btn_eraser,
             self._btn_laser, self._btn_drag, self._btn_text,
         ]
@@ -554,6 +679,7 @@ class ToolbarWindow(QWidget):
         self._btn_pen.clicked.connect(lambda c: self._select_tool("pen") if c else self._activate_arrow_mode())
         self._btn_hl.clicked.connect(lambda c: self._select_tool("highlighter") if c else self._activate_arrow_mode())
         self._btn_line.clicked.connect(lambda c: self._select_tool("line") if c else self._activate_arrow_mode())
+        self._btn_arrow.clicked.connect(lambda c: self._select_tool("arrow") if c else self._activate_arrow_mode())
         self._btn_rect.clicked.connect(lambda c: self._select_tool("rect") if c else self._activate_arrow_mode())
         self._btn_circle.clicked.connect(lambda c: self._select_tool("circle") if c else self._activate_arrow_mode())
         self._btn_eraser.clicked.connect(lambda c: self._select_tool("eraser") if c else self._activate_arrow_mode())
@@ -741,6 +867,9 @@ class ToolbarWindow(QWidget):
             "size": self._size_slider.value(),
             "toolbar_pos": {"x": self._lsw_pos.x(), "y": self._lsw_pos.y()},
             "magnifier_zoom": self._zoom_slider.value(),
+            "rec_source": self._rec_source,
+            "rec_show_cursor": self._rec_show_cursor,
+            "rec_tokens": dict(self._rec_tokens),
         }
 
     def set_tray(self, tray):
@@ -845,7 +974,7 @@ class ToolbarWindow(QWidget):
             b.setChecked(False)
         btn_map = {
             "pen": self._btn_pen, "highlighter": self._btn_hl,
-            "line": self._btn_line, "rect": self._btn_rect,
+            "line": self._btn_line, "arrow": self._btn_arrow, "rect": self._btn_rect,
             "circle": self._btn_circle, "eraser": self._btn_eraser,
             "laser": self._btn_laser, "drag": self._btn_drag, "text": self._btn_text,
         }
@@ -889,10 +1018,16 @@ class ToolbarWindow(QWidget):
             dlg.setWindowFlags(Qt.WindowType.Popup)
             dlg.adjustSize()
             dlg.move(pos.x() + 8, pos.y() + 8)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            self._overlay.place_text(
-                pos, dlg.text(), dlg.font_family(), dlg.font_size(), dlg.color()
-            )
+        # Preview ao vivo: o texto aparece na tela conforme é digitado.
+        dlg.preview_changed.connect(lambda: self._overlay.set_text_preview(
+            pos, dlg.text(), dlg.font_family(), dlg.font_size(), dlg.color()))
+        try:
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                self._overlay.place_text(
+                    pos, dlg.text(), dlg.font_family(), dlg.font_size(), dlg.color()
+                )
+        finally:
+            self._overlay.clear_text_preview()
         self._post_dialog(was_drawing)
 
     def _on_text_edit_requested(self, idx: int):
@@ -993,19 +1128,9 @@ class ToolbarWindow(QWidget):
             # Restaurada no finally, aconteça o que acontecer.
             self._set_capture_hidden(True)
             try:
-                dlg = RegionSelector(px, parent=self._overlay if ov_lsw else self)
-                if ov_lsw:
-                    # Popup fullscreen sobre o overlay layer-shell (mesma técnica
-                    # do TextDialog; cabe porque o overlay já cobre o monitor)
-                    dlg.setWindowFlags(Qt.WindowType.Popup)
-                    dlg.setFixedSize(self._overlay.size())
-                    dlg.move(0, 0)
-                else:
-                    target = self._current_screen
-                    if target is not None and dlg.windowHandle() is None:
-                        dlg.setScreen(target)
-                    dlg.setWindowState(Qt.WindowState.WindowFullScreen)
-                accepted = dlg.exec() == QDialog.DialogCode.Accepted
+                # Seletor cobre o monitor inteiro (não achata o screenshot nem
+                # esconde a faixa do painel). Ver _exec_region_selector.
+                dlg, accepted, _lw, _lh = self._exec_region_selector(px)
             finally:
                 self._set_capture_hidden(False)
             if not accepted:
@@ -1049,13 +1174,256 @@ class ToolbarWindow(QWidget):
 
     # ── Screen recorder ───────────────────────────────────────────────────────
 
-    def _toggle_record(self, checked: bool):
-        if checked:
-            # Grava o monitor selecionado na toolbar (não o de maior Hz)
-            if not self._recorder.start(screen=self._current_screen):
-                self._btn_record.setChecked(False)
-        else:
+    def _toggle_record(self, checked: bool = False):
+        # Decide pelo ESTADO REAL do recorder, não pelo `checked` do botão:
+        # sinais async (failed/stopped) podem desmarcar o botão enquanto o
+        # usuário ainda vê "gravando", e aí um clique de PARAR chegava como
+        # checked=True e reabria o modal (iniciando de novo). Gravando →
+        # sempre para; parado → sempre abre o fluxo de início.
+        if self._recorder.is_recording:
+            self._btn_record.setChecked(False)
             self._recorder.stop()
+            return
+
+        opts = self._ask_record_options()
+        if opts is None:
+            self._btn_record.setChecked(False)
+            return
+        source, show_cursor, repick, record_mic = opts
+        self._rec_source, self._rec_show_cursor = source, show_cursor
+        self._rec_mic = record_mic
+        # "Reescolher a tela": esquece o token → o seletor do sistema reaparece.
+        if repick:
+            self._rec_tokens.pop("region", None)
+        self._save_state()
+        if source == "region":
+            # Seleção do retângulo é assíncrona (screenshot → seletor); o start
+            # acontece no callback. Ver _begin_region_recording.
+            self._begin_region_recording(show_cursor, record_mic)
+            return
+        # Monitor e janela: sempre abrem o seletor (sem token). Só região lembra.
+        # Grava o monitor selecionado na toolbar (não o de maior Hz)
+        if not self._recorder.start(
+            screen=self._current_screen, source=source,
+            show_cursor=show_cursor, restore_token=None, record_mic=record_mic,
+        ):
+            self._btn_record.setChecked(False)
+
+    def _screen_for_frame(self, w: int, h: int, pos_x=None, pos_y=None):
+        """Qual monitor o portal capturou. Prioriza a POSIÇÃO do stream (do
+        portal): distingue telas de mesma resolução. Fallback: casa por tamanho
+        (geometria × DPR); por fim, monitor atual."""
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import QPoint
+        from recorder import NOPOS
+        if pos_x is not None and pos_x != NOPOS:
+            s = QApplication.screenAt(QPoint(int(pos_x), int(pos_y)))
+            if s is not None:
+                return s
+            for s in QApplication.screens():
+                g = s.geometry()
+                if g.x() == int(pos_x) and g.y() == int(pos_y):
+                    return s
+        for s in QApplication.screens():
+            g = s.geometry()
+            dpr = s.devicePixelRatio() or 1.0
+            if round(g.width() * dpr) == w and round(g.height() * dpr) == h:
+                return s
+        return self._current_screen
+
+    @staticmethod
+    def _marker_in_frame(img) -> bool:
+        """True se o marcador magenta do overlay aparece no canto do frame — ou
+        seja, o monitor capturado É o monitor onde o EpicPen está. Determinístico
+        (não depende do conteúdo da tela). img = QImage do 1º frame."""
+        w, h = img.width(), img.height()
+        if w < 40 or h < 40:
+            return True   # frame minúsculo — não bloqueia
+        pts = [(8, 8), (16, 16), (24, 24), (8, 24), (24, 8)]
+        hits = 0
+        for x, y in pts:
+            c = img.pixelColor(x, y)
+            if c.red() > 200 and c.green() < 70 and c.blue() > 200:
+                hits += 1
+        return hits >= 3
+
+    def _exec_region_selector(self, px, screen=None):
+        """Mostra o RegionSelector como Popup FILHO do overlay — assim herda o
+        MONITOR do overlay (garantidamente o correto). Uma superfície layer-shell
+        própria criada em runtime NÃO respeita o setScreen no KWin (cai sempre no
+        monitor primário — medido), por isso não a usamos.
+
+        O overlay cobre a área útil do monitor (pode ser encolhido por um painel,
+        ex: 1042 num monitor de 1080). O crop é calculado em px do FRAME via
+        w/dlg.width(), então bate exato mesmo se o overlay for menor que o frame.
+        Retorna (dlg, accepted, w, h) — w/h só informativos.
+        """
+        if screen is None:
+            screen = self._current_screen
+        geo = screen.geometry() if screen else None
+        lw, lh = (geo.width(), geo.height()) if geo else (px.width(), px.height())
+        ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
+        if ov_lsw:
+            from PyQt6.QtCore import QSize
+            dlg = RegionSelector(px, parent=self._overlay)
+            dlg.setWindowFlags(Qt.WindowType.Popup)
+            # Tamanho do MONITOR INTEIRO (não do overlay, que o painel encolhe) →
+            # o pixmap não fica achatado e a faixa do painel é selecionável. O
+            # Popup pode estender além do overlay (sobrepõe o painel).
+            dlg.setFixedSize(QSize(lw, lh) if (lw and lh) else self._overlay.size())
+            dlg.move(0, 0)
+        else:
+            dlg = RegionSelector(px, parent=self)
+            if screen is not None and dlg.windowHandle() is None:
+                dlg.setScreen(screen)
+            dlg.setWindowState(Qt.WindowState.WindowFullScreen)
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
+        return dlg, accepted, lw, lh
+
+    def _begin_region_recording(self, show_cursor: bool, record_mic: bool = True):
+        """Modo região: inicia a captura do MONITOR (seletor do portal aparece
+        PRIMEIRO). Quando o 1º frame chega, o recorder emite region_needed e a
+        UI mostra o seletor de retângulo sobre esse frame (_on_region_needed).
+        Ordem: seletor do portal → desenho da região → gravação."""
+        # Marcador de detecção de monitor: existe só no monitor da coluna. Se
+        # não aparecer no frame, o portal capturou outro monitor → bloqueia.
+        # Overlay precisa estar VISÍVEL para o marcador ser composto/capturado.
+        self._overlay.set_active(True)
+        self._overlay.set_detect_marker(True)
+        if not self._recorder.start(
+            screen=self._current_screen, source="region",
+            show_cursor=show_cursor, restore_token=self._rec_tokens.get("region"),
+            record_mic=record_mic,
+        ):
+            self._overlay.set_detect_marker(False)
+            self._btn_record.setChecked(False)
+
+    def _on_region_needed(self, data: bytes, w: int, h: int, stride: int, fmt: str,
+                          pos_x: int, pos_y: int):
+        """1º frame do monitor chegou (pós-seletor do portal): usuário desenha o
+        retângulo sobre ele. Devolve o crop em px do FRAME via provide_region."""
+        from PyQt6.QtGui import QImage, QPixmap
+        qfmt = {
+            "bgra": QImage.Format.Format_ARGB32,
+            "rgba": QImage.Format.Format_RGBA8888,
+            "rgb0": QImage.Format.Format_RGBX8888,
+        }.get(fmt, QImage.Format.Format_RGBA8888)
+        # copy() destaca do buffer temporário (data some após o slot).
+        img = QImage(data, w, h, stride, qfmt).copy()
+        px = QPixmap.fromImage(img)
+
+        # Bloqueia se o monitor capturado não é o do EpicPen (desenho/overlay só
+        # existem no monitor da coluna; gravar outro daria recorte errado sem os
+        # desenhos). Detecção determinística pelo marcador do overlay.
+        marker_ok = self._marker_in_frame(img)
+        self._overlay.set_detect_marker(False)
+        if not marker_ok:
+            self._recorder.provide_region(None, cancelled=True)
+            self._btn_record.setChecked(False)
+            self._notify_saved(
+                "EpicPen — Gravação de região",
+                "A região só grava o monitor onde o EpicPen está.\n"
+                "Escolha esse monitor no seletor do sistema (ou marque "
+                "\"Escolher a tela novamente\" e selecione o monitor da coluna).",
+            )
+            return
+
+        # Região grava o monitor onde o EpicPen está (o portal não revela qual
+        # monitor foi capturado, e migrar entre outputs não funciona no KWin).
+        # O seletor vai no monitor atual; o desenho/escurecimento também.
+        target = self._current_screen
+        try:
+            _ov_scr = self._overlay.windowHandle().screen().name()
+        except Exception:
+            _ov_scr = "?"
+        self._set_capture_hidden(True)
+        try:
+            dlg, accepted, _lw, _lh = self._exec_region_selector(px, screen=target)
+            sel = dlg._sel if accepted else None
+        finally:
+            self._set_capture_hidden(False)
+
+        if not accepted:
+            self._recorder.provide_region(None, cancelled=True)
+            self._btn_record.setChecked(False)
+            return
+        if sel is None or sel.width() < 4 or sel.height() < 4:
+            # Sem retângulo → grava o monitor inteiro (crop None).
+            self._recorder.provide_region(None)
+            return
+        # Seletor cobre o monitor inteiro; mapeia coords do widget → px do frame.
+        fx = w / max(1, dlg.width())
+        fy = h / max(1, dlg.height())
+        crop = (
+            round(sel.width() * fx), round(sel.height() * fy),
+            round(sel.x() * fx), round(sel.y() * fy),
+        )
+        self._recorder.provide_region(crop)
+        # Escurece fora da região no PRÓPRIO overlay (que já é click-through em
+        # passthrough durante a gravação) — evita criar outra superfície
+        # layer-shell (o hack de input-region nela segfaultava). sel está em
+        # coords do monitor; o overlay é top-aligned → mesmas coords.
+        from PyQt6.QtCore import QRect
+        self._overlay.set_record_region(QRect(sel))
+
+    def _hide_region_mask(self):
+        try:
+            self._overlay.set_record_region(None)
+        except Exception:
+            pass
+
+    def _ask_record_options(self) -> "tuple[str, bool] | None":
+        """Popup pré-gravação. Retorna (source, show_cursor) ou None se cancelado."""
+        was_drawing = self._pre_dialog()
+        ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
+        dlg = RecordOptionsDialog(
+            self._rec_source, self._rec_show_cursor, self._rec_mic,
+            parent=self._overlay if ov_lsw else self,
+        )
+        if ov_lsw:
+            dlg.setWindowFlags(Qt.WindowType.Popup)
+            dlg.adjustSize()
+            # Centraliza no monitor atual. O overlay (pai do popup) cobre o
+            # monitor desde (0,0), então as coordenadas são locais ao monitor.
+            scr = self._current_screen
+            geo = scr.geometry() if scr else self._overlay.geometry()
+            x = (geo.width() - dlg.width()) // 2
+            y = (geo.height() - dlg.height()) // 2
+            dlg.move(max(0, x), max(0, y))
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
+        result = dlg.result_options() if accepted else None
+        # Destrói a superfície do popup na hora: em layer-shell o Qt::Popup às
+        # vezes fica visível acima da coluna depois do exec() (surface não
+        # some sozinha). hide()+deleteLater() + reprocessar eventos garante o
+        # unmap antes de seguir; raise_() traz a coluna de volta ao topo.
+        dlg.hide()
+        dlg.deleteLater()
+        from PyQt6.QtWidgets import QApplication
+        QApplication.processEvents()
+        if ov_lsw:
+            self.raise_()
+        self._post_dialog(was_drawing)
+        return result
+
+    def _on_restore_token(self, source: str, token: str):
+        """Portal devolveu um restore_token. Só REGIÃO persiste (pula o seletor
+        nas próximas vezes — sempre a tela atual). Monitor e janela sempre
+        reabrem o seletor (escolha consciente da fonte)."""
+        if source != "region":
+            return
+        self._rec_tokens["region"] = str(token)
+        self._save_state()
+
+    def _save_state(self):
+        """Persiste o estado completo (toolbar + tray) imediatamente."""
+        import config as cfg
+        state = self.get_state()
+        if self._tray is not None:
+            try:
+                state.update(self._tray.get_state())
+            except Exception:
+                pass
+        cfg.save(state)
 
     def _on_rec_started(self):
         self._btn_record.setChecked(True)
@@ -1069,6 +1437,7 @@ class ToolbarWindow(QWidget):
             self._activate_arrow_mode()
 
     def _on_rec_stopped(self, path: str):
+        self._hide_region_mask()
         self._btn_record.setChecked(False)
         self._btn_record.setIcon(icons.record())
         self._btn_record.setStyleSheet("")
@@ -1084,6 +1453,7 @@ class ToolbarWindow(QWidget):
         )
 
     def _on_rec_failed(self, msg: str):
+        self._hide_region_mask()
         self._btn_record.setChecked(False)
         self._btn_record.setIcon(icons.record())
         self._btn_record.setStyleSheet("")
@@ -1180,7 +1550,7 @@ class ToolbarWindow(QWidget):
         """Remarca o botão da ferramenta activa."""
         btn_map = {
             "pen": self._btn_pen, "highlighter": self._btn_hl,
-            "line": self._btn_line, "rect": self._btn_rect,
+            "line": self._btn_line, "arrow": self._btn_arrow, "rect": self._btn_rect,
             "circle": self._btn_circle, "eraser": self._btn_eraser,
             "laser": self._btn_laser, "drag": self._btn_drag, "text": self._btn_text,
         }
@@ -1631,14 +2001,14 @@ class ToolbarWindow(QWidget):
             elif key == Qt.Key.Key_S:
                 self._do_screenshot(clipboard=bool(shift))
             elif key == Qt.Key.Key_R:
-                self._btn_record.toggle()
-                self._toggle_record(self._btn_record.isChecked())
+                self._toggle_record()
             return
 
         tool_keys = {
             Qt.Key.Key_P: "pen",
             Qt.Key.Key_H: "highlighter",
             Qt.Key.Key_L: "line",
+            Qt.Key.Key_A: "arrow",
             Qt.Key.Key_R: "rect",
             Qt.Key.Key_E: "circle",
             Qt.Key.Key_X: "eraser",

@@ -135,6 +135,16 @@ class OverlayWindow(QWidget):
         # True quando em modo pass-through: desenhos visíveis, input vai para apps abaixo.
         # Diferente de set_active(False) que oculta o overlay completamente.
         self._passthrough = False
+        # Retângulo (coords locais) da região sendo gravada: fora dele o overlay
+        # pinta escuro (indicação do que NÃO entra no vídeo). None = sem máscara.
+        self._record_region = None
+        # Marcador de detecção: quadrado magenta no canto (0,0). Só existe no
+        # monitor onde o overlay está → se aparece no frame do portal, é o
+        # monitor certo. Usado para bloquear gravação de região em outro monitor.
+        self._detect_marker = False
+        # Preview de texto ao vivo (enquanto o diálogo de texto está aberto):
+        # (pos, texto, família, tamanho, cor). None = sem preview.
+        self._text_preview = None
 
         self._setup_window()
         self._refresh_cursor()
@@ -205,7 +215,7 @@ class OverlayWindow(QWidget):
             self.setCursor(Qt.CursorShape.BlankCursor)
         elif self._tool == "eraser":
             self.setCursor(make_eraser_cursor(self._size))
-        elif self._tool in ("line", "rect", "circle"):
+        elif self._tool in ("line", "arrow", "rect", "circle"):
             # Seta de alta visibilidade — a mira fina sumia em telas claras
             self.setCursor(make_arrow_cursor(self._color))
         elif self._tool == "drag":
@@ -235,7 +245,7 @@ class OverlayWindow(QWidget):
         self._color = color
         if self._tool in ("pen", "highlighter"):
             self.setCursor(make_pen_cursor(color))
-        elif self._tool in ("line", "rect", "circle"):
+        elif self._tool in ("line", "arrow", "rect", "circle"):
             self.setCursor(make_arrow_cursor(color))
 
     def set_size(self, size: int):
@@ -387,6 +397,71 @@ class OverlayWindow(QWidget):
                 self._refresh_cursor()
             else:
                 super().hide()
+
+    def set_record_region(self, rect):
+        """Define (ou limpa) a região gravada. Fora dela o overlay escurece —
+        indicação visual do que não entra no vídeo. rect em coords locais."""
+        self._record_region = rect
+        self.update()
+
+    def set_text_preview(self, pos, text, family, size, color):
+        """Mostra o texto sendo digitado na tela (preview ao vivo). pos em
+        coords locais. None em text limpa o preview."""
+        if not text:
+            self._text_preview = None
+        else:
+            self._text_preview = (pos, text, family, int(size), QColor(color))
+        self.update()
+
+    def clear_text_preview(self):
+        self._text_preview = None
+        self.update()
+
+    # Cor e tamanho do marcador de detecção de monitor.
+    DETECT_COLOR = (255, 0, 255)
+    DETECT_SIZE = 48
+
+    def set_detect_marker(self, on: bool):
+        """Liga/desliga o marcador magenta no canto (detecção de monitor)."""
+        self._detect_marker = bool(on)
+        self.update()
+        self.repaint()   # garante composição imediata antes da captura
+
+    def _paint_text_preview(self, painter):
+        """Desenha o texto em digitação no ponto de inserção (preview ao vivo)."""
+        from PyQt6.QtGui import QFont, QPen
+        pos, text, family, size, color = self._text_preview
+        font = QFont(family or "Sans Serif")
+        font.setPointSizeF(max(1.0, float(size)))
+        painter.setFont(font)
+        painter.setPen(QPen(color))
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        fm = painter.fontMetrics()
+        line_h = fm.height()
+        for i, line in enumerate(text.split("\n")):
+            painter.drawText(QPointF(pos.x(), pos.y() + i * line_h), line)
+
+    def _paint_record_mask(self, painter):
+        """Escurece tudo fora de _record_region e desenha uma borda azul (cor do
+        ícone) ao redor, indicando a área que está sendo gravada."""
+        from PyQt6.QtGui import QColor, QPen
+        from PyQt6.QtCore import QRect
+        r = self._record_region
+        w, h = self.width(), self.height()
+        dim = QColor(0, 0, 0, 110)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        top = max(0, r.top())
+        bot = min(h, r.bottom() + 1)
+        painter.fillRect(QRect(0, 0, w, top), dim)                    # acima
+        painter.fillRect(QRect(0, bot, w, h - bot), dim)             # abaixo
+        painter.fillRect(QRect(0, top, max(0, r.left()), bot - top), dim)          # esquerda
+        right = min(w, r.right() + 1)
+        painter.fillRect(QRect(right, top, w - right, bot - top), dim)             # direita
+        # Borda azul do app (#4f8eff) — mostra o local de gravação.
+        pen = QPen(QColor(79, 142, 255), 2)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(r.adjusted(0, 0, -1, -1))
 
     def set_passthrough(self, active: bool):
         """Modo seta: desenhos visíveis mas input passa para apps abaixo.
@@ -915,7 +990,7 @@ class OverlayWindow(QWidget):
             elif tool in ("pen", "highlighter"):
                 segs = self._split_stroke_destructive(stroke, eraser_pts, eraser_r2)
                 new_strokes.extend(segs)
-            elif tool in ("line", "rect", "circle"):
+            elif tool in ("line", "arrow", "rect", "circle"):
                 # Forma geométrica: discretiza em pontos e aplica o mesmo split.
                 # Se o eraser não tocar, mantém a forma original intacta.
                 if self._eraser_hits_stroke(stroke, eraser_pts, eraser_r2):
@@ -989,13 +1064,25 @@ class OverlayWindow(QWidget):
 
         result: list[tuple] = []
 
-        if tool == "line":
+        if tool in ("line", "arrow"):
             length = math.hypot(x1 - x0, y1 - y0)
             N = max(2, int(length / 2))
             for i in range(N + 1):
                 t = i / N
                 result.append((QPointF(x0 + t * (x1 - x0),
                                        y0 + t * (y1 - y0)), pen_props))
+            if tool == "arrow" and length > 1:
+                # Ponta: duas farpas a partir de p1, a ~150° da direção da linha.
+                ang = math.atan2(y1 - y0, x1 - x0)
+                head = min(26.0, max(10.0, length * 0.3))
+                for da in (2.618, -2.618):   # ±150°
+                    hx = x1 + head * math.cos(ang + da)
+                    hy = y1 + head * math.sin(ang + da)
+                    M = max(2, int(head / 2))
+                    for i in range(M + 1):
+                        t = i / M
+                        result.append((QPointF(x1 + t * (hx - x1),
+                                               y1 + t * (hy - y1)), pen_props))
 
         elif tool == "rect":
             # Normaliza para garantir x0 < x1, y0 < y1
@@ -1093,7 +1180,7 @@ class OverlayWindow(QWidget):
             return False
 
         # ── line/rect/circle: amostra a geometria ────────────────────────────
-        if tool in ("line", "rect", "circle"):
+        if tool in ("line", "arrow", "rect", "circle"):
             pts = [pt for pt, _ in stroke]
             if len(pts) < 2:
                 pt = pts[0]
@@ -1105,7 +1192,7 @@ class OverlayWindow(QWidget):
 
             samples: list[tuple[float, float]] = []
             N = 24
-            if tool == "line":
+            if tool in ("line", "arrow"):
                 for i in range(N + 1):
                     t = i / N
                     samples.append((x0 + t * (x1 - x0), y0 + t * (y1 - y0)))
@@ -1229,7 +1316,7 @@ class OverlayWindow(QWidget):
         # (ignorado sobre a toolbar embutida — lá o clique é da UI)
         if (event.button() == Qt.MouseButton.RightButton and self._active
                 and not self._drawing
-                and self._tool in ("pen", "highlighter", "line",
+                and self._tool in ("pen", "highlighter", "line", "arrow",
                                    "rect", "circle", "text")):
             tb = self._toolbar_widget
             if tb is None or not tb.geometry().contains(event.pos()):
@@ -1620,6 +1707,19 @@ class OverlayWindow(QWidget):
         if self._spotlight:
             self._draw_spotlight(painter)
 
+        if self._text_preview is not None:
+            self._paint_text_preview(painter)
+
+        if self._record_region is not None:
+            self._paint_record_mask(painter)
+
+        if self._detect_marker:
+            from PyQt6.QtGui import QColor
+            from PyQt6.QtCore import QRect
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+            painter.fillRect(QRect(0, 0, self.DETECT_SIZE, self.DETECT_SIZE),
+                             QColor(*self.DETECT_COLOR))
+
         painter.end()
 
     def _draw_stroke(self, painter: QPainter, stroke: list):
@@ -1692,6 +1792,18 @@ class OverlayWindow(QWidget):
                 painter.drawPath(path)
         elif tool == "line" and len(raw) >= 2:
             painter.drawLine(pts_f[0], pts_f[-1])
+        elif tool == "arrow" and len(pts_f) >= 2:
+            # Linha + ponta calculada dos 2 endpoints (stroke = [início, fim]).
+            a, b = pts_f[0], pts_f[-1]
+            painter.drawLine(a, b)
+            dx, dy = b.x() - a.x(), b.y() - a.y()
+            length = math.hypot(dx, dy)
+            if length > 1:
+                ang = math.atan2(dy, dx)
+                head = min(26.0, max(10.0, length * 0.3))
+                for da in (2.618, -2.618):   # ±150°
+                    painter.drawLine(b, QPointF(b.x() + head * math.cos(ang + da),
+                                                b.y() + head * math.sin(ang + da)))
         elif tool == "rect" and len(raw) >= 2:
             painter.drawRect(QRectF(pts_f[0], pts_f[-1]).normalized())
         elif tool == "circle" and len(raw) >= 2:
