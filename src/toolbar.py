@@ -2,7 +2,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QSlider, QColorDialog, QFrame, QLayout,
     QDialog, QLabel, QLineEdit, QPlainTextEdit, QSpinBox, QFontComboBox, QDialogButtonBox,
-    QRadioButton, QCheckBox, QButtonGroup,
+    QRadioButton, QCheckBox, QButtonGroup, QComboBox,
 )
 from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, QSize, QEvent, pyqtSignal
 from PyQt6.QtGui import QColor, QCursor
@@ -378,7 +378,7 @@ class RecordOptionsDialog(QDialog):
     """
 
     def __init__(self, source: str, show_cursor: bool, record_mic: bool = True,
-                 parent=None):
+                 audio_source: str = "system", parent=None):
         super().__init__(parent)
         self.setWindowTitle("Gravar tela")
         self.setModal(True)
@@ -408,6 +408,21 @@ class RecordOptionsDialog(QDialog):
         self._cb_mic = QCheckBox("Gravar o microfone")
         self._cb_mic.setChecked(record_mic)
         lay.addWidget(self._cb_mic)
+
+        # Fonte do som do PC: sistema inteiro, uma aplicação específica, ou nada.
+        row_audio = QHBoxLayout()
+        row_audio.addWidget(QLabel("Som do PC:"))
+        self._audio_combo = QComboBox()
+        self._audio_combo.addItem("🔊  Som do sistema (tudo)", "system")
+        self._audio_combo.addItem("🔇  Sem som do PC", "none")
+        from recorder import list_audio_apps
+        for _name, _node in list_audio_apps():
+            self._audio_combo.addItem(f"🎧  {_name}", ("app", _node, _name))
+        # Seleciona a preferência (só "system"/"none" persistem; app é por-sessão)
+        idx = self._audio_combo.findData(audio_source)
+        self._audio_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        row_audio.addWidget(self._audio_combo, 1)
+        lay.addLayout(row_audio)
 
         # Só região: limpa a tela lembrada → o seletor do sistema reaparece
         # para reescolher o monitor. Escondido nos outros modos.
@@ -467,8 +482,14 @@ class RecordOptionsDialog(QDialog):
         else:
             source = "monitor"
         repick = self._rb_region.isChecked() and self._cb_repick.isChecked()
+        data = self._audio_combo.currentData()
+        if isinstance(data, tuple) and data[0] == "app":
+            audio_source, audio_app_node = "app", data[1]
+            audio_app_name = data[2] if len(data) > 2 else None
+        else:
+            audio_source, audio_app_node, audio_app_name = (data or "system"), None, None
         return (source, self._cb_cursor.isChecked(), repick,
-                self._cb_mic.isChecked())
+                self._cb_mic.isChecked(), audio_source, audio_app_node, audio_app_name)
 
 
 class ToolbarWindow(QWidget):
@@ -550,6 +571,7 @@ class ToolbarWindow(QWidget):
         self._rec_source = self._cfg.get("rec_source", "monitor")
         self._rec_show_cursor = bool(self._cfg.get("rec_show_cursor", True))
         self._rec_mic = bool(self._cfg.get("rec_mic", True))
+        self._rec_audio_source = self._cfg.get("rec_audio_source", "system")
         self._rec_tokens = dict(self._cfg.get("rec_tokens", {}))
 
         # Tooltip interno: QLabel filho da janela, posicionado à direita da coluna
@@ -869,6 +891,8 @@ class ToolbarWindow(QWidget):
             "magnifier_zoom": self._zoom_slider.value(),
             "rec_source": self._rec_source,
             "rec_show_cursor": self._rec_show_cursor,
+            "rec_mic": self._rec_mic,
+            "rec_audio_source": self._rec_audio_source,
             "rec_tokens": dict(self._rec_tokens),
         }
 
@@ -1189,9 +1213,13 @@ class ToolbarWindow(QWidget):
         if opts is None:
             self._btn_record.setChecked(False)
             return
-        source, show_cursor, repick, record_mic = opts
+        (source, show_cursor, repick, record_mic,
+         audio_source, audio_app_node, audio_app_name) = opts
         self._rec_source, self._rec_show_cursor = source, show_cursor
         self._rec_mic = record_mic
+        # "app" é por-sessão (node muda); só system/none persistem.
+        if audio_source in ("system", "none"):
+            self._rec_audio_source = audio_source
         # "Reescolher a tela": esquece o token → o seletor do sistema reaparece.
         if repick:
             self._rec_tokens.pop("region", None)
@@ -1199,13 +1227,16 @@ class ToolbarWindow(QWidget):
         if source == "region":
             # Seleção do retângulo é assíncrona (screenshot → seletor); o start
             # acontece no callback. Ver _begin_region_recording.
-            self._begin_region_recording(show_cursor, record_mic)
+            self._begin_region_recording(show_cursor, record_mic,
+                                          audio_source, audio_app_node, audio_app_name)
             return
         # Monitor e janela: sempre abrem o seletor (sem token). Só região lembra.
         # Grava o monitor selecionado na toolbar (não o de maior Hz)
         if not self._recorder.start(
             screen=self._current_screen, source=source,
             show_cursor=show_cursor, restore_token=None, record_mic=record_mic,
+            audio_source=audio_source, audio_app_node=audio_app_node,
+            audio_app_name=audio_app_name,
         ):
             self._btn_record.setChecked(False)
 
@@ -1280,7 +1311,9 @@ class ToolbarWindow(QWidget):
         accepted = dlg.exec() == QDialog.DialogCode.Accepted
         return dlg, accepted, lw, lh
 
-    def _begin_region_recording(self, show_cursor: bool, record_mic: bool = True):
+    def _begin_region_recording(self, show_cursor: bool, record_mic: bool = True,
+                                audio_source: str = "system", audio_app_node=None,
+                                audio_app_name=None):
         """Modo região: inicia a captura do MONITOR (seletor do portal aparece
         PRIMEIRO). Quando o 1º frame chega, o recorder emite region_needed e a
         UI mostra o seletor de retângulo sobre esse frame (_on_region_needed).
@@ -1294,6 +1327,8 @@ class ToolbarWindow(QWidget):
             screen=self._current_screen, source="region",
             show_cursor=show_cursor, restore_token=self._rec_tokens.get("region"),
             record_mic=record_mic,
+            audio_source=audio_source, audio_app_node=audio_app_node,
+            audio_app_name=audio_app_name,
         ):
             self._overlay.set_detect_marker(False)
             self._btn_record.setChecked(False)
@@ -1378,6 +1413,7 @@ class ToolbarWindow(QWidget):
         ov_lsw = getattr(self._overlay, '_lsw_ptr', None)
         dlg = RecordOptionsDialog(
             self._rec_source, self._rec_show_cursor, self._rec_mic,
+            self._rec_audio_source,
             parent=self._overlay if ov_lsw else self,
         )
         if ov_lsw:

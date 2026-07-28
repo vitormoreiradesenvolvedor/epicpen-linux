@@ -288,6 +288,9 @@ def main():
 
     # Salva ao fechar
     app.aboutToQuit.connect(lambda: cfg.save(_full_state()))
+    # Fechar o app com gravação ativa: mata os subprocessos de captura na hora
+    # (senão pw-record/parec/ffmpeg ficam pendurados como zumbis).
+    app.aboutToQuit.connect(toolbar._recorder.kill_all)
 
     sys.exit(app.exec())
 
