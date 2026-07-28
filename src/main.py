@@ -69,7 +69,7 @@ import layershell
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("EpicPen")
-    app.setApplicationVersion("1.0.17")
+    app.setApplicationVersion("1.0.18")
     app.setQuitOnLastWindowClosed(False)
 
     settings = cfg.load()
@@ -213,6 +213,40 @@ def main():
         toolbar._toggle_presentation(True)
     QTimer.singleShot(300, _start_presentation)
 
+    # Watchdog de renderização da coluna: raramente a superfície layer-shell da
+    # toolbar não mapeia no boot (race do compositor / apply) e a coluna não
+    # aparece — nem o reveal na borda a traz de volta. Verifica ~1.5s após o
+    # arranque; se o layer-shell falhou (ponteiro nulo) ou a coluna não está
+    # visível, re-aplica e re-exibe. Loga sempre o estado para diagnóstico.
+    def _watchdog_toolbar():
+        if _use_embed:
+            return   # embed (GNOME): sem superfície layer-shell própria
+        lsw = getattr(toolbar, "_lsw_ptr", None)
+        visible = toolbar.isVisible()
+        print(f"[watchdog] coluna: lsw={'ok' if lsw else 'NULO'} "
+              f"visible={visible} presentation={toolbar._presentation_mode} "
+              f"screen={_tb_screen.name()}")
+        needs_ls = layershell.IS_LAYERSHELL_COMPOSITOR
+        if needs_ls and (lsw is None or not visible):
+            print("[watchdog] coluna não mapeou — re-aplicando layer-shell")
+            toolbar.hide()
+            new_ptr = layershell.apply(
+                toolbar,
+                layer=layershell.LAYER_TOP,
+                exclusive_zone=-1,
+                initial_pos=(_tb_rel_x, _tb_rel_y),
+                screen=_tb_screen,
+            )
+            if new_ptr:
+                toolbar._lsw_ptr = new_ptr
+            toolbar.show()
+            toolbar.raise_()
+            if toolbar._lsw_ptr:
+                layer = (layershell.LAYER_OVERLAY if toolbar._presentation_mode
+                         else layershell.LAYER_TOP)
+                layershell.set_layer(toolbar._lsw_ptr, layer)
+    QTimer.singleShot(1500, _watchdog_toolbar)
+
     # Iniciar oculto se a opção estiver activa
     if settings.get("start_hidden", False):
         tray._toggle_visibility()
@@ -254,6 +288,9 @@ def main():
 
     # Salva ao fechar
     app.aboutToQuit.connect(lambda: cfg.save(_full_state()))
+    # Fechar o app com gravação ativa: mata os subprocessos de captura na hora
+    # (senão pw-record/parec/ffmpeg ficam pendurados como zumbis).
+    app.aboutToQuit.connect(toolbar._recorder.kill_all)
 
     sys.exit(app.exec())
 
