@@ -226,10 +226,18 @@ def _build_pipeline(source_desc: str):
 
     As caps de saída (BGRA) são fixadas no próprio appsink, não num capsfilter
     inline — evita depender do plugin coreelements no bundle do AppImage.
+
+    A saída é travada no tamanho do 1º frame (ver run()) porque o ffmpeg roda
+    com -video_size fixo. O videoscale garante que qualquer frame de tamanho
+    diferente vira o tamanho travado (mantém o stream consistente). NÃO tentamos
+    acompanhar o resize da janela durante a gravação: no KDE o buffer do
+    ScreenCast fica no tamanho inicial e, ao encolher a janela, o compositor a
+    ancora num canto e preenche o resto com preto NA PRÓPRIA fonte — não há o
+    que escalar. Portanto: dimensione a janela ANTES de gravar.
     """
     Gst.init(None)
     desc = (
-        f"{source_desc} ! videoconvert ! "
+        f"{source_desc} ! videoconvert ! videoscale ! "
         "appsink name=sink emit-signals=false max-buffers=6 drop=true sync=false"
     )
     pipeline = Gst.parse_launch(desc)
@@ -286,9 +294,17 @@ def run(pipeline, appsink, restore_token: str | None, stream_pos=None) -> int:
                 continue
             buf = sample.get_buffer()
             if not state["hdr"]:
-                w, h, stride, fmt = _caps_geometry(sample.get_caps())
+                w, h, _stride, fmt = _caps_geometry(sample.get_caps())
                 if w <= 0 or h <= 0:
                     continue
+                # TRAVA o tamanho de saída no 1º frame: o videoscale passa a
+                # escalar qualquer frame de tamanho diferente para w×h, mantendo
+                # o -video_size fixo do ffmpeg. Com width fixo o stride vira w*4
+                # (BGRA 4-alinhado) — descartamos este 1º frame (stride/tamanho
+                # pré-trava) e usamos os próximos.
+                appsink.set_property("caps", Gst.Caps.from_string(
+                    f"video/x-raw,format=BGRA,width={w},height={h}"))
+                stride = w * 4
                 state["nbytes"] = stride * h
                 header = {"w": w, "h": h, "stride": stride, "pix_fmt": fmt}
                 if restore_token:
@@ -301,6 +317,7 @@ def run(pipeline, appsink, restore_token: str | None, stream_pos=None) -> int:
                         pass
                 q.put((json.dumps(header) + "\n").encode())
                 state["hdr"] = True
+                continue   # descarta o 1º frame (tamanho/stride pré-trava)
 
             ok, mapinfo = buf.map(Gst.MapFlags.READ)
             if not ok:
@@ -357,7 +374,10 @@ def run(pipeline, appsink, restore_token: str | None, stream_pos=None) -> int:
         out.flush()
     except Exception:
         pass
-    return 0
+    # 0 = pegou frame(s) (normal); 2 = terminou SEM nenhum frame → o pipeline
+    # falhou antes de começar (ex: pw_loop_new/support.system transitório) e o
+    # chamador pode reconstruir e tentar de novo com o mesmo fd/node.
+    return 0 if state["hdr"] else 2
 
 
 def _check() -> int:
@@ -403,12 +423,22 @@ def main() -> int:
         sys.stderr.flush()
         return 2
 
-    pipeline, appsink = _build_pipeline(
-        f"pipewiresrc fd={fd} path={node_id} do-timestamp=true "
-        "keepalive-time=1000"
-    )
+    desc = (f"pipewiresrc fd={fd} path={node_id} do-timestamp=true "
+            "keepalive-time=1000")
     try:
-        rc = run(pipeline, appsink, new_token, position)
+        # Retry: falhas transitórias do PipeWire (pw_loop_new/support.system)
+        # às vezes impedem o 1º frame. Reconstrói o pipeline com o MESMO fd/node
+        # (sem re-mostrar o seletor do portal) até 3x.
+        rc = 2
+        for attempt in range(3):
+            pipeline, appsink = _build_pipeline(desc)
+            rc = run(pipeline, appsink, new_token, position)
+            if rc == 0:
+                break
+            sys.stderr.write(json.dumps(
+                {"error": f"pipeline sem frames (tentativa {attempt + 1}/3)"}) + "\n")
+            sys.stderr.flush()
+            time.sleep(0.4)
     finally:
         # Fecha a sessão explicitamente → ícone vermelho do KDE some na hora.
         close_session(keep)

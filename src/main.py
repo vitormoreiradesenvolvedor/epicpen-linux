@@ -69,7 +69,7 @@ import layershell
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("EpicPen")
-    app.setApplicationVersion("1.0.18")
+    app.setApplicationVersion("1.0.19")
     app.setQuitOnLastWindowClosed(False)
 
     settings = cfg.load()
