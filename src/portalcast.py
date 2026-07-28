@@ -74,7 +74,13 @@ def _system_env() -> dict:
     for k in ("LD_PRELOAD", "LD_LIBRARY_PATH", "PYTHONHOME", "PYTHONPATH",
               "PYTHONNOUSERSITE", "PYTHONSTARTUP", "PYTHONEXECUTABLE",
               "GST_PLUGIN_PATH", "GST_PLUGIN_SYSTEM_PATH_1_0",
-              "GI_TYPELIB_PATH", "GST_REGISTRY"):
+              "GI_TYPELIB_PATH", "GST_REGISTRY",
+              # SPA/PIPEWIRE: se vazarem apontando para dir errado, a libpipewire
+              # do sistema falha em carregar 'support.system' (pw_loop_new) e o
+              # pipewiresrc não sobe. Deixa a libpipewire usar os defaults.
+              "SPA_PLUGIN_DIR", "PIPEWIRE_MODULE_DIR",
+              "PIPEWIRE_CONFIG_DIR", "PIPEWIRE_CONFIG_NAME",
+              "PIPEWIRE_CONFIG_PREFIX"):
         env.pop(k, None)
     return env
 

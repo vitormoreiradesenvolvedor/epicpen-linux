@@ -584,33 +584,44 @@ def _pw_node_ports(*, node_id: Optional[int] = None, node_name: Optional[str] = 
     return ports
 
 
-def _link_app_capture(app_node_id: int, cap_name: str) -> None:
-    """Liga as portas de saída da app (app_node_id) às portas de entrada do nó
-    de captura (cap_name) via pw-link, casando por canal. Espera o nó de captura
-    aparecer (~1.5s). Captura isolada da app; ao matar o pw-record os links somem."""
+def _app_node_ids(app_key: int) -> list[int]:
+    """node_ids da aplicação. app_key>0 = PID → TODOS os streams daquele
+    processo (o Teams tem vários); app_key<0 = um nó só (-node_id)."""
+    if app_key < 0:
+        return [-app_key]
+    return [n["id"] for n in _audio_stream_nodes() if n["pid"] == app_key]
+
+
+def _link_app_capture(app_key: int, cap_name: str) -> None:
+    """Liga as portas de saída de TODOS os streams da app (app_key) às portas de
+    entrada do nó de captura (cap_name) via pw-link, casando por canal. Vários
+    streams → o PipeWire mixa no mesmo canal. Espera o nó de captura aparecer
+    (~1.5s). Captura isolada da app; ao matar o pw-record os links somem."""
     cap = {}
     for _ in range(30):
         cap = _pw_node_ports(node_name=cap_name, direction="in")
         if cap:
             break
         time.sleep(0.05)
-    app = _pw_node_ports(node_id=app_node_id, direction="out")
-    for ch, out_pid in app.items():
-        in_pid = cap.get(ch)
-        if in_pid is None:
-            continue
-        try:
-            subprocess.run(["pw-link", str(out_pid), str(in_pid)],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           timeout=3, env=host_env())
-        except Exception:
-            pass
+    if not cap:
+        return
+    for node_id in _app_node_ids(app_key):
+        for ch, out_pid in _pw_node_ports(node_id=node_id, direction="out").items():
+            in_pid = cap.get(ch)
+            if in_pid is None:
+                continue
+            try:
+                subprocess.run(["pw-link", str(out_pid), str(in_pid)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               timeout=3, env=host_env())
+            except Exception:
+                pass
 
 
-def list_audio_apps() -> list[tuple[str, int]]:
-    """Aplicações tocando áudio agora: [(nome, node_id), ...] via pw-dump.
-    node_id serve de --target ao pw-record. [] se pw-dump faltar/erro."""
-    if not shutil.which("pw-dump") or not shutil.which("pw-record"):
+def _audio_stream_nodes() -> list[dict]:
+    """Nós Stream/Output/Audio atuais (via pw-dump), cada um como dict com
+    id, pid, e nomes úteis. [] se pw-dump faltar/erro."""
+    if not shutil.which("pw-dump"):
         return []
     try:
         r = subprocess.run(["pw-dump"], capture_output=True, text=True,
@@ -618,34 +629,52 @@ def list_audio_apps() -> list[tuple[str, int]]:
         data = json.loads(r.stdout)
     except Exception:
         return []
-    apps: list[tuple[str, int]] = []
+    out = []
     for obj in data:
         if obj.get("type") != "PipeWire:Interface:Node":
             continue
-        props = obj.get("info", {}).get("props", {})
-        if props.get("media.class") != "Stream/Output/Audio":
+        p = obj.get("info", {}).get("props", {})
+        if p.get("media.class") != "Stream/Output/Audio":
             continue
-        name = (props.get("application.name")
-                or props.get("node.description")
-                or props.get("node.name") or "?")
-        apps.append((str(name), int(obj["id"])))
-    return apps
+        pid = p.get("application.process.id")
+        out.append({
+            "id": int(obj["id"]),
+            "pid": int(pid) if pid is not None else None,
+            "name": (p.get("application.name") or p.get("node.description")
+                     or p.get("node.name") or "App"),
+            "binary": p.get("application.process.binary") or "",
+            "fid": p.get("application.id") or "",
+        })
+    return out
 
 
-def _resolve_app_node(node_id: Optional[int], name: Optional[str]) -> Optional[int]:
-    """Nó de saída ATUAL da aplicação. Valida node_id (ainda é um stream de app);
-    se não (o PipeWire reusa ids — o id do diálogo pode ter virado outro nó, ex:
-    um relay que junta tudo), re-resolve pelo application.name. Sem isso o tap
-    linhava o nó errado e capturava todo o som."""
-    apps = list_audio_apps()               # [(name, node_id)] — só streams de app
-    ids = {nid for _n, nid in apps}
-    if node_id is not None and node_id in ids:
-        return node_id
-    if name:
-        for n, nid in apps:
-            if n == name:
-                return nid
-    return node_id
+def list_audio_apps() -> list[tuple[str, int]]:
+    """Aplicações tocando áudio agora: [(rótulo, app_key), ...].
+
+    UMA entrada por APLICAÇÃO (agrupada por PID), não por stream — o Teams gera
+    vários streams "Chromium" e o usuário quer capturar "o Teams" inteiro. Ao
+    gravar, TODOS os streams daquele PID são ligados ao nó de captura (o PipeWire
+    mixa). app_key = PID (>0); nós sem PID entram individualmente como -node_id.
+    O PID é estável (não fica stale como o node_id)."""
+    if not shutil.which("pw-record"):
+        return []
+    nodes = _audio_stream_nodes()
+    apps: dict = {}          # key -> label (uma por app)
+    order: list = []
+    for n in nodes:
+        pid = n["pid"]
+        key = pid if pid is not None else -n["id"]
+        if key in apps:
+            continue
+        base = n["name"]
+        # Nome mais amigável quando genérico (Chromium/Electron): usa o flatpak.
+        if base.lower() in ("chromium", "chrome", "electron") and n["fid"]:
+            base = n["fid"].split(".")[-1]
+        elif base.lower() in ("chromium", "chrome", "electron") and n["binary"]:
+            base = n["binary"]
+        apps[key] = base
+        order.append(key)
+    return [(apps[k], k) for k in order]
 
 
 def _spawn_parec_audio(ffmpeg: str, devices: list[str], dest: str):
@@ -964,12 +993,11 @@ class ScreenRecorder(QObject):
         if audio_mode:
             self._audio_dest = save_dir / f".epicpen_rec_{ts}.mka"
             mic = self._mic_dev if record_mic else None
-            # Re-resolve o nó da app AGORA (o id do diálogo pode ter ficado stale).
-            if audio_source == "app":
-                audio_app_node = _resolve_app_node(audio_app_node, audio_app_name)
+            # audio_app_node é a app_key (PID; estável). O tap liga TODOS os
+            # streams da app ao nó de captura — ver _link_app_capture.
             if audio_source == "app" and audio_app_node is not None and shutil.which("pw-record"):
                 # Captura ISOLADA da app: nó de captura sem autoconnect + pw-link
-                # das portas da app. Mic via parec. Ambos → pipes → mix.
+                # de todos os streams da app. Mic via parec. Ambos → pipes → mix.
                 cap_name = f"EpicPenTap{os.getpid()}"
                 sources: list = [_parec_cmd(mic)] if mic else []
                 sources.append(("tap", int(audio_app_node), cap_name,
