@@ -69,7 +69,7 @@ import layershell
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("EpicPen")
-    app.setApplicationVersion("1.0.19")
+    app.setApplicationVersion("1.0.20")
     app.setQuitOnLastWindowClosed(False)
 
     settings = cfg.load()
@@ -161,9 +161,13 @@ def main():
     overlay._layer_shell_active = bool(_lsw_o)
     overlay._lsw_ptr = _lsw_o   # ponteiro para mudança dinâmica de layer
 
-    # Wayland sem wlr-layer-shell (GNOME): embute a toolbar no overlay para evitar
-    # z-ordering entre janelas separadas (apps aparecem entre toolbar e overlay).
-    _use_embed = not _lsw_o and layershell.IS_WAYLAND
+    # Sem wlr-layer-shell (GNOME Wayland E qualquer X11): embute a toolbar no
+    # overlay, formando UMA janela só. Duas janelas separadas "sempre-no-topo"
+    # brigam na z-order do WM/compositor (Mutter, sobretudo): ao repintar/
+    # restacar, a coluna pisca e os riscos do overlay somem/reaparecem. Com o
+    # embed não há z-order entre elas. Só compositores com layer-shell (KDE
+    # Wayland, wlroots) mantêm as duas superfícies separadas com camadas.
+    _use_embed = not _lsw_o
 
     if _lsw_o and _lsw_t:
         # Quando o overlay é remapeado (set_active True após estar escondido), ele fica
@@ -181,10 +185,12 @@ def main():
         print("[layershell] overlay Layer::Top (toolbar sem layer-shell)")
     elif _use_embed:
         # embed_toolbar() deve ser chamado ANTES de overlay.show()
+        # Sem layer-shell (GNOME Wayland ou qualquer X11): 1 janela só.
         overlay.embed_toolbar(toolbar)
-        print("[layershell] GNOME Wayland — toolbar embutida no overlay (modo embed)")
+        env = "X11" if not layershell.IS_WAYLAND else "Wayland sem layer-shell"
+        print(f"[layershell] {env} — toolbar embutida no overlay (modo embed)")
     else:
-        print("[layershell] FALHOU — usando fallback keepAbove (X11)")
+        print("[layershell] FALHOU — usando fallback keepAbove")
 
     overlay.show()
     if not _use_embed:
