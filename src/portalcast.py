@@ -164,9 +164,17 @@ def needs_portal(source: str, show_cursor: bool) -> bool:
     no KDE) — por isso no Wayland desviamos pro portal (cursor_mode EMBEDDED),
     que é a única forma de o cursor aparecer na gravação de tela inteira.
     O restore_token persistido evita repetir o seletor após a 1ª vez.
+
+    REGIÃO: é o monitor recortado depois pelo ffmpeg. No X11 o QScreenCapture
+    captura a tela composta (inclui o overlay do EpicPen) COM cursor, então não
+    precisa do portal — evita a dependência de GStreamer/PipeWire que muitas
+    distros X11 (ex.: Ubuntu 22.04 GNOME/Xorg) não têm instalada por padrão, e
+    dá o cursor nativo do X11 (sem o piscar do cursor EMBEDDED do portal). Só
+    no Wayland a região precisa do portal.
     """
-    if source in ("window", "region") or not show_cursor:
+    if source == "window" or not show_cursor:
         return True
+    # monitor OU região com cursor: portal só no Wayland; no X11, QScreenCapture.
     return _is_wayland()
 
 
