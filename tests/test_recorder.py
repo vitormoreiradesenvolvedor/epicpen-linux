@@ -890,3 +890,27 @@ def test_start_refused_while_stopping(monkeypatch):
     recorder.failed = MagicMock()
     assert recorder.start() is False
     recorder.failed.emit.assert_called_once()
+
+
+def test_pwrecord_tap_cmd_isolated():
+    import recorder as R
+    cmd = R._pwrecord_tap_cmd("EpicPenTap99")
+    assert cmd[0] == "pw-record"
+    assert any("node.autoconnect=false" in a for a in cmd)  # isolado
+    assert cmd[-1] == "-"
+
+
+def test_parec_cmd_device():
+    import recorder as R
+    cmd = R._parec_cmd("alsa_output.x.monitor")
+    assert cmd[0] == "parec"
+    assert "--device=alsa_output.x.monitor" in cmd
+    assert "--format=s16le" in cmd
+
+
+def test_list_audio_apps_returns_list():
+    import recorder as R
+    apps = R.list_audio_apps()
+    assert isinstance(apps, list)
+    for name, node in apps:
+        assert isinstance(name, str) and isinstance(node, int)

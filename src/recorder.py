@@ -6,6 +6,7 @@ import sys
 import signal
 import subprocess
 import threading
+import time
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -531,21 +532,146 @@ def _build_audio_cmd_parec(ffmpeg: str, fds: list[int], dest: str) -> list[str]:
     ]
 
 
-def _spawn_parec_audio(ffmpeg: str, devices: list[str], dest: str):
-    """Sobe parec(s) + ffmpeg encadeados por pipes para capturar áudio.
+def _parec_cmd(dev: str) -> list[str]:
+    """parec → s16le/48k/stereo cru no stdout (device pulse: mic ou monitor)."""
+    return ["parec", "--raw", "--format=s16le", "--rate=48000",
+            "--channels=2", f"--device={dev}"]
 
-    Retorna (proc_ffmpeg, [procs_parec]) ou (None, []) em falha. Os parec
-    são terminados primeiro no stop — o EOF nos pipes finaliza o ffmpeg
-    graciosamente, sem sinal.
+
+def _pwrecord_tap_cmd(cap_name: str) -> list[str]:
+    """pw-record como nó de captura ISOLADO (autoconnect=false): não conecta a
+    nada sozinho. A app é ligada manualmente às portas deste nó via pw-link
+    (_link_app_capture) → captura SÓ o áudio dela, sem desviar o playback.
+    Emite s16le/48k/stereo cru no stdout."""
+    return ["pw-record",
+            "--properties", f"{{ node.name={cap_name} node.autoconnect=false }}",
+            "--rate", "48000", "--channels", "2", "--format", "s16", "-"]
+
+
+def _pw_node_ports(*, node_id: Optional[int] = None, node_name: Optional[str] = None,
+                   direction: str = "out") -> dict:
+    """{canal: port_id} das portas de áudio de um nó (por id OU nome), na
+    direção dada. Usa pw-dump. {} se pw-dump faltar/erro."""
+    if not shutil.which("pw-dump"):
+        return {}
+    try:
+        r = subprocess.run(["pw-dump"], capture_output=True, text=True,
+                           timeout=4, env=host_env())
+        data = json.loads(r.stdout)
+    except Exception:
+        return {}
+    # Resolve nome → node.id se preciso.
+    if node_id is None and node_name is not None:
+        for o in data:
+            if o.get("type") == "PipeWire:Interface:Node":
+                if o.get("info", {}).get("props", {}).get("node.name") == node_name:
+                    node_id = o["id"]
+                    break
+    if node_id is None:
+        return {}
+    ports: dict = {}
+    for o in data:
+        if o.get("type") != "PipeWire:Interface:Port":
+            continue
+        p = o.get("info", {}).get("props", {})
+        if int(p.get("node.id", -1)) != int(node_id):
+            continue
+        if str(p.get("port.direction")) != direction:
+            continue
+        ch = p.get("audio.channel") or p.get("port.name")
+        if ch:
+            ports[ch] = o["id"]
+    return ports
+
+
+def _link_app_capture(app_node_id: int, cap_name: str) -> None:
+    """Liga as portas de saída da app (app_node_id) às portas de entrada do nó
+    de captura (cap_name) via pw-link, casando por canal. Espera o nó de captura
+    aparecer (~1.5s). Captura isolada da app; ao matar o pw-record os links somem."""
+    cap = {}
+    for _ in range(30):
+        cap = _pw_node_ports(node_name=cap_name, direction="in")
+        if cap:
+            break
+        time.sleep(0.05)
+    app = _pw_node_ports(node_id=app_node_id, direction="out")
+    for ch, out_pid in app.items():
+        in_pid = cap.get(ch)
+        if in_pid is None:
+            continue
+        try:
+            subprocess.run(["pw-link", str(out_pid), str(in_pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=3, env=host_env())
+        except Exception:
+            pass
+
+
+def list_audio_apps() -> list[tuple[str, int]]:
+    """Aplicações tocando áudio agora: [(nome, node_id), ...] via pw-dump.
+    node_id serve de --target ao pw-record. [] se pw-dump faltar/erro."""
+    if not shutil.which("pw-dump") or not shutil.which("pw-record"):
+        return []
+    try:
+        r = subprocess.run(["pw-dump"], capture_output=True, text=True,
+                           timeout=4, env=host_env())
+        data = json.loads(r.stdout)
+    except Exception:
+        return []
+    apps: list[tuple[str, int]] = []
+    for obj in data:
+        if obj.get("type") != "PipeWire:Interface:Node":
+            continue
+        props = obj.get("info", {}).get("props", {})
+        if props.get("media.class") != "Stream/Output/Audio":
+            continue
+        name = (props.get("application.name")
+                or props.get("node.description")
+                or props.get("node.name") or "?")
+        apps.append((str(name), int(obj["id"])))
+    return apps
+
+
+def _resolve_app_node(node_id: Optional[int], name: Optional[str]) -> Optional[int]:
+    """Nó de saída ATUAL da aplicação. Valida node_id (ainda é um stream de app);
+    se não (o PipeWire reusa ids — o id do diálogo pode ter virado outro nó, ex:
+    um relay que junta tudo), re-resolve pelo application.name. Sem isso o tap
+    linhava o nó errado e capturava todo o som."""
+    apps = list_audio_apps()               # [(name, node_id)] — só streams de app
+    ids = {nid for _n, nid in apps}
+    if node_id is not None and node_id in ids:
+        return node_id
+    if name:
+        for n, nid in apps:
+            if n == name:
+                return nid
+    return node_id
+
+
+def _spawn_parec_audio(ffmpeg: str, devices: list[str], dest: str):
+    """Compat: captura via parec para cada device pulse."""
+    return _spawn_pipe_audio(ffmpeg, [_parec_cmd(d) for d in devices], dest)
+
+
+def _spawn_pipe_audio(ffmpeg: str, sources: list, dest: str):
+    """Sobe os capturadores (parec/pw-record) + ffmpeg por pipes.
+
+    Cada item de `sources` é:
+      • uma lista argv (parec/pw-record simples), ou
+      • ("tap", app_node_id, cap_name, argv) — nó de captura isolado; após o
+        spawn, liga as portas da app (pw-link) para capturar SÓ ela.
+    Todos emitem s16le/48k/stereo no stdout; o ffmpeg lê cada pipe e mixa (amix).
+    Retorna (proc_ffmpeg, [procs]) ou (None, []).
     """
     read_fds: list[int] = []
     helpers: list[subprocess.Popen] = []
     try:
-        for dev in devices:
+        for src in sources:
+            is_tap = isinstance(src, tuple) and src and src[0] == "tap"
+            cmd = src[3] if is_tap else src
             r, w = os.pipe()
             helper = subprocess.Popen(
-                ["parec", "--raw", "--format=s16le", "--rate=48000",
-                 "--channels=2", f"--device={dev}"],
+                cmd,
                 stdin=subprocess.DEVNULL,
                 stdout=w,
                 stderr=subprocess.DEVNULL,
@@ -554,6 +680,9 @@ def _spawn_parec_audio(ffmpeg: str, devices: list[str], dest: str):
             os.close(w)
             read_fds.append(r)
             helpers.append(helper)
+            if is_tap:
+                # Liga a app ao nó de captura recém-criado (isolamento).
+                _link_app_capture(src[1], src[2])
 
         cmd = _build_audio_cmd_parec(ffmpeg, read_fds, dest)
         proc = subprocess.Popen(
@@ -719,11 +848,16 @@ class ScreenRecorder(QObject):
     def start(self, screen=None, source: str = "monitor",
               show_cursor: bool = True,
               restore_token: Optional[str] = None,
-              record_mic: bool = True) -> bool:
+              record_mic: bool = True,
+              audio_source: str = "system",
+              audio_app_node: Optional[int] = None,
+              audio_app_name: Optional[str] = None) -> bool:
         """Inicia a gravação.
 
-        record_mic: False grava só o som do sistema (monitor dos alto-falantes),
-        sem o microfone.
+        record_mic: inclui o microfone no áudio (mixado).
+        audio_source: "system" (todo o som do PC), "app" (só a aplicação em
+        audio_app_node, via pw-record) ou "none" (sem som do PC — só mic se on).
+        audio_app_node: node PipeWire da aplicação (ver list_audio_apps).
 
         screen: monitor a capturar no caminho silencioso (default: maior Hz).
         source: "monitor" (tela), "window" (uma janela) ou "region" (retângulo).
@@ -794,12 +928,13 @@ class ScreenRecorder(QObject):
         self._ffmpeg_path = ffmpeg
         self._rec_has_x264 = has_x264
         self._rec_vaapi_dev = vaapi_dev
-        self._rec_audio_devs = _default_audio_devices() if audio_mode else []
-        if not record_mic:
-            # Sem microfone: mantém só o monitor dos alto-falantes (som do
-            # sistema). O mic é o default-source (não termina em ".monitor").
-            self._rec_audio_devs = [d for d in self._rec_audio_devs
-                                    if d.endswith(".monitor")]
+        # Devices default (mic = default-source; monitor = som do sistema).
+        _devs = _default_audio_devices() if audio_mode else []
+        self._mic_dev = next((d for d in _devs if not d.endswith(".monitor")), None)
+        self._mon_dev = next((d for d in _devs if d.endswith(".monitor")), None)
+        self._rec_audio_source = audio_source
+        self._rec_audio_app_node = audio_app_node
+        self._rec_record_mic = record_mic
         self._proc = None
         self._frame_nbytes = 0
 
@@ -826,27 +961,46 @@ class ScreenRecorder(QObject):
         self._audio_dest = None
         self._audio_proc = None
         self._audio_helpers = []
-        if self._rec_audio_devs and audio_mode:
+        if audio_mode:
             self._audio_dest = save_dir / f".epicpen_rec_{ts}.mka"
-            if audio_mode == "parec":
-                self._audio_proc, self._audio_helpers = _spawn_parec_audio(
-                    ffmpeg, self._rec_audio_devs, str(self._audio_dest),
+            mic = self._mic_dev if record_mic else None
+            # Re-resolve o nó da app AGORA (o id do diálogo pode ter ficado stale).
+            if audio_source == "app":
+                audio_app_node = _resolve_app_node(audio_app_node, audio_app_name)
+            if audio_source == "app" and audio_app_node is not None and shutil.which("pw-record"):
+                # Captura ISOLADA da app: nó de captura sem autoconnect + pw-link
+                # das portas da app. Mic via parec. Ambos → pipes → mix.
+                cap_name = f"EpicPenTap{os.getpid()}"
+                sources: list = [_parec_cmd(mic)] if mic else []
+                sources.append(("tap", int(audio_app_node), cap_name,
+                                _pwrecord_tap_cmd(cap_name)))
+                self._audio_proc, self._audio_helpers = _spawn_pipe_audio(
+                    ffmpeg, sources, str(self._audio_dest),
                 )
             else:
-                acmd = _build_audio_cmd(
-                    ffmpeg, self._rec_audio_devs, str(self._audio_dest),
-                )
-                try:
-                    self._audio_proc = subprocess.Popen(
-                        acmd,
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        preexec_fn=_lower_priority,
-                        env=host_env(),
+                # system / none: caminho pulse/parec com a lista filtrada.
+                chosen = ([mic] if mic else [])
+                if audio_source == "system" and self._mon_dev:
+                    chosen.append(self._mon_dev)
+                if not chosen:
+                    self._audio_dest = None
+                elif audio_mode == "parec":
+                    self._audio_proc, self._audio_helpers = _spawn_parec_audio(
+                        ffmpeg, chosen, str(self._audio_dest),
                     )
-                except OSError:
-                    self._audio_proc = None
+                else:
+                    acmd = _build_audio_cmd(ffmpeg, chosen, str(self._audio_dest))
+                    try:
+                        self._audio_proc = subprocess.Popen(
+                            acmd,
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            preexec_fn=_lower_priority,
+                            env=host_env(),
+                        )
+                    except OSError:
+                        self._audio_proc = None
             if self._audio_proc is None:
                 self._audio_dest = None
                 self._audio_helpers = []
@@ -1157,6 +1311,24 @@ class ScreenRecorder(QObject):
         else:
             self._cleanup_temp(self._audio_dest)
             self.failed.emit("Nenhum frame capturado.")
+
+    def kill_all(self):
+        """Encerramento imediato (chamado no aboutToQuit do app): mata helper de
+        captura, ffmpeg e capturadores de áudio já. Sem isso, fechar o app com
+        uma gravação ativa deixa pw-record/parec pendurados (zumbis no PipeWire),
+        já que o teardown normal (stop) só roda ao parar a gravação."""
+        self._active = False
+        for proc in (self._helper, self._proc, self._audio_proc):
+            if proc is not None:
+                try:
+                    proc.terminate()
+                except (ProcessLookupError, OSError):
+                    pass
+        for h in self._audio_helpers:
+            try:
+                h.terminate()
+            except (ProcessLookupError, OSError):
+                pass
 
     def _stop_audio(self):
         """Encerra a captura de áudio: parec primeiro (EOF nos pipes finaliza
