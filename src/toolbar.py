@@ -1240,44 +1240,6 @@ class ToolbarWindow(QWidget):
         ):
             self._btn_record.setChecked(False)
 
-    def _screen_for_frame(self, w: int, h: int, pos_x=None, pos_y=None):
-        """Qual monitor o portal capturou. Prioriza a POSIÇÃO do stream (do
-        portal): distingue telas de mesma resolução. Fallback: casa por tamanho
-        (geometria × DPR); por fim, monitor atual."""
-        from PyQt6.QtWidgets import QApplication
-        from PyQt6.QtCore import QPoint
-        from recorder import NOPOS
-        if pos_x is not None and pos_x != NOPOS:
-            s = QApplication.screenAt(QPoint(int(pos_x), int(pos_y)))
-            if s is not None:
-                return s
-            for s in QApplication.screens():
-                g = s.geometry()
-                if g.x() == int(pos_x) and g.y() == int(pos_y):
-                    return s
-        for s in QApplication.screens():
-            g = s.geometry()
-            dpr = s.devicePixelRatio() or 1.0
-            if round(g.width() * dpr) == w and round(g.height() * dpr) == h:
-                return s
-        return self._current_screen
-
-    @staticmethod
-    def _marker_in_frame(img) -> bool:
-        """True se o marcador magenta do overlay aparece no canto do frame — ou
-        seja, o monitor capturado É o monitor onde o EpicPen está. Determinístico
-        (não depende do conteúdo da tela). img = QImage do 1º frame."""
-        w, h = img.width(), img.height()
-        if w < 40 or h < 40:
-            return True   # frame minúsculo — não bloqueia
-        pts = [(8, 8), (16, 16), (24, 24), (8, 24), (24, 8)]
-        hits = 0
-        for x, y in pts:
-            c = img.pixelColor(x, y)
-            if c.red() > 200 and c.green() < 70 and c.blue() > 200:
-                hits += 1
-        return hits >= 3
-
     def _exec_region_selector(self, px, screen=None):
         """Mostra o RegionSelector como Popup FILHO do overlay — assim herda o
         MONITOR do overlay (garantidamente o correto). Uma superfície layer-shell
@@ -1318,11 +1280,13 @@ class ToolbarWindow(QWidget):
         PRIMEIRO). Quando o 1º frame chega, o recorder emite region_needed e a
         UI mostra o seletor de retângulo sobre esse frame (_on_region_needed).
         Ordem: seletor do portal → desenho da região → gravação."""
-        # Marcador de detecção de monitor: existe só no monitor da coluna. Se
-        # não aparecer no frame, o portal capturou outro monitor → bloqueia.
-        # Overlay precisa estar VISÍVEL para o marcador ser composto/capturado.
+        # O seletor de retângulo (em _on_region_needed) mostra o PRÓPRIO frame
+        # capturado como fundo — o usuário desenha sobre o que será gravado, então
+        # não importa qual monitor o portal escolheu: o crop sai certo de qualquer
+        # forma. (Antes havia um gate de marcador magenta que bloqueava quando o
+        # monitor capturado ≠ monitor da coluna; em 2 telas de mesma resolução ele
+        # rejeitava TODA gravação — o frame vinha sem o marcador. Removido.)
         self._overlay.set_active(True)
-        self._overlay.set_detect_marker(True)
         if not self._recorder.start(
             screen=self._current_screen, source="region",
             show_cursor=show_cursor, restore_token=self._rec_tokens.get("region"),
@@ -1330,7 +1294,6 @@ class ToolbarWindow(QWidget):
             audio_source=audio_source, audio_app_node=audio_app_node,
             audio_app_name=audio_app_name,
         ):
-            self._overlay.set_detect_marker(False)
             self._btn_record.setChecked(False)
 
     def _on_region_needed(self, data: bytes, w: int, h: int, stride: int, fmt: str,
@@ -1346,22 +1309,6 @@ class ToolbarWindow(QWidget):
         # copy() destaca do buffer temporário (data some após o slot).
         img = QImage(data, w, h, stride, qfmt).copy()
         px = QPixmap.fromImage(img)
-
-        # Bloqueia se o monitor capturado não é o do EpicPen (desenho/overlay só
-        # existem no monitor da coluna; gravar outro daria recorte errado sem os
-        # desenhos). Detecção determinística pelo marcador do overlay.
-        marker_ok = self._marker_in_frame(img)
-        self._overlay.set_detect_marker(False)
-        if not marker_ok:
-            self._recorder.provide_region(None, cancelled=True)
-            self._btn_record.setChecked(False)
-            self._notify_saved(
-                "EpicPen — Gravação de região",
-                "A região só grava o monitor onde o EpicPen está.\n"
-                "Escolha esse monitor no seletor do sistema (ou marque "
-                "\"Escolher a tela novamente\" e selecione o monitor da coluna).",
-            )
-            return
 
         # Região grava o monitor onde o EpicPen está (o portal não revela qual
         # monitor foi capturado, e migrar entre outputs não funciona no KWin).

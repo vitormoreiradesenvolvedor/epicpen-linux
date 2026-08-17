@@ -141,7 +141,6 @@ class OverlayWindow(QWidget):
         # Marcador de detecção: quadrado magenta no canto (0,0). Só existe no
         # monitor onde o overlay está → se aparece no frame do portal, é o
         # monitor certo. Usado para bloquear gravação de região em outro monitor.
-        self._detect_marker = False
         # Preview de texto ao vivo (enquanto o diálogo de texto está aberto):
         # (pos, texto, família, tamanho, cor). None = sem preview.
         self._text_preview = None
@@ -416,16 +415,6 @@ class OverlayWindow(QWidget):
     def clear_text_preview(self):
         self._text_preview = None
         self.update()
-
-    # Cor e tamanho do marcador de detecção de monitor.
-    DETECT_COLOR = (255, 0, 255)
-    DETECT_SIZE = 48
-
-    def set_detect_marker(self, on: bool):
-        """Liga/desliga o marcador magenta no canto (detecção de monitor)."""
-        self._detect_marker = bool(on)
-        self.update()
-        self.repaint()   # garante composição imediata antes da captura
 
     def _paint_text_preview(self, painter):
         """Desenha o texto em digitação no ponto de inserção (preview ao vivo)."""
@@ -1712,13 +1701,6 @@ class OverlayWindow(QWidget):
 
         if self._record_region is not None:
             self._paint_record_mask(painter)
-
-        if self._detect_marker:
-            from PyQt6.QtGui import QColor
-            from PyQt6.QtCore import QRect
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
-            painter.fillRect(QRect(0, 0, self.DETECT_SIZE, self.DETECT_SIZE),
-                             QColor(*self.DETECT_COLOR))
 
         painter.end()
 
