@@ -381,11 +381,24 @@ def run(pipeline, appsink, restore_token: str | None, stream_pos=None) -> int:
 
 
 def _check() -> int:
-    """Sonda se o ambiente consegue consumir o stream: gi + Gst + pipewiresrc.
-    Usado por portalcast.available() no AppImage (env do bundle isolado)."""
+    """Sonda se dá pra REALMENTE consumir o stream do portal.
+
+    Não basta o plugin pipewiresrc existir: a libpipewire precisa inicializar —
+    pw_loop_new() exige o plugin SPA `support.system`. Um bundle que empacota a
+    libpipewire mas NÃO os plugins SPA (spa-0.2/) acha o pipewiresrc porém FALHA
+    no NULL→READY com "can't make support.system handle". Só achar o plugin dava
+    falso-positivo e o recorder escolhia esse interpretador quebrado. Levar o
+    pipewiresrc sozinho até READY dispara o pw_loop_new SEM conectar ao daemon
+    (não trava); se falhar, o portalcast descarta este interpretador e testa o
+    próximo (python do sistema, com o PipeWire do sistema, que casa com o daemon)."""
     try:
         Gst.init(None)
-        return 0 if Gst.ElementFactory.find("pipewiresrc") is not None else 1
+        src = Gst.ElementFactory.make("pipewiresrc", None)
+        if src is None:
+            return 1
+        ret = src.set_state(Gst.State.READY)
+        src.set_state(Gst.State.NULL)
+        return 1 if ret == Gst.StateChangeReturn.FAILURE else 0
     except Exception:
         return 1
 
